@@ -36,6 +36,19 @@ jobs:
           submodules: true
           fetch-depth: 0
 
+      - name: 🛠️ 选择 Xcode 16 (Swift 6)
+        run: |
+          XCODE_APP=$(find /Applications -maxdepth 1 -name "Xcode_16*.app" | sort -V | tail -n 1)
+          if [ -z "$XCODE_APP" ]; then
+            echo "❌ 未找到 Xcode 16，查找所有安装的 Xcode："
+            ls -d /Applications/Xcode*
+            exit 1
+          fi
+          echo "选用 Xcode: $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          echo "DEVELOPER_DIR=$XCODE_APP/Contents/Developer" >> "$GITHUB_ENV"
+          xcodebuild -version
+
       - name: 🔧 安装构建工具
         run: |
           brew install xcodegen cmake
@@ -89,7 +102,7 @@ jobs:
 
       - name: 🔨 编译 iOS 应用 (无签名)
         run: |
-          xcodebuild build \
+          xcodebuild -skipMacroValidation build \
             -project mobileLLM.xcodeproj \
             -scheme mobileLLM \
             -configuration Release \
