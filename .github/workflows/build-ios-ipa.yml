@@ -24,7 +24,7 @@ on:
 jobs:
   ios-ipa:
     name: 构建 iOS IPA
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 90
     permissions:
       contents: write
@@ -36,11 +36,11 @@ jobs:
           submodules: true
           fetch-depth: 0
 
-      - name: 🛠️ 选择 Xcode 16 (Swift 6)
+      - name: 🛠️ 选择最新 Xcode (支持 Swift 6.1+)
         run: |
-          XCODE_APP=$(find /Applications -maxdepth 1 -name "Xcode_16*.app" | sort -V | tail -n 1)
+          XCODE_APP=$(find /Applications -maxdepth 1 -name "Xcode*.app" | sort -V | tail -n 1)
           if [ -z "$XCODE_APP" ]; then
-            echo "❌ 未找到 Xcode 16，查找所有安装的 Xcode："
+            echo "❌ 未找到 Xcode，查找所有安装的 Xcode："
             ls -d /Applications/Xcode*
             exit 1
           fi
@@ -48,6 +48,7 @@ jobs:
           sudo xcode-select -s "$XCODE_APP/Contents/Developer"
           echo "DEVELOPER_DIR=$XCODE_APP/Contents/Developer" >> "$GITHUB_ENV"
           xcodebuild -version
+          swift --version
 
       - name: 🔧 安装构建工具
         run: |
@@ -61,11 +62,24 @@ jobs:
           path: Packages/LLMEngineLlama/Vendor/llama.xcframework
           key: llama-xcframework-${{ runner.os }}-${{ hashFiles('scripts/build-llama-xcframework.sh') }}
 
-      - name: 🏗️ 编译 llama.xcframework (仅当无缓存时)
-        if: steps.cache-llama.outputs.cache-hit != 'true'
+      - name: 🏗️ 编译 llama.xcframework (若无有效产物)
         run: |
-          chmod +x ./scripts/build-llama-xcframework.sh
-          ./scripts/build-llama-xcframework.sh
+          if [ ! -d "Packages/LLMEngineLlama/Vendor/llama.xcframework" ] || [ -z "$(ls -A Packages/LLMEngineLlama/Vendor/llama.xcframework 2>/dev/null)" ]; then
+            echo "⚡ llama.xcframework 未命中或内容为空，开始从源码构建..."
+            chmod +x ./scripts/build-llama-xcframework.sh
+            ./scripts/build-llama-xcframework.sh
+          else
+            echo "✅ 成功命中 llama.xcframework 缓存！"
+          fi
+
+      - name: 🔍 验证 llama.xcframework 产物完整性
+        run: |
+          if [ ! -d "Packages/LLMEngineLlama/Vendor/llama.xcframework" ]; then
+            echo "❌ 错误: Packages/LLMEngineLlama/Vendor/llama.xcframework 仍不存在！"
+            exit 1
+          fi
+          echo "✅ 确认 llama.xcframework 就绪:"
+          ls -la Packages/LLMEngineLlama/Vendor/llama.xcframework
 
       - name: 📝 准备配置文件与工程
         run: |
