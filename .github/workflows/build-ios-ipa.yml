@@ -1,0 +1,134 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: '发布到 GitHub Release'
+        required: false
+        default: false
+        type: boolean
+
+      release_tag:
+        description: 'Release 标签（如 v0.1.0，留空则自动根据版本生成）'
+        required: false
+        default: ''
+        type: string
+
+      prerelease:
+        description: '是否标记为预发布 (Pre-release)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  ios-ipa:
+    name: 构建 iOS IPA
+    runs-on: macos-14
+    timeout-minutes: 90
+    permissions:
+      contents: write
+
+    steps:
+      - name: 📦 检出代码
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: 🔧 安装构建工具
+        run: |
+          brew install xcodegen cmake
+          echo "/opt/homebrew/bin:/usr/local/bin" >> "$GITHUB_PATH"
+
+      - name: 🗄️ 缓存 llama.xcframework
+        id: cache-llama
+        uses: actions/cache@v4
+        with:
+          path: Packages/LLMEngineLlama/Vendor/llama.xcframework
+          key: llama-xcframework-${{ runner.os }}-${{ hashFiles('scripts/build-llama-xcframework.sh') }}
+
+      - name: 🏗️ 编译 llama.xcframework (仅当无缓存时)
+        if: steps.cache-llama.outputs.cache-hit != 'true'
+        run: |
+          chmod +x ./scripts/build-llama-xcframework.sh
+          ./scripts/build-llama-xcframework.sh
+
+      - name: 📝 准备配置文件与工程
+        run: |
+          cp Signing.xcconfig.example Signing.xcconfig
+          xcodegen generate
+
+      - name: 🏷️ 计算版本号
+        id: version
+        shell: bash
+        run: |
+          VERSION=$(grep 'MARKETING_VERSION' project.yml | head -n 1 | awk -F '"' '{print $2}')
+          if [ -z "$VERSION" ]; then
+            VERSION="0.1.0"
+          fi
+
+          if [ "${{ github.event.inputs.publish_release }}" != "true" ]; then
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            VERSION="${VERSION}_${SHORT_SHA}"
+          elif [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            TAG="${{ github.event.inputs.release_tag }}"
+            VERSION="${TAG#v}"
+          fi
+
+          if [ -n "${{ github.event.inputs.release_tag }}" ]; then
+            TAG_NAME="${{ github.event.inputs.release_tag }}"
+          else
+            TAG_NAME="v${VERSION}"
+          fi
+
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "TAG_NAME=$TAG_NAME" >> "$GITHUB_ENV"
+          echo "版本号: $VERSION"
+          echo "Release 标签: $TAG_NAME"
+
+      - name: 🔨 编译 iOS 应用 (无签名)
+        run: |
+          xcodebuild build \
+            -project mobileLLM.xcodeproj \
+            -scheme mobileLLM \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            COMPILER_INDEX_STORE_ENABLE=NO
+
+          APP_PATH=$(find build/DerivedData/Build/Products/Release-iphoneos -name "mobileLLM.app" -type d | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ 未找到 mobileLLM.app"
+            exit 1
+          fi
+          echo "✅ 找到构建产物: $APP_PATH"
+
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qr "mobileLLM_${VERSION}.ipa" Payload
+          rm -rf Payload
+
+          echo "✅ 生成 IPA 完成:"
+          ls -lh mobileLLM_*.ipa
+
+      - name: 🚀 发布到 GitHub Release
+        if: ${{ github.event.inputs.publish_release == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: mobileLLM ${{ env.TAG_NAME }}
+          prerelease: ${{ github.event.inputs.prerelease }}
+          files: mobileLLM_*.ipa
+
+      - name: 📤 上传构建产物至 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobileLLM-IPA
+          path: mobileLLM_*.ipa
+          retention-days: 14
