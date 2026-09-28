@@ -457,7 +457,7 @@ struct AppFrozenInputBuilder: Sendable {
         let effectiveContext = online
             ? UInt64(snapshot.onlineContextLength)
             : UInt64(ContextPolicy.effective(requested: snapshot.contextLength, model: snapshot.model))
-        let peakMemoryCeiling = max(UInt64(ProcessInfo.processInfo.physicalMemory), 16 * 1_024 * 1_024 * 1_024)
+        let peakMemoryCeiling = UInt64(ProcessInfo.processInfo.physicalMemory)
         let budget = try AgentBudget.firstReleaseDefaults(
             contextTokensPerAttempt: effectiveContext,
             outputTokens: outputBudget(snapshot: snapshot).maximumOutputTokens,

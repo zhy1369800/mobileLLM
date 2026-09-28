@@ -1431,8 +1431,7 @@ public final class ChatStore {
         turn.emptyOutcome = reason == .cancelledByUser ? .stopped : .failed
         if let currentStreaming = streaming, streamingMessageID == assistantMessageID {
             if !currentStreaming.answer.isEmpty {
-                turn.text = currentStreaming.answer
-                turn.emptyOutcome = nil
+                turn.answer = currentStreaming.answer
             }
             if !currentStreaming.reasoning.isEmpty {
                 turn.reasoning = currentStreaming.reasoning
