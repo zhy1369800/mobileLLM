@@ -265,6 +265,30 @@ final class ResponsesAPIModelProviderTests: XCTestCase {
         )
     }
 
+    func testResolveEndpointAndExplicitChatCompletionsDialect() {
+        XCTAssertEqual(
+            ResponsesAPIModelProvider.wireDialect(
+                baseURL: "https://gateway.example/v1/chat/completions",
+                modelID: "any-model"
+            ),
+            .deepSeekChatCompletions
+        )
+        let baseStandard = URL(string: "https://gateway.example/v1")!
+        XCTAssertEqual(
+            ResponsesAPIModelProvider.resolveEndpoint(baseURL: baseStandard, dialect: .responses).absoluteString,
+            "https://gateway.example/v1/responses"
+        )
+        XCTAssertEqual(
+            ResponsesAPIModelProvider.resolveEndpoint(baseURL: baseStandard, dialect: .deepSeekChatCompletions).absoluteString,
+            "https://gateway.example/v1/chat/completions"
+        )
+        let baseExplicit = URL(string: "https://gateway.example/v1/chat/completions")!
+        XCTAssertEqual(
+            ResponsesAPIModelProvider.resolveEndpoint(baseURL: baseExplicit, dialect: .deepSeekChatCompletions).absoluteString,
+            "https://gateway.example/v1/chat/completions"
+        )
+    }
+
     func testChatCompletionsBodyAndParserUseDocumentedDeepSeekShape() throws {
         let descriptor = try ModelFixture.tool(name: "web_search")
         let fixture = try ModelFixture(

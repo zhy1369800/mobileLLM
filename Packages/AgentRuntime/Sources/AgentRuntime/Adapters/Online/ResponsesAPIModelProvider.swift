@@ -206,16 +206,13 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
         else {
             throw AgentModelProviderFailure(try Self.invalidBaseURLFailure())
         }
-        let dialect = Self.wireDialect(
+        var activeDialect = Self.wireDialect(
             baseURL: configuration.baseURL,
             modelID: request.selection.modelID.rawValue
         )
         let timeout = await timeouts.take(for: request.requestID) ?? 60
-        func makeRequest() -> URLRequest {
-            let endpoint = switch dialect {
-            case .responses: baseURL.appending(path: "responses")
-            case .deepSeekChatCompletions: baseURL.appending(path: "chat/completions")
-            }
+        func makeRequest(for currentDialect: WireDialect) -> URLRequest {
+            let endpoint = Self.resolveEndpoint(baseURL: baseURL, dialect: currentDialect)
             var urlRequest = URLRequest(url: endpoint)
             urlRequest.httpMethod = "POST"
             urlRequest.timeoutInterval = timeout
@@ -224,13 +221,15 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
             return urlRequest
         }
         func body(
+            for currentDialect: WireDialect? = nil,
             reasoningDisabled: Bool? = nil,
             maxOutputTokensOverride: UInt64? = nil,
             omitReasoning: Bool = false
         ) throws -> Data {
-            switch dialect {
+            let dialectToUse = currentDialect ?? activeDialect
+            switch dialectToUse {
             case .responses:
-                try Self.requestBody(
+                return try Self.requestBody(
                     request: request,
                     baseURL: configuration.baseURL,
                     reasoningDisabled: reasoningDisabled,
@@ -240,7 +239,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                     stream: true
                 )
             case .deepSeekChatCompletions:
-                try Self.chatCompletionsRequestBody(
+                return try Self.chatCompletionsRequestBody(
                     request: request,
                     reasoningDisabled: reasoningDisabled,
                     maxOutputTokensOverride: maxOutputTokensOverride,
@@ -262,9 +261,10 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
             _ payload: Data,
             allowEffortFallback: Bool,
             allowAutoFallback: Bool,
+            allowDialectFallback: Bool = true,
             streamEmission: Bool = true
         ) async throws -> (parsed: ParsedResponse, streamed: Bool, data: Data) {
-            var urlRequest = makeRequest()
+            var urlRequest = makeRequest(for: activeDialect)
             var boundedPayload = payload
             let spent = await accounting.usage
             if spent.outputTokens > 0 || spent.inputTokens > 0 {
@@ -276,7 +276,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                 guard var fields = try JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
                     throw AgentContractError.invalidEventSequence("invalid online request object")
                 }
-                let field = dialect == .responses ? "max_output_tokens" : "max_tokens"
+                let field = activeDialect == .responses ? "max_output_tokens" : "max_tokens"
                 let requested = (fields[field] as? NSNumber)?.uint64Value ?? remaining
                 fields[field] = min(requested, remaining)
                 boundedPayload = try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])
@@ -289,6 +289,20 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
             guard http?.statusCode == 200 else {
                 var data = Data()
                 for try await byte in bytes { data.append(byte) }
+                // Seamlessly fall back to chat/completions if a third-party gateway returns 404 for /responses
+                if http?.statusCode == 404,
+                   allowDialectFallback,
+                   activeDialect == .responses {
+                    activeDialect = .deepSeekChatCompletions
+                    let fallbackBody = try body(for: activeDialect)
+                    return try await attempt(
+                        fallbackBody,
+                        allowEffortFallback: allowEffortFallback,
+                        allowAutoFallback: allowAutoFallback,
+                        allowDialectFallback: false,
+                        streamEmission: streamEmission
+                    )
+                }
                 // Some gateways reject the reasoning-effort field entirely (HTTP 400 mentioning
                 // "reasoning"); retry once with the field omitted rather than failing the turn.
                 if http?.statusCode == 400,
@@ -305,6 +319,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                                 fallbackBody,
                                 allowEffortFallback: false,
                                 allowAutoFallback: false,
+                                allowDialectFallback: allowDialectFallback,
                                 streamEmission: streamEmission
                             )
                         }
@@ -324,6 +339,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                                 fallbackBody,
                                 allowEffortFallback: false,
                                 allowAutoFallback: false,
+                                allowDialectFallback: allowDialectFallback,
                                 streamEmission: streamEmission
                             )
                         }
@@ -339,7 +355,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
             let contentType = (http?.value(forHTTPHeaderField: "Content-Type") ?? "")
                 .lowercased()
             if contentType.contains("text/event-stream") {
-                let parsed = switch dialect {
+                let parsed = switch activeDialect {
                 case .responses:
                     try await Self.consumeEventStream(
                         bytes,
@@ -360,7 +376,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
             }
             var data = Data()
             for try await byte in bytes { data.append(byte) }
-            let parsed = switch dialect {
+            let parsed = switch activeDialect {
             case .responses: try Self.parseResponse(data)
             case .deepSeekChatCompletions: try Self.parseChatCompletion(data)
             }
@@ -828,7 +844,23 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
 
     // MARK: - Pure request/response mapping (unit-tested)
 
+    static func resolveEndpoint(baseURL: URL, dialect: WireDialect) -> URL {
+        let path = baseURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let target = dialect == .responses ? "responses" : "chat/completions"
+        if path.hasSuffix(target) {
+            return baseURL
+        }
+        if dialect == .deepSeekChatCompletions && path.hasSuffix("responses") {
+            return baseURL.deletingLastPathComponent().appending(path: "chat/completions")
+        }
+        return baseURL.appending(path: target)
+    }
+
     static func wireDialect(baseURL: String, modelID: String) -> WireDialect {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if trimmed.hasSuffix("/chat/completions") || trimmed.hasSuffix("/chat/completions/") {
+            return .deepSeekChatCompletions
+        }
         let host = URL(string: baseURL)?.host?.lowercased() ?? ""
         // DeepSeek's public OpenAI-format contract is Chat Completions. Its undocumented
         // `/responses` compatibility route currently ignores the thinking toggle, which can spend
