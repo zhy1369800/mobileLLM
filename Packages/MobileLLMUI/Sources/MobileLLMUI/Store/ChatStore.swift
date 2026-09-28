@@ -1429,6 +1429,15 @@ public final class ChatStore {
         }
         var turn = conversations[ci].messages[mi]
         turn.emptyOutcome = reason == .cancelledByUser ? .stopped : .failed
+        if let currentStreaming = streaming, streamingMessageID == assistantMessageID {
+            if !currentStreaming.answer.isEmpty {
+                turn.text = currentStreaming.answer
+                turn.emptyOutcome = nil
+            }
+            if !currentStreaming.reasoning.isEmpty {
+                turn.reasoning = currentStreaming.reasoning
+            }
+        }
         conversations[ci].messages[mi] = turn
         conversations[ci].updatedAt = Date()
         persist(conversations[ci])

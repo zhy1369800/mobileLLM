@@ -310,7 +310,9 @@ struct AppFrozenInputBuilder: Sendable {
         snapshot: AgentRunRequestSnapshot
     ) -> (mode: AgentOutputBudgetMode, maximumOutputTokens: UInt64) {
         guard Self.isOnline(snapshot: snapshot) else {
-            return (.explicit, UInt64(snapshot.maxTokens))
+            let requested = UInt64(snapshot.maxTokens > 0 ? snapshot.maxTokens : 2_048)
+            let effective = snapshot.thinkingEnabled ? max(requested * 2, 8_192) : max(requested, 4_096)
+            return (.explicit, effective)
         }
         let context = UInt64(snapshot.onlineContextLength)
         let serviceCap = snapshot.onlineMaximumOutputTokens
@@ -455,14 +457,11 @@ struct AppFrozenInputBuilder: Sendable {
         let effectiveContext = online
             ? UInt64(snapshot.onlineContextLength)
             : UInt64(ContextPolicy.effective(requested: snapshot.contextLength, model: snapshot.model))
+        let peakMemoryCeiling = max(UInt64(ProcessInfo.processInfo.physicalMemory), 16 * 1_024 * 1_024 * 1_024)
         let budget = try AgentBudget.firstReleaseDefaults(
             contextTokensPerAttempt: effectiveContext,
             outputTokens: outputBudget(snapshot: snapshot).maximumOutputTokens,
-            // Observed on device: the Gemma 4 E2B vision path peaks at ~1.30 GB (weights + mmproj +
-            // KV + image encode), so a 1 GiB run ceiling fails settlement even though the model
-            // answered correctly. 2 GiB covers every first-release curated model; it is a hard
-            // per-run ceiling, not a residency admission check.
-            peakMemoryBytes: 2_147_483_648
+            peakMemoryBytes: peakMemoryCeiling
         )
         var ceilingCapabilities = AgentCapabilitySet([
             .networkRead, .localRead, .localWrite, .unknownExternal,

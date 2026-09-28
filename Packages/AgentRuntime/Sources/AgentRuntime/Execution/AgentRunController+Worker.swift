@@ -667,18 +667,12 @@ extension AgentRunController {
             redaction: try RedactionMetadata(classification: .sensitive, policyVersion: 1)
         )
         let provider = try modelProviders.provider(for: frozen.modelSelection)
-        // Local decodes are bounded tightly (a stuck engine should fail fast); online providers make a
-        // real network round trip that legitimately runs minutes for long answers, so the per-attempt
-        // ceiling is generous and the run budget still bounds the whole run (15 minutes by default).
-        let attemptTimeoutCap: UInt64 = provider.descriptor.location == .remote ? 300_000 : 60_000
-        let attemptActiveReservation: UInt64 = if provider.descriptor.location == .remote {
-            // Remote providers may legitimately use the full five-minute request window. Reserve
-            // that window plus bounded cancellation/settlement grace; the prior fixed 120s local
-            // allowance made a healthy long response fail only when its usage was committed.
-            min(attemptTimeoutCap + 30_000, facts.submission!.request.payload.budget.limits[.activeMilliseconds])
-        } else {
-            min(2 * attemptTimeoutCap, facts.submission!.request.payload.budget.limits[.activeMilliseconds])
-        }
+        // Both local and remote attempts allow up to 5 minutes so complex reasoning and long answers can finish safely.
+        let attemptTimeoutCap: UInt64 = 300_000
+        let attemptActiveReservation: UInt64 = min(
+            attemptTimeoutCap + 60_000,
+            facts.submission!.request.payload.budget.limits[.activeMilliseconds]
+        )
         let prepContext = try ModelPreparationContext(
             conversationID: facts.submission!.request.payload.conversationID,
             modelPolicy: facts.submission!.request.payload.modelPolicy,
