@@ -304,17 +304,23 @@ public struct DeterministicToolSelector: Sendable {
         let name = descriptor.id.logicalID.name.lowercased()
         var score = 0
         if ["web_search", "fetch_webpage", "wikipedia"].contains(name) {
-            if ["搜索", "查找", "搜一下", "新闻", "百度", "谷歌", "查一下", "网页", "浏览", "上网", "百科"].contains(where: { lower.contains($0) }) {
+            let searchKeywords = [
+                "搜索", "查找", "搜一下", "新闻", "百度", "谷歌", "查一下", "网页", "浏览",
+                "上网", "百科", "天气", "气温", "最新", "实时", "行情", "汇率", "股价", "今天发生了什么"
+            ]
+            if searchKeywords.contains(where: { lower.contains($0) }) {
                 score += 300
             }
         }
         if ["calculator"].contains(name) {
-            if ["计算", "等于多少", "求和", "算一下", "算法", "加法", "减法", "乘法", "除法"].contains(where: { lower.contains($0) }) {
+            let calcKeywords = ["计算", "等于多少", "求和", "算一下", "算法", "加法", "减法", "乘法", "除法", "算算"]
+            if calcKeywords.contains(where: { lower.contains($0) }) {
                 score += 300
             }
         }
         if ["current_datetime", "clock"].contains(name) {
-            if ["几点", "时间", "日期", "今天几号", "星期几", "当前时间"].contains(where: { lower.contains($0) }) {
+            let timeKeywords = ["几点", "时间", "日期", "今天几号", "星期几", "当前时间", "现在时间", "今天是几月几日"]
+            if timeKeywords.contains(where: { lower.contains($0) }) {
                 score += 300
             }
         }

@@ -56,6 +56,34 @@ private actor ResponsesAPITimeoutStore {
     }
 }
 
+/// Cache of negotiated wire dialects keyed by normalized service base URL. Avoids redundant 404/405
+/// round-trips against third-party OpenAI-compatible gateways that only support /chat/completions.
+private final class ResponsesAPIDialectCache: @unchecked Sendable {
+    static let shared = ResponsesAPIDialectCache()
+    private let lock = NSLock()
+    private var entries: [String: WireDialect] = [:]
+
+    func dialect(for baseURL: String) -> WireDialect? {
+        lock.lock()
+        defer { lock.unlock() }
+        let normalized = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return entries[normalized]
+    }
+
+    func remember(_ dialect: WireDialect, for baseURL: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        let normalized = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        entries[normalized] = dialect
+    }
+
+    func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        entries.removeAll()
+    }
+}
+
 /// An `AgentModelProvider` that calls an OpenAI-compatible `/responses` endpoint, or the documented
 /// Chat Completions endpoint for the official DeepSeek service. The whole request is one prepared,
 /// authorized external operation (data egress, spec §15.1): every generation runs inside the model
@@ -65,6 +93,11 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
     /// Advertising ceiling for OpenAI-compatible services without per-model metadata (matches the
     /// context window the app already advertises for online runs).
     public static let maximumContextTokens: UInt64 = 200_000
+
+    /// Resets the dialect negotiation cache. Used primarily by test suites.
+    public static func resetDialectCache() {
+        ResponsesAPIDialectCache.shared.reset()
+    }
 
     public let descriptor: AgentModelProviderDescriptor
     /// Resolved on every generation so settings/Keychain changes apply without an app restart. The
@@ -289,11 +322,13 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
             guard http?.statusCode == 200 else {
                 var data = Data()
                 for try await byte in bytes { data.append(byte) }
-                // Seamlessly fall back to chat/completions if a third-party gateway returns 404 for /responses
-                if http?.statusCode == 404,
+                // Seamlessly fall back to chat/completions if a third-party gateway returns 404 or 405 for /responses
+                if let status = http?.statusCode,
+                   (status == 404 || status == 405),
                    allowDialectFallback,
                    activeDialect == .responses {
                     activeDialect = .deepSeekChatCompletions
+                    ResponsesAPIDialectCache.shared.remember(.deepSeekChatCompletions, for: configuration.baseURL)
                     let fallbackBody = try body(for: activeDialect)
                     return try await attempt(
                         fallbackBody,
@@ -857,6 +892,9 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
     }
 
     static func wireDialect(baseURL: String, modelID: String) -> WireDialect {
+        if let cached = ResponsesAPIDialectCache.shared.dialect(for: baseURL) {
+            return cached
+        }
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if trimmed.hasSuffix("/chat/completions") || trimmed.hasSuffix("/chat/completions/") {
             return .deepSeekChatCompletions
