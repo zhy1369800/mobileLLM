@@ -449,6 +449,28 @@ final class ToolSelectorTests: XCTestCase {
         )
     }
 
+    func testLocalizedAndMetaToolQueries() throws {
+        let calc = try descriptor(provider: "builtin", name: "calculator", effects: [.localPure])
+        let search = try descriptor(provider: "builtin", name: "web_search", effects: [.networkRead])
+        let policy = try policy(allowed: [calc.id.logicalID, search.id.logicalID])
+        let catalog = try catalog([calc, search])
+
+        // Meta query: "有哪些工具" should return both allowed tools
+        let metaInput = try input(policy: policy, catalog: catalog, request: "你有哪些工具可以使用？")
+        let metaResult = try DeterministicToolSelector().select(metaInput)
+        XCTAssertEqual(metaResult.descriptors.map(\.id.logicalID), [calc.id.logicalID, search.id.logicalID])
+
+        // Localized query: "帮我计算一下" should return calculator
+        let calcInput = try input(policy: policy, catalog: catalog, request: "帮我计算一下这道数学题")
+        let calcResult = try DeterministicToolSelector().select(calcInput)
+        XCTAssertEqual(calcResult.descriptors.map(\.id.logicalID), [calc.id.logicalID])
+
+        // Localized query: "搜索新闻" should return web_search
+        let searchInput = try input(policy: policy, catalog: catalog, request: "在线搜索今天的新闻")
+        let searchResult = try DeterministicToolSelector().select(searchInput)
+        XCTAssertEqual(searchResult.descriptors.map(\.id.logicalID), [search.id.logicalID])
+    }
+
     private func jsonObject<Value: Encodable>(_ value: Value) throws -> [String: Any] {
         let data = try JSONEncoder().encode(value)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
