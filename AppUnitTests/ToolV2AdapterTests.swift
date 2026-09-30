@@ -650,6 +650,61 @@ final class ToolV2AdapterTests: XCTestCase {
             context: context
         )
     }
+
+    @MainActor
+    func testOnlineModelPinsAllAllowedToolsBypassingKeywordRestriction() async throws {
+        let userMessageID = UUID()
+        let snapshot = AgentRunRequestSnapshot(
+            conversationID: UUID(),
+            userTurnID: userMessageID,
+            text: "特斯拉上季度财务情况如何",
+            imageRefs: [],
+            messages: [Message(id: userMessageID, role: .user, answer: "特斯拉上季度财务情况如何")],
+            systemPrompt: "You are helpful.",
+            memoryFacts: [],
+            activeSkill: nil,
+            model: LLMCatalog.bonsai8b,
+            variant: LLMCatalog.bonsai8b.defaultVariantValue,
+            weightsDirectory: FileManager.default.temporaryDirectory,
+            thinkingEnabled: false,
+            contextLength: 8_192,
+            maxTokens: 512,
+            temperature: 0.2,
+            topP: 0.9,
+            topK: 40,
+            repetitionPenalty: 1.0,
+            toolsEnabled: true,
+            localToolNames: AppLocalToolIDs.names,
+            memorySeamAvailable: true,
+            eventSeamAvailable: true,
+            locationSeamAvailable: true,
+            mcpToolDescriptors: [],
+            webSearchDestinations: [],
+            toolPolicy: nil,
+            onlineModelEnabled: true,
+            onlineModelID: "deepseek-chat",
+            onlineServiceID: "responses-api-key",
+            onlineConfigurationID: nil,
+            onlineReasoningEnabled: false,
+            onlineContextLength: 128_000,
+            onlineOutputBudgetAuto: true,
+            onlineMaximumOutputTokens: nil,
+            approvalMode: .safePreset,
+            onlineReasoningEffort: nil
+        )
+
+        let frozen = try await AgentRunInputs.freeze(snapshot: snapshot)
+        // Verify all allowed tools are directly pinned
+        XCTAssertEqual(
+            Set(frozen.toolPolicy.pinnedToolIDs),
+            Set(frozen.toolPolicy.allowedToolIDs)
+        )
+        // Verify selected tools without any keyword match still yields all allowed tools
+        let selected = try frozen.selectedTools(latestUserRequest: snapshot.text)
+        let selectedLogicalIDs = Set(selected.descriptors.map(\.id.logicalID))
+        let allowedLogicalIDs = Set(frozen.toolPolicy.allowedToolIDs)
+        XCTAssertEqual(selectedLogicalIDs, allowedLogicalIDs)
+    }
 }
 
 // MARK: - Canned HTTP fixture
