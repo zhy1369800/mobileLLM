@@ -296,9 +296,9 @@ struct MobileLLMApp: App {
         if ProcessInfo.processInfo.environment["MOBILELLM_DISABLE_THERMAL"] == "1" {
             ThermalGovernor.isPacingEnabled = false
         }
-        // Multi-GB weights live under Application Support (a no-backup dir so they don't hit iCloud).
-        let base = URL.applicationSupportDirectory.appending(path: "mobileLLM", directoryHint: .isDirectory)
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        // Multi-GB weights live under Documents/models (visible in iOS Files app & USB sharing,
+        // excluded from iCloud backup, and migrated from legacy Application Support if present).
+        let base = Self.setupModelStorageBase()
         let downloader = ModelDownloader(downloadBase: base)
         // App.init runs on the main thread; adopt that isolation to build the @MainActor container.
         // The Apple engine is registered unconditionally, even on an OS with no FoundationModels: it owns
@@ -615,6 +615,38 @@ struct MobileLLMApp: App {
             }
         }
         #endif
+    }
+
+    /// Sets up the user-accessible model storage directory under Documents so weights appear in the
+    /// iOS Files app ("On My iPhone") and iTunes/Finder file sharing, while explicitly excluding them
+    /// from iCloud backup. Automatically migrates existing downloads from Application Support if present.
+    private static func setupModelStorageBase() -> URL {
+        let fm = FileManager.default
+        let documentsDir = URL.documentsDirectory
+        let modelsDir = documentsDir.appending(path: "models", directoryHint: .isDirectory)
+        try? fm.createDirectory(at: modelsDir, withIntermediateDirectories: true)
+
+        // Exclude the models directory from iCloud backup so multi-GB files do not exhaust iCloud storage.
+        var resourceValues = URLResourceValues()
+        resourceValues.isExcludedFromBackup = true
+        var mutableModelsDir = modelsDir
+        try? mutableModelsDir.setResourceValues(resourceValues)
+
+        // Seamless migration: move any existing weights from legacy Application Support/mobileLLM/models.
+        let legacyBase = URL.applicationSupportDirectory.appending(path: "mobileLLM", directoryHint: .isDirectory)
+        let legacyModels = legacyBase.appending(path: "models", directoryHint: .isDirectory)
+        if fm.fileExists(atPath: legacyModels.path) {
+            if let items = try? fm.contentsOfDirectory(atPath: legacyModels.path) {
+                for item in items {
+                    let source = legacyModels.appending(path: item)
+                    let destination = modelsDir.appending(path: item)
+                    if !fm.fileExists(atPath: destination.path) {
+                        try? fm.moveItem(at: source, to: destination)
+                    }
+                }
+            }
+        }
+        return documentsDir
     }
 
     private var initialSection: AppSection {

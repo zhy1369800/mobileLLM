@@ -64,6 +64,8 @@ targets:
         INFOPLIST_KEY_CFBundleDisplayName: mobileLLM
         INFOPLIST_KEY_LSApplicationCategoryType: "public.app-category.productivity"
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIFileSharingEnabled: YES
+        INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES
         # Support all four orientations so the universal iOS target remains compatible with iPad
         # Split View / Slide Over and passes App Store orientation validation without requiring full screen.
         INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
