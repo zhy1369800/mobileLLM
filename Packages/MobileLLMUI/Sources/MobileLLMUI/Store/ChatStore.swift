@@ -1573,9 +1573,20 @@ public final class ChatStore {
               conversations[ci].messages[mi].role == .user else { return }
         purgeAttachments(of: Array(conversations[ci].messages[(mi + 1)...]))
         conversations[ci].messages.removeSubrange((mi + 1)...)
-        conversations[ci].messages[mi].answer = text
-        let user = conversations[ci].messages[mi]
-        let assistant = Message(role: .assistant, answer: "", parentID: userMessageID)
+        let oldUser = conversations[ci].messages[mi]
+        // Clone the user message with a fresh UUID so that re-submitting to the durable
+        // executor never hits a UNIQUE constraint on the messages table (the original UUID
+        // is already committed from the first run).
+        let user = Message(
+            id: UUID(),
+            role: .user,
+            createdAt: Date(),
+            answer: text,
+            attachments: oldUser.attachments,
+            parentID: oldUser.parentID
+        )
+        conversations[ci].messages[mi] = user
+        let assistant = Message(role: .assistant, answer: "", parentID: user.id)
         conversations[ci].messages.append(assistant)
         conversations[ci].updatedAt = Date()
         if let agentRuns {
