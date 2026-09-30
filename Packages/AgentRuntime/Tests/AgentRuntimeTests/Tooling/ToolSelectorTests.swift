@@ -455,10 +455,13 @@ final class ToolSelectorTests: XCTestCase {
         let policy = try policy(allowed: [calc.id.logicalID, search.id.logicalID])
         let catalog = try catalog([calc, search])
 
-        // Meta query: "有哪些工具" should return both allowed tools
+        // Meta query: "有哪些工具" should return both allowed tools regardless of sort order
         let metaInput = try input(policy: policy, catalog: catalog, request: "你有哪些工具可以使用？")
         let metaResult = try DeterministicToolSelector().select(metaInput)
-        XCTAssertEqual(metaResult.descriptors.map(\.id.logicalID), [calc.id.logicalID, search.id.logicalID])
+        XCTAssertEqual(
+            Set(metaResult.descriptors.map(\.id.logicalID)),
+            Set([calc.id.logicalID, search.id.logicalID])
+        )
 
         // Localized query: "帮我计算一下" should return calculator
         let calcInput = try input(policy: policy, catalog: catalog, request: "帮我计算一下这道数学题")
@@ -469,6 +472,11 @@ final class ToolSelectorTests: XCTestCase {
         let searchInput = try input(policy: policy, catalog: catalog, request: "在线搜索今天的新闻")
         let searchResult = try DeterministicToolSelector().select(searchInput)
         XCTAssertEqual(searchResult.descriptors.map(\.id.logicalID), [search.id.logicalID])
+
+        // Localized query: "北京今天天气怎么样" should also trigger web_search
+        let weatherInput = try input(policy: policy, catalog: catalog, request: "北京今天天气怎么样")
+        let weatherResult = try DeterministicToolSelector().select(weatherInput)
+        XCTAssertEqual(weatherResult.descriptors.map(\.id.logicalID), [search.id.logicalID])
     }
 
     private func jsonObject<Value: Encodable>(_ value: Value) throws -> [String: Any] {

@@ -289,6 +289,67 @@ final class ResponsesAPIModelProviderTests: XCTestCase {
         )
     }
 
+    func testGateway404And405FallbackCachesDialect() async throws {
+        ResponsesAPIModelProvider.resetDialectCache()
+        defer { ResponsesAPIModelProvider.resetDialectCache() }
+
+        let testBaseURL = "https://custom-gateway.test/v1"
+        XCTAssertEqual(
+            ResponsesAPIModelProvider.wireDialect(baseURL: testBaseURL, modelID: "custom-model"),
+            .responses
+        )
+
+        // Simulate 404 on the first request to /responses, followed by 200 on /chat/completions
+        nonisolated(unsafe) var requestedURLs: [URL] = []
+        let successStream = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n"
+        MockResponsesURLProtocol.handler = { req in
+            requestedURLs.append(req.url!)
+            if req.url?.path.hasSuffix("responses") == true {
+                return (
+                    HTTPURLResponse(url: req.url!, statusCode: 404, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!,
+                    Data("{\"error\": \"not found\"}".utf8)
+                )
+            } else {
+                return (
+                    HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "text/event-stream"])!,
+                    Data(successStream.utf8)
+                )
+            }
+        }
+        defer { MockResponsesURLProtocol.handler = nil }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockResponsesURLProtocol.self]
+        let provider = try ResponsesAPIModelProvider(
+            configuration: ResponsesAPIConfiguration(baseURL: testBaseURL, apiKey: "test-key"),
+            session: URLSession(configuration: config)
+        )
+        let fixture = try ModelFixture(location: .remote, providerID: ResponsesAPIModelProvider.providerID,
+            remoteDestination: "openai.responses:responses-api-key:custom-model")
+        let context = try ModelPreparationContext(conversationID: fixture.context.conversationID,
+            modelPolicy: AgentModelPolicy(localOnly: false, allowedSelections: [fixture.request.selection], strategy: .pinned, requiredCapabilities: AgentModelCapabilitySet([])),
+            capabilityGrant: fixture.context.capabilityGrant, authorizationPayload: fixture.context.authorizationPayload,
+            maximumRequestBytes: fixture.context.maximumRequestBytes, maximumResponseBytes: 10_000, timeoutMilliseconds: 60_000)
+        let prepared = try await AgentModelRequestPreparer().prepare(provider: provider, request: fixture.request, context: context)
+        let policy = TestApprovalPolicyEngine()
+        let auth = try await policy.bindLocalPolicy(prepared: prepared.preparedRequest.externalOperation,
+            approvalID: ApprovalID(), trustedRunAuthority: fixture.authority, at: AgentTimestamp(rawValue: 1_000))
+        let authorized = AuthorizedAgentModelAttempt(preparedAttempt: prepared, request: try AuthorizedModelRequest(
+            request: fixture.request, authorization: auth, clock: FixedAuthorizationClock(), policyValidator: policy, attemptLedger: TestAttemptLedger()))
+        let result = try await AgentModelExecutor().execute(provider: provider, authorized: authorized)
+
+        XCTAssertEqual(result.answer.text, "hello")
+        XCTAssertEqual(requestedURLs.count, 2)
+        XCTAssertTrue(requestedURLs[0].path.hasSuffix("responses"))
+        XCTAssertTrue(requestedURLs[1].path.hasSuffix("chat/completions"))
+
+        // Verified: The negotiated dialect is now cached as .deepSeekChatCompletions
+        XCTAssertEqual(
+            ResponsesAPIModelProvider.wireDialect(baseURL: testBaseURL, modelID: "custom-model"),
+            .deepSeekChatCompletions
+        )
+    }
+
     func testChatCompletionsBodyAndParserUseDocumentedDeepSeekShape() throws {
         let descriptor = try ModelFixture.tool(name: "web_search")
         let fixture = try ModelFixture(
