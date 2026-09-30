@@ -188,6 +188,7 @@ public struct DeterministicToolSelector: Sendable {
 
         let unavailableIDs = Set(unavailable.map(\.logicalID))
         let requestTokens = Self.tokens(in: input.latestUserRequest)
+        let isMetaQuery = Self.hasMetaToolQuery(in: input.latestUserRequest)
         var candidates: [Candidate] = []
         for descriptor in input.catalog.descriptors {
             let logicalID = descriptor.id.logicalID
@@ -215,6 +216,15 @@ public struct DeterministicToolSelector: Sendable {
                 score += lexicalMatches
                 reasons.insert("request.semantic")
             }
+            let localizedMatches = Self.localizedScore(descriptor: descriptor, in: input.latestUserRequest)
+            if localizedMatches > 0 {
+                score += localizedMatches
+                reasons.insert("request.localized")
+            }
+            if isMetaQuery {
+                score += 500
+                reasons.insert("request.meta")
+            }
 
             // Images are model input, not a reason to browse. Network tools require a positive,
             // request-derived signal; an attachment or generic phrase such as “what's this?” never
@@ -222,6 +232,8 @@ public struct DeterministicToolSelector: Sendable {
             let isNetworkTool = descriptor.effects.contains(.networkRead)
                 || descriptor.effects.contains(.unknownExternal)
             let hasStrongNetworkSignal = reasons.contains("request.explicit")
+                || reasons.contains("request.meta")
+                || reasons.contains("request.localized")
                 || (reasons.contains("request.semantic") && Self.hasNetworkIntent(requestTokens))
                 || reasons.contains("user.pinned")
                 || reasons.contains("skill.hint")
@@ -282,6 +294,61 @@ public struct DeterministicToolSelector: Sendable {
             in: descriptor.id.logicalID.name + " " + descriptor.title + " " + descriptor.summary
         ).subtracting(stopWords)
         return requestTokens.subtracting(stopWords).intersection(descriptorTokens).count * 20
+    }
+
+    private static func localizedScore(
+        descriptor: AgentToolDescriptor,
+        in request: String
+    ) -> Int {
+        let lower = request.lowercased()
+        let name = descriptor.id.logicalID.name.lowercased()
+        var score = 0
+        if ["web_search", "fetch_webpage", "wikipedia"].contains(name) {
+            if ["搜索", "查找", "搜一下", "新闻", "百度", "谷歌", "查一下", "网页", "浏览", "上网", "百科"].contains(where: { lower.contains($0) }) {
+                score += 300
+            }
+        }
+        if ["calculator"].contains(name) {
+            if ["计算", "等于多少", "求和", "算一下", "算法", "加法", "减法", "乘法", "除法"].contains(where: { lower.contains($0) }) {
+                score += 300
+            }
+        }
+        if ["current_datetime", "clock"].contains(name) {
+            if ["几点", "时间", "日期", "今天几号", "星期几", "当前时间"].contains(where: { lower.contains($0) }) {
+                score += 300
+            }
+        }
+        if ["calendar", "create_calendar_event", "list_calendar_events"].contains(name) {
+            if ["日历", "日程", "安排", "会议"].contains(where: { lower.contains($0) }) {
+                score += 300
+            }
+        }
+        if ["create_reminder", "reminders"].contains(name) {
+            if ["提醒", "备忘", "别忘"].contains(where: { lower.contains($0) }) {
+                score += 300
+            }
+        }
+        if ["current_location", "location"].contains(name) {
+            if ["位置", "定位", "在哪", "当前城市"].contains(where: { lower.contains($0) }) {
+                score += 300
+            }
+        }
+        if ["remember", "recall", "memory"].contains(name) {
+            if ["记住", "回忆", "之前说过", "你还记得"].contains(where: { lower.contains($0) }) {
+                score += 300
+            }
+        }
+        return score
+    }
+
+    private static func hasMetaToolQuery(in request: String) -> Bool {
+        let lower = request.lowercased()
+        let keywords = [
+            "哪些工具", "什么工具", "可用工具", "有什么工具", "你的工具", "工具列表",
+            "你能做什么", "你的能力", "支持什么功能", "有哪些功能", "what tools",
+            "which tools", "available tools", "list tools", "help"
+        ]
+        return keywords.contains { lower.contains($0) }
     }
 
     private static func hasNetworkIntent(_ tokens: Set<String>) -> Bool {

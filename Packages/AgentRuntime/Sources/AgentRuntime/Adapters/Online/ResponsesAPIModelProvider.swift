@@ -929,21 +929,27 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
     private static func chatMessagesPayload(
         _ messages: [AgentModelMessage]
     ) -> [JSONValue] {
-        messages.map { message in
+        var merged: [(role: String, content: String)] = []
+        for message in messages {
             let role: String = switch message.role {
             case .system: "system"
             case .user: "user"
             case .assistant: "assistant"
-            // The compiled model message intentionally carries no provider call ID. Preserve the
-            // observation as user text, matching the existing Responses adapter semantics.
             case .tool: "user"
             }
             let content = message.role == .tool
                 ? "Tool result: \(message.content)"
                 : message.content
-            return .object([
-                "role": .string(role),
-                "content": .string(content),
+            if role == "system", let last = merged.last, last.role == "system" {
+                merged[merged.count - 1].content += "\n\n" + content
+            } else {
+                merged.append((role: role, content: content))
+            }
+        }
+        return merged.map { item in
+            .object([
+                "role": .string(item.role),
+                "content": .string(item.content),
             ])
         }
     }
