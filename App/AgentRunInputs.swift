@@ -412,16 +412,29 @@ struct AppFrozenInputBuilder: Sendable {
             locationSeamAvailable: snapshot.locationSeamAvailable,
             mcpDescriptors: snapshot.toolsEnabled ? snapshot.mcpToolDescriptors : []
         )
-        let policy = try snapshot.toolPolicy ?? ConversationToolPolicy(
+        let rawPolicy = try snapshot.toolPolicy ?? ConversationToolPolicy(
             masterEnabled: snapshot.toolsEnabled,
             allowedToolIDs: toolCatalog.descriptors.map(\.id.logicalID),
             pinnedToolIDs: [],
             selectionPolicyVersion: 1,
             materializedFromGlobalTemplate: false
         )
-        // Allowed tools are the conversation's user-selected authority ceiling, not a command to
-        // advertise all of them on every pass. Keep local prompts compact and let the deterministic
-        // selector rank relevance; online models get a wider, still-bounded relevant subset.
+        // For online URL model APIs, cloud LLMs (DeepSeek, OpenAI, Claude, etc.) possess massive context
+        // windows and autonomous function-calling reasoning. Completely unbind local keyword gatekeeping:
+        // advertise all user-selected tools as pinned directly so the cloud model can autonomously
+        // decide when to call them without fragile local keyword friction. Local models keep smart ranking.
+        let policy: ConversationToolPolicy
+        if snapshot.onlineModelEnabled {
+            policy = try ConversationToolPolicy(
+                masterEnabled: rawPolicy.masterEnabled,
+                allowedToolIDs: rawPolicy.allowedToolIDs,
+                pinnedToolIDs: rawPolicy.allowedToolIDs,
+                selectionPolicyVersion: rawPolicy.selectionPolicyVersion,
+                materializedFromGlobalTemplate: rawPolicy.materializedFromGlobalTemplate
+            )
+        } else {
+            policy = rawPolicy
+        }
         return try FrozenAgentRunInputs(
             modelSelection: try selection(snapshot: snapshot),
             generationParameters: generationParameters,
