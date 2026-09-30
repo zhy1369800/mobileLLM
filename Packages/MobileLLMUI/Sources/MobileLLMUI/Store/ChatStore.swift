@@ -1515,8 +1515,8 @@ public final class ChatStore {
             role: .user,
             createdAt: oldUser.createdAt,
             answer: oldUser.answer,
-            attachments: oldUser.attachments,
-            parentID: oldUser.parentID
+            parentID: oldUser.parentID,
+            attachments: oldUser.attachments
         )
         conversations[ci].messages[ui] = user
         purgeAttachments(of: Array(conversations[ci].messages[mi...]))
@@ -1582,8 +1582,8 @@ public final class ChatStore {
             role: .user,
             createdAt: Date(),
             answer: text,
-            attachments: oldUser.attachments,
-            parentID: oldUser.parentID
+            parentID: oldUser.parentID,
+            attachments: oldUser.attachments
         )
         conversations[ci].messages[mi] = user
         let assistant = Message(role: .assistant, answer: "", parentID: user.id)

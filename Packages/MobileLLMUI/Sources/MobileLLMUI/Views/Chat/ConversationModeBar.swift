@@ -60,7 +60,7 @@ struct ConversationModeBar: View {
     @ViewBuilder
     private func approvalOption(_ title: String, mode: AgentApprovalMode?) -> some View {
         let isSelected = mode.map { chat.effectiveApprovalMode == $0 } ?? false
-        return Button {
+        Button {
             chat.conversationApprovalMode = mode
         } label: {
             if isSelected {
