@@ -56,34 +56,6 @@ private actor ResponsesAPITimeoutStore {
     }
 }
 
-/// Cache of negotiated wire dialects keyed by normalized service base URL. Avoids redundant 404/405
-/// round-trips against third-party OpenAI-compatible gateways that only support /chat/completions.
-private final class ResponsesAPIDialectCache: @unchecked Sendable {
-    static let shared = ResponsesAPIDialectCache()
-    private let lock = NSLock()
-    private var entries: [String: WireDialect] = [:]
-
-    func dialect(for baseURL: String) -> WireDialect? {
-        lock.lock()
-        defer { lock.unlock() }
-        let normalized = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return entries[normalized]
-    }
-
-    func remember(_ dialect: WireDialect, for baseURL: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        let normalized = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        entries[normalized] = dialect
-    }
-
-    func reset() {
-        lock.lock()
-        defer { lock.unlock() }
-        entries.removeAll()
-    }
-}
-
 /// An `AgentModelProvider` that calls an OpenAI-compatible `/responses` endpoint, or the documented
 /// Chat Completions endpoint for the official DeepSeek service. The whole request is one prepared,
 /// authorized external operation (data egress, spec §15.1): every generation runs inside the model
@@ -96,7 +68,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
 
     /// Resets the dialect negotiation cache. Used primarily by test suites.
     public static func resetDialectCache() {
-        ResponsesAPIDialectCache.shared.reset()
+        DialectCache.shared.reset()
     }
 
     public let descriptor: AgentModelProviderDescriptor
@@ -111,6 +83,34 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
     enum WireDialect: Sendable, Equatable {
         case responses
         case deepSeekChatCompletions
+    }
+
+    /// Cache of negotiated wire dialects keyed by normalized service base URL. Avoids redundant 404/405
+    /// round-trips against third-party OpenAI-compatible gateways that only support /chat/completions.
+    private final class DialectCache: @unchecked Sendable {
+        static let shared = DialectCache()
+        private let lock = NSLock()
+        private var entries: [String: WireDialect] = [:]
+
+        func dialect(for baseURL: String) -> WireDialect? {
+            lock.lock()
+            defer { lock.unlock() }
+            let normalized = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return entries[normalized]
+        }
+
+        func remember(_ dialect: WireDialect, for baseURL: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            let normalized = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            entries[normalized] = dialect
+        }
+
+        func reset() {
+            lock.lock()
+            defer { lock.unlock() }
+            entries.removeAll()
+        }
     }
 
     public convenience init(
@@ -328,7 +328,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                    allowDialectFallback,
                    activeDialect == .responses {
                     activeDialect = .deepSeekChatCompletions
-                    ResponsesAPIDialectCache.shared.remember(.deepSeekChatCompletions, for: configuration.baseURL)
+                    DialectCache.shared.remember(.deepSeekChatCompletions, for: configuration.baseURL)
                     let fallbackBody = try body(for: activeDialect)
                     return try await attempt(
                         fallbackBody,
@@ -892,7 +892,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
     }
 
     static func wireDialect(baseURL: String, modelID: String) -> WireDialect {
-        if let cached = ResponsesAPIDialectCache.shared.dialect(for: baseURL) {
+        if let cached = DialectCache.shared.dialect(for: baseURL) {
             return cached
         }
         let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
