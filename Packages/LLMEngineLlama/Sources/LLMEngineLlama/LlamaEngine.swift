@@ -236,7 +236,7 @@ public actor LlamaEngine: LLMEngine {
     /// 8 = Q8_0. Rebuilds when EITHER the size or the KV width changes.
     private func ensureContext(cap: Int, kvBits: Int) throws {
         let target = max(512, cap)
-        if let context, contextCap == target, contextKVBits == kvBits {
+        if context != nil, contextCap == target, contextKVBits == kvBits {
             // Keep KV cache resident for prefix reuse; prefill will clear if history diverges
             return
         }
@@ -407,28 +407,6 @@ public actor LlamaEngine: LLMEngine {
             let promptTokenCount: Int
             let hasImages = kept.contains { !$0.images.isEmpty }
 
-            // Local helper: full text prefill from scratch. Used by the normal pure-text full-eval branch.
-            func fullTextPrefill(prompt: String) async throws -> Int {
-                llama_memory_clear(llama_get_memory(context), true)
-                cachedSessionTurns.removeAll()
-                let tokens = Self.tokenize(vocab: vocab, text: prompt, addSpecial: true)
-                var i = 0
-                while i < tokens.count {
-                    try await governance.checkpoint()
-                    guard self.context == context else { throw CancellationError() }
-                    let end = min(i + nBatch, tokens.count)
-                    var chunk = Array(tokens[i..<end])
-                    let ok = chunk.withUnsafeMutableBufferPointer { buf -> Bool in
-                        llama_decode(context, llama_batch_get_one(buf.baseAddress, Int32(buf.count))) == 0
-                    }
-                    guard ok else { throw EngineError.decodeFailed }
-                    i = end
-                    await Task.yield()
-                    guard self.context == context else { throw CancellationError() }
-                }
-                return tokens.count
-            }
-
             // Check if this turn is an incremental continuation of the cached session:
             // Condition:
             // 1. Not in thinking mode (reasoning chain differs turn-to-turn; full evaluation guarantees context safety)
@@ -478,7 +456,24 @@ public actor LlamaEngine: LLMEngine {
                                                          governance: governance)
             } else {
                 // Pure text full evaluation: clean slate to ensure 100% position alignment
-                promptTokenCount = try await fullTextPrefill(prompt: renderPrompt(kept))
+                llama_memory_clear(llama_get_memory(context), true)
+                cachedSessionTurns.removeAll()
+                let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true)
+                var i = 0
+                while i < promptTokens.count {
+                    try await governance.checkpoint()
+                    guard self.context == context else { throw CancellationError() }
+                    let end = min(i + nBatch, promptTokens.count)
+                    var chunk = Array(promptTokens[i..<end])
+                    let ok = chunk.withUnsafeMutableBufferPointer { buf -> Bool in
+                        llama_decode(context, llama_batch_get_one(buf.baseAddress, Int32(buf.count))) == 0
+                    }
+                    guard ok else { throw EngineError.decodeFailed }
+                    i = end
+                    await Task.yield()
+                    guard self.context == context else { throw CancellationError() }
+                }
+                promptTokenCount = promptTokens.count
             }
             let promptSecs = max(Date().timeIntervalSince(prefillStart), 0.0001)
 
