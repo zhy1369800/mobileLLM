@@ -4,6 +4,12 @@ import Foundation
 import llama
 import LLMCore
 import AppRuntime
+#if canImport(ImageIO)
+import ImageIO
+#endif
+#if canImport(UniformTypeIdentifiers)
+import UniformTypeIdentifiers
+#endif
 
 /// The llama.cpp on-device engine: loads a GGUF model (mmap'd) and streams tokens through Metal,
 /// routing the Bonsai `<think>` block to `.reasoning` and the rest to `.answer` via `ThinkSplitter`.
@@ -238,34 +244,40 @@ public actor LlamaEngine: LLMEngine {
         cp.n_batch = 512                                          // small compute buffer; prefill is chunked
         cp.n_threads = nThreads
         cp.n_threads_batch = nThreads
-        // KV-cache quantization and Flash Attention. Flash Attention is attempted across Metal backends
-        // to keep attention computation constant-time and prevent long-generation slowdown.
+        // KV-cache quantization and Flash Attention.
+        // Aligned with OGAM: use AUTO across Metal backends so llama.cpp enables Flash Attention
+        // on all supported layers while gracefully handling hybrid/multimodal layers,
+        // keeping attention computation constant-time and preventing 2 tok/s slowdown.
         switch kvBits {
         case 4:
             cp.type_k = GGML_TYPE_Q4_0; cp.type_v = GGML_TYPE_Q4_0
-            cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED
         case 8:
             cp.type_k = GGML_TYPE_Q8_0; cp.type_v = GGML_TYPE_Q8_0
-            cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED
         default:
-            #if !targetEnvironment(simulator)
-            cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED
-            #endif
+            break
         }
+        #if !targetEnvironment(simulator)
+        cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO
+        #endif
 
-        // Attempt 1: try initializing with preferred settings (including Flash Attention).
+        // Attempt 1: try initializing with preferred settings (including AUTO Flash Attention).
         var ctx = model.flatMap { llama_init_from_model($0, cp) }
 
         // Attempt 2 (OGAM fallback alignment): if Attempt 1 failed (e.g. FA allocation failure,
         // kernel incompatibilities during multimodal operations, or tight VRAM), retry with
         // default attention and f16 fallback to maximize successful execution.
         if ctx == nil, let model {
+            NSLog("[LlamaEngine] Context init Attempt 1 failed (target=%d, kvBits=%d), retrying fallback...",
+                  Int32(target), Int32(kvBits))
             var fallbackCp = llama_context_default_params()
             fallbackCp.n_ctx = UInt32(target)
             fallbackCp.n_batch = 512
             fallbackCp.n_threads = nThreads
             fallbackCp.n_threads_batch = nThreads
-            // Keep user KV bits if quantized, but disable forced Flash Attention
+            #if !targetEnvironment(simulator)
+            fallbackCp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO
+            #endif
+            // Keep user KV bits if quantized
             switch kvBits {
             case 4:
                 fallbackCp.type_k = GGML_TYPE_Q4_0; fallbackCp.type_v = GGML_TYPE_Q4_0
@@ -543,9 +555,10 @@ public actor LlamaEngine: LLMEngine {
             for image in turn.images {
                 try await governance.checkpoint()
                 guard self.context == context else { throw CancellationError() }
-                let wrapper: mtmd_helper_bitmap_wrapper = image.withUnsafeBytes { raw in
+                let preparedImage = Self.downsampleImageDataIfNeeded(image)
+                let wrapper: mtmd_helper_bitmap_wrapper = preparedImage.withUnsafeBytes { raw in
                     mtmd_helper_bitmap_init_from_buf(mtmdCtx, raw.bindMemory(to: UInt8.self).baseAddress,
-                                                     image.count, false)
+                                                     preparedImage.count, false)
                 }
                 guard let bmp = wrapper.bitmap else { throw EngineError.imageDecodeFailed }
                 bitmaps.append(bmp)
@@ -583,6 +596,44 @@ public actor LlamaEngine: LLMEngine {
             guard self.context == context else { throw CancellationError() }   // reentrant teardown
         }
         return Int(mtmd_helper_get_n_tokens(chunks))
+    }
+
+    /// Downsample large input images (e.g. 12MP/48MP camera shots) to an optimal max dimension
+    /// before feeding into mtmd. Avoids massive visual patch explosion (1500+ tokens) and
+    /// extreme memory pressure / fc-thrashing on iOS Metal.
+    static func downsampleImageDataIfNeeded(_ data: Data, maxDimension: CGFloat = 1024) -> Data {
+        #if canImport(ImageIO) && canImport(UniformTypeIdentifiers)
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions) else { return data }
+
+        let propertiesOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        if let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, propertiesOptions) as? [CFString: Any],
+           let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+           let height = properties[kCGImagePropertyPixelHeight] as? CGFloat,
+           width <= maxDimension && height <= maxDimension {
+            return data
+        }
+
+        let downsampleOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxDimension
+        ]
+        guard let downsampled = CGImageSourceCreateThumbnailAtIndex(source, 0, downsampleOptions as CFDictionary) else {
+            return data
+        }
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output, UTType.jpeg.identifier as CFString, 1, nil) else {
+            return data
+        }
+        let writeOptions = [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary
+        CGImageDestinationAddImage(destination, downsampled, writeOptions)
+        guard CGImageDestinationFinalize(destination) else { return data }
+        return output as Data
+        #else
+        return data
+        #endif
     }
 
     // MARK: - Prompt / tokenizer helpers
