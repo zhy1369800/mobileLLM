@@ -757,6 +757,15 @@ public final class AgentRuntimeAssembly {
                 residencyDriver: residencyDriver,
                 artifactResolver: attachmentResolver,
                 configuration: try LocalModelAdapterConfiguration(
+                    currentKVBits: {
+                        if let data = UserDefaults.standard.data(forKey: "mobileLLM.settings.v1"),
+                           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                           let bits = json["kvBits"] as? Int,
+                           (bits == 0 || bits == 4 || bits == 8) {
+                            return bits
+                        }
+                        return 4
+                    },
                     recordDiagnostic: { code, metadata in
                         await diagnosticLogger.record(code: code, metadata: metadata)
                     }

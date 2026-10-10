@@ -136,7 +136,9 @@ public actor LlamaEngine: LLMEngine {
         #if targetEnvironment(simulator)
         mp.n_gpu_layers = 0     // no Metal in the simulator
         #else
-        mp.n_gpu_layers = 999   // all layers on the GPU
+        let totalRam = ProcessInfo.processInfo.physicalMemory
+        let threshold: UInt64 = 4_294_967_296 // 4 GB
+        mp.n_gpu_layers = totalRam > threshold ? 999 : 0
         #endif
 
         guard let m = path.withCString({ llama_model_load_from_file($0, mp) }) else {
@@ -173,26 +175,28 @@ public actor LlamaEngine: LLMEngine {
     private func ensureVisionContext() -> OpaquePointer? {
         if let mtmdContext { return mtmdContext }
         guard let projectorPath, let m = model else { return nil }
-
-        // Aligning with OGAM: protect against iOS Metal memory overflow by reserving 1.6 GB headroom.
-        // If remaining available memory is tight (< 1.6 GB) or on low-tier memory devices, run mmproj on CPU
-        // to prevent Metal unified buffer allocations from overflowing and crashing the app.
-        let reserveBytes: UInt64 = 1_600_000_000
-        let available = MemoryProbe.availableBytes()
-        let allowGpu = available > reserveBytes && DeviceTier.current.physicalMemoryBytes > 4_000_000_000
-
         var mp2 = mtmd_context_params_default()
-        mp2.use_gpu = allowGpu
+        #if targetEnvironment(simulator)
+        mp2.use_gpu = false
+        #else
+        // Keep backend strictly aligned with the base text model:
+        // On iOS devices with > 4 GB RAM, both LLM and mmproj run on Metal GPU.
+        // On <= 4 GB devices, both run on CPU to avoid cross-backend tensor mismatches.
+        let totalRam = ProcessInfo.processInfo.physicalMemory
+        let threshold: UInt64 = 4_294_967_296 // 4 GB
+        mp2.use_gpu = totalRam > threshold
+        #endif
         mp2.print_timings = false
         mp2.n_threads = nThreads
 
-        var ctx = projectorPath.withCString { mtmd_init_from_file($0, m, mp2) }
-        // Fallback: if GPU init failed or returned nil, retry on CPU rather than failing
-        if ctx == nil && mp2.use_gpu {
-            mp2.use_gpu = false
-            ctx = projectorPath.withCString { mtmd_init_from_file($0, m, mp2) }
-        }
+        NSLog("[LlamaEngine] Initializing vision projector: path=%@, use_gpu=%d, threads=%d",
+              projectorPath, Int32(mp2.use_gpu ? 1 : 0), Int32(mp2.n_threads))
 
+        guard let ctx = projectorPath.withCString({ mtmd_init_from_file($0, m, mp2) }) else {
+            NSLog("[LlamaEngine] Failed to initialize multimodal context from %@", projectorPath)
+            return nil
+        }
+        NSLog("[LlamaEngine] Vision projector initialized successfully")
         mtmdContext = ctx
         return mtmdContext
     }

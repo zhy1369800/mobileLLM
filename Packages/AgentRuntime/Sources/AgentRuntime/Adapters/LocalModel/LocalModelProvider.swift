@@ -13,6 +13,8 @@ public struct LocalModelAdapterConfiguration: Sendable {
     let nowMilliseconds: @Sendable () -> UInt64
     /// Bounded device-only diagnostic hook for what the model actually emitted (never user history).
     let recordDiagnostic: @Sendable (String, [String: String]) async -> Void
+    /// Dynamic accessor for the user's configured KV-cache bits. Defaults to reading AppSettings snapshot if unprovided.
+    public let currentKVBits: (@Sendable () -> Int)?
 
     public init(
         maximumImageBytes: UInt64 = 32 * 1_024 * 1_024,
@@ -21,6 +23,7 @@ public struct LocalModelAdapterConfiguration: Sendable {
         nowMilliseconds: @escaping @Sendable () -> UInt64 = {
             DispatchTime.now().uptimeNanoseconds / 1_000_000
         },
+        currentKVBits: (@escaping @Sendable () -> Int)? = nil,
         recordDiagnostic: @escaping @Sendable (String, [String: String]) async -> Void = { _, _ in }
     ) throws {
         guard maximumImageBytes > 0,
@@ -31,6 +34,7 @@ public struct LocalModelAdapterConfiguration: Sendable {
         self.maximumTotalImageBytes = maximumTotalImageBytes
         self.maximumBufferedActionBytes = maximumBufferedActionBytes
         self.nowMilliseconds = nowMilliseconds
+        self.currentKVBits = currentKVBits
         self.recordDiagnostic = recordDiagnostic
     }
 }
@@ -145,7 +149,8 @@ private enum LocalModelGeneration {
 
         let sampling = samplingParameters(
             request.generationParameters,
-            registration: registration
+            registration: registration,
+            configuration: configuration
         )
         let bindings = LocalModelPromptRenderer.bindings(for: request.advertisedTools)
         var processor = ToolCallProcessor(acceptsBareJSON: registration.toolDialect == .deepSeek)
@@ -447,9 +452,22 @@ private enum LocalModelGeneration {
         }
     }
 
+    private static func resolvedKVBits(configuration: LocalModelAdapterConfiguration) -> Int {
+        if let custom = configuration.currentKVBits {
+            return custom()
+        }
+        if let data = UserDefaults.standard.data(forKey: "mobileLLM.settings.v1"),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let bits = json["kvBits"] as? Int, bits == 4 || bits == 8 || bits == 0 {
+            return bits
+        }
+        return 4
+    }
+
     private static func samplingParameters(
         _ parameters: AgentModelGenerationParameters,
-        registration: LocalModelRegistration
+        registration: LocalModelRegistration,
+        configuration: LocalModelAdapterConfiguration
     ) -> Sampling {
         let thinking = switch parameters.thinkingMode {
         case .disabled: false
@@ -464,7 +482,7 @@ private enum LocalModelGeneration {
             maxTokens: Int(parameters.maximumOutputTokens),
             thinking: thinking,
             contextTokenCap: Int(parameters.maximumContextTokens),
-            kvBits: 8,
+            kvBits: resolvedKVBits(configuration: configuration),
             quantizedKVStart: 256,
             seed: parameters.seed
         )
