@@ -80,6 +80,7 @@ public actor LlamaEngine: LLMEngine {
     private var projectorPath: String?
     private var contextCap: Int = 0          // the n_ctx the live context was built with
     private var contextKVBits: Int = -1      // the Sampling.kvBits the live context's KV cache was built for
+    private var cachedSessionTurns: [ChatTurn] = []
     private var loadedID: String?
     private var thinkingCapable = true
     private var eosText = "<|im_end|>"
@@ -116,8 +117,12 @@ public actor LlamaEngine: LLMEngine {
 
     private static let backendReady: Bool = {
         #if os(iOS)
-        // Keep mmap'd weight pages clean/reclaimable — don't let Metal wire them into a residency set.
-        setenv("GGML_METAL_NO_RESIDENCY", "1", 1)
+        // Aligned with OGAM: on devices with > 4 GB RAM, allow Metal to keep weights in the residency set
+        // to achieve full unified memory bandwidth (8+ tok/s) and eliminate NAND page-fault thrashing.
+        // Only set NO_RESIDENCY on tight <= 4 GB devices to prevent Jetsam kills.
+        if ProcessInfo.processInfo.physicalMemory <= 4_294_967_296 {
+            setenv("GGML_METAL_NO_RESIDENCY", "1", 1)
+        }
         #endif
         llama_backend_init()
         return true
@@ -222,6 +227,7 @@ public actor LlamaEngine: LLMEngine {
         mtmdContext = nil
         projectorPath = nil
         context = nil; model = nil; vocab = nil; loadedID = nil; contextCap = 0; contextKVBits = -1
+        cachedSessionTurns.removeAll()
     }
 
     /// (Re)create the decode context sized to `cap` tokens with the requested KV-cache width. Kept separate
@@ -231,9 +237,10 @@ public actor LlamaEngine: LLMEngine {
     private func ensureContext(cap: Int, kvBits: Int) throws {
         let target = max(512, cap)
         if let context, contextCap == target, contextKVBits == kvBits {
-            llama_memory_clear(llama_get_memory(context), true)   // fresh KV: we re-prefill full history
+            // Keep KV cache resident for prefix reuse; prefill will clear if history diverges
             return
         }
+        cachedSessionTurns.removeAll()
         if let context { llama_free(context) }
         // Reset BEFORE the fallible init below: if llama_init_from_model throws out of this function,
         // `context` must not keep pointing at the freed allocation (a retry would double-free, and the
@@ -399,30 +406,79 @@ public actor LlamaEngine: LLMEngine {
             let nBatch = 512
             let promptTokenCount: Int
             let hasImages = kept.contains { !$0.images.isEmpty }
-            if hasImages {
-                promptTokenCount = try await mtmdPrefill(kept: kept, context: context,
-                                                         renderPrompt: renderPrompt, nBatch: nBatch,
-                                                         governance: governance)
-            } else {
-                let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true)
+
+            // Local helper: full text prefill from scratch. Used by the normal pure-text full-eval branch.
+            func fullTextPrefill(prompt: String) async throws -> Int {
+                llama_memory_clear(llama_get_memory(context), true)
+                cachedSessionTurns.removeAll()
+                let tokens = Self.tokenize(vocab: vocab, text: prompt, addSpecial: true)
                 var i = 0
-                while i < promptTokens.count {
+                while i < tokens.count {
                     try await governance.checkpoint()
                     guard self.context == context else { throw CancellationError() }
-                    let end = min(i + nBatch, promptTokens.count)
-                    var chunk = Array(promptTokens[i..<end])
+                    let end = min(i + nBatch, tokens.count)
+                    var chunk = Array(tokens[i..<end])
                     let ok = chunk.withUnsafeMutableBufferPointer { buf -> Bool in
                         llama_decode(context, llama_batch_get_one(buf.baseAddress, Int32(buf.count))) == 0
                     }
                     guard ok else { throw EngineError.decodeFailed }
                     i = end
-                    // Hand the cooperative pool a breath between chunks so downloads/saves keep progressing
-                    // (these C calls have no suspension points of their own). The yield is an actor-reentrancy
-                    // point: bail if a concurrent unload/reload swapped the context out from under us.
                     await Task.yield()
                     guard self.context == context else { throw CancellationError() }
                 }
-                promptTokenCount = promptTokens.count
+                return tokens.count
+            }
+
+            // Check if this turn is an incremental continuation of the cached session:
+            // Condition:
+            // 1. Not in thinking mode (reasoning chain differs turn-to-turn; full evaluation guarantees context safety)
+            // 2. Prefix of `kept` exactly matches `cachedSessionTurns`
+            // 3. Exactly 1 new turn added (the new user query)
+            // 4. The new query carries no images
+            let previousCount = cachedSessionTurns.count
+            let isIncrementalContinuation = !wantThinking &&
+                previousCount > 0 &&
+                kept.count == previousCount + 1 &&
+                Array(kept.prefix(previousCount)) == cachedSessionTurns &&
+                kept.last?.images.isEmpty == true
+
+            if isIncrementalContinuation {
+                // MULTI-TURN CONTINUATION (text or multimodal):
+                // All prior turns (including visual ViT embeddings and previous answers) already reside
+                // in the KV cache with the assistant turn cleanly closed by EOG. Decode ONLY the suffix
+                // of the new user query — completely skipping mtmd re-evaluation and saving ~3-5 seconds
+                // of image ViT compute!
+                let newTurnPrompt = Self.buildPrompt(messages: [kept.last!], template: promptTemplate,
+                                                     reasoning: reasoningStyle, thinking: wantThinking)
+                let suffixText = newTurnPrompt.hasPrefix("\n") ? newTurnPrompt : ("\n" + newTurnPrompt)
+                let suffixTokens = Self.tokenize(vocab: vocab, text: suffixText, addSpecial: false)
+                NSLog("[LlamaEngine] Incremental continuation matched! Suffix tokens: %d (skipped image/history recompute)",
+                      Int32(suffixTokens.count))
+                var i = 0
+                while i < suffixTokens.count {
+                    try await governance.checkpoint()
+                    guard self.context == context else { throw CancellationError() }
+                    let end = min(i + nBatch, suffixTokens.count)
+                    var chunk = Array(suffixTokens[i..<end])
+                    let ok = chunk.withUnsafeMutableBufferPointer { buf -> Bool in
+                        llama_decode(context, llama_batch_get_one(buf.baseAddress, Int32(buf.count))) == 0
+                    }
+                    guard ok else { throw EngineError.decodeFailed }
+                    i = end
+                    await Task.yield()
+                    guard self.context == context else { throw CancellationError() }
+                }
+                promptTokenCount = suffixTokens.count
+            } else if hasImages {
+                // Multimodal full evaluation: new image introduced or conversation diverged
+                llama_memory_clear(llama_get_memory(context), true)
+                cachedSessionTurns.removeAll()
+                promptTokenCount = try await mtmdPrefill(kept: kept, context: context,
+                                                         renderPrompt: renderPrompt, nBatch: nBatch,
+                                                         governance: governance)
+            } else {
+                // Pure text full evaluation: clean slate to ensure 100% position alignment
+                promptTokenCount = try await fullTextPrefill(prompt: renderPrompt(kept))
             }
             let promptSecs = max(Date().timeIntervalSince(prefillStart), 0.0001)
 
@@ -432,12 +488,16 @@ public actor LlamaEngine: LLMEngine {
             var splitter = ThinkSplitter(startInThink: reasoningStyle == .thinkTagsImplicitOpen && wantThinking)
             var decoder = PieceDecoder()
             var answerStripper = LiteralStripper(tags: Self.answerStripTags(for: promptTemplate))
+            var fullGeneratedAnswer = ""
             func emit(_ d: ThinkSplitter.Delta) {
                 switch d {
                 case .reasoning(let s): cont.yield(.reasoning(s))
                 case .answer(let s):
                     let out = answerStripper.isNoop ? s : answerStripper.feed(s)
-                    if !out.isEmpty { cont.yield(.answer(out)) }
+                    if !out.isEmpty {
+                        cont.yield(.answer(out))
+                        fullGeneratedAnswer += out
+                    }
                 }
             }
             var genTokens = 0
@@ -458,7 +518,15 @@ public actor LlamaEngine: LLMEngine {
                 if maxTokens > 0 && genTokens >= maxTokens { stop = .maxTokens; break }
                 let tokenID = llama_sampler_sample(sampler, context, -1)
 
-                if llama_vocab_is_eog(vocab, tokenID) { stop = .eos; break }
+                if llama_vocab_is_eog(vocab, tokenID) {
+                    stop = .eos
+                    // Ensure the EOG token is decoded into the KV cache so the assistant turn is cleanly closed in context
+                    var eog = [tokenID]
+                    _ = eog.withUnsafeMutableBufferPointer { buf in
+                        llama_decode(context, llama_batch_get_one(buf.baseAddress, Int32(buf.count)))
+                    }
+                    break
+                }
 
                 let piece = Self.tokenToPiece(vocab: vocab, token: tokenID)
                 let text = decoder.feed(piece)
@@ -481,7 +549,10 @@ public actor LlamaEngine: LLMEngine {
             if !tail.isEmpty { for d in splitter.feed(tail) { emit(d) } }
             for d in splitter.finish() { emit(d) }
             let strippedTail = answerStripper.isNoop ? "" : answerStripper.flush()
-            if !strippedTail.isEmpty { cont.yield(.answer(strippedTail)) }
+            if !strippedTail.isEmpty {
+                cont.yield(.answer(strippedTail))
+                fullGeneratedAnswer += strippedTail
+            }
 
             let genSecs = max(Date().timeIntervalSince(genStart), 0.0001)
             peak = max(peak, Self.footprintBytes())
@@ -492,12 +563,23 @@ public actor LlamaEngine: LLMEngine {
                 tokensPerSecond: Double(genTokens) / genSecs,
                 peakMemoryBytes: peak,
                 stopReason: stop)))
+
+            // Multi-turn and multimodal reuse: record valid conversational turn on natural EOS completion
+            if stop == .eos && !wantThinking && answerStripper.isNoop {
+                cachedSessionTurns = kept + [ChatTurn(role: .assistant, content: fullGeneratedAnswer)]
+            } else {
+                cachedSessionTurns.removeAll()
+            }
             cont.finish()
         } catch is CancellationError {
+            if let context { llama_memory_clear(llama_get_memory(context), true) }
+            cachedSessionTurns.removeAll()
             cont.yield(.done(Stats(promptTokens: 0, genTokens: 0, promptTPS: 0, tokensPerSecond: 0,
                                    peakMemoryBytes: Self.footprintBytes(), stopReason: .cancelled)))
             cont.finish()
         } catch {
+            if let context { llama_memory_clear(llama_get_memory(context), true) }
+            cachedSessionTurns.removeAll()
             cont.finish(throwing: error)
         }
     }
