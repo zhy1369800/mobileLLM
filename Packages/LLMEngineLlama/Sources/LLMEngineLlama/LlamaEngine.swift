@@ -45,7 +45,7 @@ public actor LlamaEngine: LLMEngine {
             case .modelLoadFailed:
                 return "Couldn't load the model — most often it's too large for the memory available. Choose a smaller quantization, or free memory by unloading any other model and closing background apps."
             case .contextInitFailed:
-                return "Couldn't reserve the decode context at this context length. Pick a shorter context length, or free memory before retrying."
+                return "The context length or memory settings are too high. Please lower them in Settings and try again."
             case .notLoaded:
                 return "No model is loaded yet. Load a model before starting a conversation."
             case .decodeFailed:
@@ -234,7 +234,7 @@ public actor LlamaEngine: LLMEngine {
         cp.n_batch = 512                                          // small compute buffer; prefill is chunked
         cp.n_threads = nThreads
         cp.n_threads_batch = nThreads
-        // KV-cache quantization and Flash Attention. Flash Attention is enabled across Metal backends
+        // KV-cache quantization and Flash Attention. Flash Attention is attempted across Metal backends
         // to keep attention computation constant-time and prevent long-generation slowdown.
         switch kvBits {
         case 4:
@@ -248,7 +248,42 @@ public actor LlamaEngine: LLMEngine {
             cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED
             #endif
         }
-        guard let model, let ctx = llama_init_from_model(model, cp) else {
+
+        // Attempt 1: try initializing with preferred settings (including Flash Attention).
+        var ctx = model.flatMap { llama_init_from_model($0, cp) }
+
+        // Attempt 2 (OGAM fallback alignment): if Attempt 1 failed (e.g. FA allocation failure,
+        // kernel incompatibilities during multimodal operations, or tight VRAM), retry with
+        // default attention and f16 fallback to maximize successful execution.
+        if ctx == nil, let model {
+            var fallbackCp = llama_context_default_params()
+            fallbackCp.n_ctx = UInt32(target)
+            fallbackCp.n_batch = 512
+            fallbackCp.n_threads = nThreads
+            fallbackCp.n_threads_batch = nThreads
+            // Keep user KV bits if quantized, but disable forced Flash Attention
+            switch kvBits {
+            case 4:
+                fallbackCp.type_k = GGML_TYPE_Q4_0; fallbackCp.type_v = GGML_TYPE_Q4_0
+            case 8:
+                fallbackCp.type_k = GGML_TYPE_Q8_0; fallbackCp.type_v = GGML_TYPE_Q8_0
+            default:
+                break
+            }
+            ctx = llama_init_from_model(model, fallbackCp)
+
+            // Attempt 3: if quantized KV cache itself was too memory-heavy or refused, retry base f16 default
+            if ctx == nil && kvBits != 0 {
+                var safeCp = llama_context_default_params()
+                safeCp.n_ctx = UInt32(target)
+                safeCp.n_batch = 512
+                safeCp.n_threads = nThreads
+                safeCp.n_threads_batch = nThreads
+                ctx = llama_init_from_model(model, safeCp)
+            }
+        }
+
+        guard let ctx else {
             throw EngineError.contextInitFailed
         }
         context = ctx
