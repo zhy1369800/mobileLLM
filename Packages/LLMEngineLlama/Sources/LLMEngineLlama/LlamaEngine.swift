@@ -291,14 +291,22 @@ public actor LlamaEngine: LLMEngine {
                 }
             }
 
-            try ensureContext(cap: params.contextTokenCap, kvBits: params.kvBits)
+            let hasImageTurns = messages.contains(where: { !$0.images.isEmpty })
+            // When processing vision turns, the mmproj encoder adds ~700-1000 MB resident memory.
+            // Cap effective context to 4096 (matching OGAM's default) and use 4-bit KV cache if requested
+            // to ensure total footprint stays strictly under the iOS Jetsam threshold.
+            let effectiveCap = hasImageTurns ? min(params.contextTokenCap, 4096) : params.contextTokenCap
+            let effectiveKVBits = hasImageTurns ? (params.kvBits == 0 ? 0 : 4) : params.kvBits
+            try ensureContext(cap: effectiveCap, kvBits: effectiveKVBits)
             guard let context else { throw EngineError.contextInitFailed }
 
             let wantThinking = params.thinking && reasoningStyle.canThink
-            // Prefer the GGUF's own embedded template via llama.cpp (matching official tokenizer / Jinja
-            // training alignment); fall back to hand-verified builder if missing or template fails.
+            // Prefer the GGUF's own embedded template via llama.cpp for pure text (matching official tokenizer / Jinja
+            // training alignment); for image turns or when template fails, use hand-verified builder so media
+            // markers (<__media__>) are never stripped or corrupted by pure-text chat templates.
             func renderPrompt(_ msgs: [ChatTurn]) -> String {
-                if let m = model,
+                let carriesMedia = msgs.contains(where: { !$0.images.isEmpty })
+                if !carriesMedia, let m = model,
                    let rendered = Self.autoPrompt(msgs, modelPtr: m, reasoning: reasoningStyle, thinking: wantThinking) {
                     return rendered
                 }
