@@ -307,13 +307,7 @@ public actor LlamaEngine: LLMEngine {
                 }
             }
 
-            let hasImageTurns = messages.contains(where: { !$0.images.isEmpty })
-            // When processing vision turns, the mmproj encoder adds ~700-1000 MB resident memory.
-            // Cap effective context to 4096 (matching OGAM's default) and use 4-bit KV cache if requested
-            // to ensure total footprint stays strictly under the iOS Jetsam threshold.
-            let effectiveCap = hasImageTurns ? min(params.contextTokenCap, 4096) : params.contextTokenCap
-            let effectiveKVBits = hasImageTurns ? (params.kvBits == 0 ? 0 : 4) : params.kvBits
-            try ensureContext(cap: effectiveCap, kvBits: effectiveKVBits)
+            try ensureContext(cap: params.contextTokenCap, kvBits: params.kvBits)
             guard let context else { throw EngineError.contextInitFailed }
 
             let wantThinking = params.thinking && reasoningStyle.canThink
