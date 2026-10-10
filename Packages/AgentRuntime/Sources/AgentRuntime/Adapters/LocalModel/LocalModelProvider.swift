@@ -23,7 +23,7 @@ public struct LocalModelAdapterConfiguration: Sendable {
         nowMilliseconds: @escaping @Sendable () -> UInt64 = {
             DispatchTime.now().uptimeNanoseconds / 1_000_000
         },
-        currentKVBits: (@escaping @Sendable () -> Int)? = nil,
+        currentKVBits: (@Sendable () -> Int)? = nil,
         recordDiagnostic: @escaping @Sendable (String, [String: String]) async -> Void = { _, _ in }
     ) throws {
         guard maximumImageBytes > 0,
