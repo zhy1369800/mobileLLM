@@ -22,12 +22,12 @@ public struct Sampling: Sendable, Equatable {
 
     public init(temperature: Double = 0.7,
                 topP: Double = 0.95,
-                topK: Int = 20,
+                topK: Int = 40,
                 repetitionPenalty: Double = 1.05,
                 maxTokens: Int = 1024,
                 thinking: Bool = true,
                 contextTokenCap: Int = 8192,
-                kvBits: Int = 4,
+                kvBits: Int = 8,
                 quantizedKVStart: Int = 256,
                 seed: UInt64? = nil) {
         self.temperature = temperature

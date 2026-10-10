@@ -38,15 +38,14 @@ final class ThermalGovernorTests: XCTestCase {
         XCTAssertEqual(clears.value, 0)
     }
 
-    /// `.serious` → inserts a cooperative backoff sleep and clears the reuse pool.
-    func testSeriousBacksOff() async throws {
+    /// `.serious` → matching hardware-managed full throughput, inserts zero artificial sleep.
+    func testSeriousDoesNotSleep() async throws {
         let sleeps = Counter(), clears = Counter()
         let g = ThermalGovernor(thermalSource: { .serious },
                                 sleep: { _ in sleeps.inc() },
                                 clearCache: { clears.inc() })
         try await g.throttleIfNeeded()
-        XCTAssertGreaterThanOrEqual(sleeps.value, 1)
-        XCTAssertGreaterThanOrEqual(clears.value, 1)
+        XCTAssertEqual(sleeps.value, 0)
     }
 
     /// `.critical` → pauses (emits the "cooling" callback + clears cache), then recovers once the

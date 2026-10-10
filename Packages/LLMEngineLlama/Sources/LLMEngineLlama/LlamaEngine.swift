@@ -218,10 +218,8 @@ public actor LlamaEngine: LLMEngine {
         cp.n_batch = 512                                          // small compute buffer; prefill is chunked
         cp.n_threads = nThreads
         cp.n_threads_batch = nThreads
-        // KV-cache quantization. llama.cpp has no non-Flash-Attention matmul for a quantized V-cache, so a
-        // quantized cache REQUIRES Flash Attention (the standard `-fa -ctk qN -ctv qN` config, supported on
-        // Metal for all catalog head dims). We therefore force FA on ONLY in the quantized branch; kvBits 0
-        // leaves both the f16 cache and the library-default (AUTO) attention untouched — no behavior change.
+        // KV-cache quantization and Flash Attention. Flash Attention is enabled across Metal backends
+        // to keep attention computation constant-time and prevent long-generation slowdown.
         switch kvBits {
         case 4:
             cp.type_k = GGML_TYPE_Q4_0; cp.type_v = GGML_TYPE_Q4_0
@@ -230,7 +228,9 @@ public actor LlamaEngine: LLMEngine {
             cp.type_k = GGML_TYPE_Q8_0; cp.type_v = GGML_TYPE_Q8_0
             cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED
         default:
-            break   // 0 or unrecognized → f16 cache, attention left at the default
+            #if !targetEnvironment(simulator)
+            cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED
+            #endif
         }
         guard let model, let ctx = llama_init_from_model(model, cp) else {
             throw EngineError.contextInitFailed
@@ -295,11 +295,10 @@ public actor LlamaEngine: LLMEngine {
             guard let context else { throw EngineError.contextInitFailed }
 
             let wantThinking = params.thinking && reasoningStyle.canThink
-            // `.auto` (Explore's community checkpoints) renders with the GGUF's own embedded template;
-            // everything else uses its hand-verified builder. Auto falls back to ChatML if the GGUF
-            // carries no template. Wrapped so the overflow fitter can re-render any history subset.
+            // Prefer the GGUF's own embedded template via llama.cpp (matching official tokenizer / Jinja
+            // training alignment); fall back to hand-verified builder if missing or template fails.
             func renderPrompt(_ msgs: [ChatTurn]) -> String {
-                if promptTemplate == .auto, let m = model,
+                if let m = model,
                    let rendered = Self.autoPrompt(msgs, modelPtr: m, reasoning: reasoningStyle, thinking: wantThinking) {
                     return rendered
                 }

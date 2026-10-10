@@ -374,8 +374,8 @@ struct SettingsView: View {
                         }
                         .fixedSize()
                     }
-                    Text("4-bit KV keeps context memory low with little quality cost — the main memory lever. "
-                         + "It's active on both engines; a change takes effect from your next message.")
+                    Text("8-bit KV preserves high attention accuracy with low memory footprint (default). "
+                         + "4-bit reduces RAM further, while Full provides unquantized precision. Takes effect from your next message.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                 }
                 .padding(.top, Theme.Space.xs)

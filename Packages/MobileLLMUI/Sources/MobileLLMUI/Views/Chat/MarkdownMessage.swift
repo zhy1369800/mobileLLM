@@ -189,13 +189,36 @@ struct MarkdownBlock: Identifiable {
     }
 }
 
-/// Shared inline markdown (bold / italic / inline-code / links), preserving hard line breaks. Used by
-/// prose, headings, list items, quotes, and table cells so inline emphasis renders everywhere.
 enum MarkdownInline {
+    private static let lock = NSLock()
+    private static var cache: [String: AttributedString] = [:]
+    private static let triggerChars: Set<Character> = ["*", "_", "`", "[", "]", "~", "<"]
+
     static func attributed(_ raw: String) -> AttributedString {
-        (try? AttributedString(markdown: raw,
-                               options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
-            ?? AttributedString(raw)
+        lock.lock()
+        if let hit = cache[raw] {
+            lock.unlock()
+            return hit
+        }
+        lock.unlock()
+
+        let attr: AttributedString
+        if raw.contains(where: { triggerChars.contains($0) }) {
+            attr = (try? AttributedString(markdown: raw,
+                                   options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+                ?? AttributedString(raw)
+        } else {
+            attr = AttributedString(raw)
+        }
+
+        lock.lock()
+        if cache.count >= 256 {
+            cache.removeAll(keepingCapacity: true)
+        }
+        cache[raw] = attr
+        lock.unlock()
+
+        return attr
     }
 }
 

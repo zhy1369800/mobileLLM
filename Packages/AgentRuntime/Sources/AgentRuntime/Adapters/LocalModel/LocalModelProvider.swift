@@ -464,7 +464,7 @@ private enum LocalModelGeneration {
             maxTokens: Int(parameters.maximumOutputTokens),
             thinking: thinking,
             contextTokenCap: Int(parameters.maximumContextTokens),
-            kvBits: 4,
+            kvBits: 8,
             quantizedKVStart: 256,
             seed: parameters.seed
         )

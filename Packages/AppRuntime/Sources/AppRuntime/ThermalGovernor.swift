@@ -34,10 +34,7 @@ public protocol ThermalGoverning: Sendable {
 /// The only lever the runtime has to shed heat is to stop feeding the accelerator, so the governor
 /// reads `ProcessInfo.thermalState` (cached, updated by the system notification so the hot loop never
 /// makes a syscall) and, between token/decode steps:
-///   • `.nominal` / `.fair`  → returns immediately (zero tax in the common case);
-///   • `.serious`            → clears the reuse pool (via the injected `clearCache`) and inserts a
-///                             short cooperative sleep, lowering the *duty cycle* so the junction
-///                             temperature climbs more slowly (trades wall-clock for a gentler slope);
+///   • `.nominal` / `.fair` / `.serious` → returns immediately with zero tax, letting hardware Metal GPU run full throttle;
 ///   • `.critical`           → PAUSES the loop until the device cools, surfacing a non-error
 ///                             "cooling" progress; after a bounded timeout it throws the recoverable
 ///                             `ThermalError.pausedForHeat` rather than letting iOS thermal-shutdown.
@@ -179,33 +176,25 @@ public final class ThermalGovernor: ThermalGoverning, @unchecked Sendable {
     /// caller should defer with a "cooling" message or fall back to a lighter request. Always `false`
     /// on macOS (source reports `.nominal`).
     public func shouldDeferHeavyStart() -> Bool {
-        return currentSeverity() >= .serious
+        return currentSeverity() >= .critical
     }
 
     // MARK: - Per-step throttle
 
-    /// Pace the decode loop according to the current thermal state. Call on a wall-clock boundary
-    /// (~every 250 ms of decode). Cooperative and cancellation-aware.
+    /// Pace the decode loop according to the current thermal state. Cooperative and cancellation-aware.
     ///
-    /// On macOS this is a fall-through no-op (`.nominal` source): no sleep, no cache clear.
-    ///
-    /// - Parameter onCooling: invoked (once, when a `.critical` pause begins) so the engine can emit
-    ///   a non-error "cooling" progress to the UI.
-    /// - Throws: `CancellationError` if cancelled while throttling; `ThermalError.pausedForHeat` if
-    ///   the device stays `.critical` past the bounded cooling timeout.
+    /// Following full hardware-managed execution (matching OGAM), `.nominal`, `.fair`, and `.serious`
+    /// states incur zero artificial sleep tax so the Metal GPU runs full throttle.
+    /// Only `.critical` (extreme threshold approaching thermal shutdown) pauses generation to cool.
     public func throttleIfNeeded(onCooling: (@Sendable () -> Void)? = nil) async throws {
         guard Self.isPacingEnabled else { return }
         // Relieve memory pressure on the generation task (never from the dispatch handler).
         if currentPressure() >= .warning { clearCache() }
 
         switch currentSeverity() {
-        case .nominal, .fair:
+        case .nominal, .fair, .serious:
             resetSeriousBackoff()
             return
-
-        case .serious:
-            clearCache()
-            try await sleepFn(seriousBackoffNanos())
 
         case .critical:
             try await pauseUntilCool(onCooling: onCooling)
@@ -213,17 +202,6 @@ public final class ThermalGovernor: ThermalGoverning, @unchecked Sendable {
     }
 
     // MARK: - Pacing logic
-
-    /// Backoff at `.serious`: 250 ms, lengthening 100 ms per consecutive serious throttle up to
-    /// 750 ms, so a device that stays hot opens progressively wider idle gaps.
-    private func seriousBackoffNanos() -> UInt64 {
-        lock.lock()
-        consecutiveSeriousThrottles = min(consecutiveSeriousThrottles + 1, 5)
-        let steps = consecutiveSeriousThrottles
-        lock.unlock()
-        let millis = 250 + 100 * (steps - 1)            // 250…650 (+ the cap below)
-        return UInt64(min(millis, 750)) * 1_000_000
-    }
 
     private func resetSeriousBackoff() {
         lock.lock(); consecutiveSeriousThrottles = 0; lock.unlock()

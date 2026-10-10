@@ -266,7 +266,7 @@ public final class AppSettings {
         }
         contextLength = snap?.contextLength ?? 8192
         onlineContextLength = snap?.onlineContextLength ?? 32_768
-        kvBits = snap?.kvBits ?? 4
+        kvBits = snap?.kvBits ?? 8
         continuedProcessingEnabled = snap?.continuedProcessingEnabled ?? false
         appearance = snap?.appearance ?? .system
         loading = false
@@ -473,13 +473,13 @@ public final class AppSettings {
         searchEngines = [.duckduckgo, .bing, .brave, .yahoo, .marginalia]
         temperature = 0.7
         topP = 0.95
-        topK = 20
+        topK = 40
         repetitionPenalty = 1.05
         maxTokens = 1024
         onlineMaxTokens = 0
         contextLength = 8192
         onlineContextLength = 32_768
-        kvBits = 4
+        kvBits = 8
         continuedProcessingEnabled = false
         appearance = .system
         loading = false
