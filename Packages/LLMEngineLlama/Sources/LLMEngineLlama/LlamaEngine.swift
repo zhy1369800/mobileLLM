@@ -173,11 +173,27 @@ public actor LlamaEngine: LLMEngine {
     private func ensureVisionContext() -> OpaquePointer? {
         if let mtmdContext { return mtmdContext }
         guard let projectorPath, let m = model else { return nil }
+
+        // Aligning with OGAM: protect against iOS Metal memory overflow by reserving 1.6 GB headroom.
+        // If remaining available memory is tight (< 1.6 GB) or on low-tier memory devices, run mmproj on CPU
+        // to prevent Metal unified buffer allocations from overflowing and crashing the app.
+        let reserveBytes: UInt64 = 1_600_000_000
+        let available = MemoryProbe.availableBytes()
+        let allowGpu = available > reserveBytes && DeviceTier.current.physicalMemoryBytes > 4_000_000_000
+
         var mp2 = mtmd_context_params_default()
-        mp2.use_gpu = true
+        mp2.use_gpu = allowGpu
         mp2.print_timings = false
         mp2.n_threads = nThreads
-        mtmdContext = projectorPath.withCString { mtmd_init_from_file($0, m, mp2) }
+
+        var ctx = projectorPath.withCString { mtmd_init_from_file($0, m, mp2) }
+        // Fallback: if GPU init failed or returned nil, retry on CPU rather than failing
+        if ctx == nil && mp2.use_gpu {
+            mp2.use_gpu = false
+            ctx = projectorPath.withCString { mtmd_init_from_file($0, m, mp2) }
+        }
+
+        mtmdContext = ctx
         return mtmdContext
     }
 
