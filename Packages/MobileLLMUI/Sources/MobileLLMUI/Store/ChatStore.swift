@@ -2277,6 +2277,13 @@ public final class ChatStore {
 
         genTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            var taskImageURLToClean: URL? = nil
+            defer {
+                if let url = taskImageURLToClean {
+                    try? FileManager.default.removeItem(at: url)
+                }
+            }
+
             do {
                 var firstImageFileName: String? = nil
                 do {
@@ -2288,8 +2295,9 @@ public final class ChatStore {
                             let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                             let tasksDir = documentsURL.appendingPathComponent("tasks")
                             try? FileManager.default.createDirectory(at: tasksDir, withIntermediateDirectories: true)
-                            let taskImageURL = tasksDir.appendingPathComponent(fileName)
-                            try? attachment.data.write(to: taskImageURL)
+                            let imageURL = tasksDir.appendingPathComponent(fileName)
+                            try? attachment.data.write(to: imageURL)
+                            taskImageURLToClean = imageURL
                         }
                     }
                 } catch {
@@ -2350,35 +2358,52 @@ public final class ChatStore {
 
                     // 检查是否包含工具调用
                     if self.settings.toolsEnabled,
-                       let toolCall = ShortcutsModelPromptBuilder.parseToolCall(from: answerContent),
-                       let registry = try? await self.toolRegistry(config: self.settings.builtInToolConfig, servers: self.settings.mcpServers),
-                       let tool = registry.tools.first(where: { $0.schema.name == toolCall.tool || $0.schema.name.lowercased() == toolCall.tool.lowercased() }) {
+                       let toolCall = ShortcutsModelPromptBuilder.parseToolCall(from: answerContent) {
 
-                        self.streaming?.warmingNote = "正在执行工具: \(toolCall.tool)..."
-                        let argsData = (try? JSONSerialization.data(withJSONObject: toolCall.arguments, options: [])) ?? Data()
-                        let argsString = String(data: argsData, encoding: .utf8) ?? "{}"
-                        let toolResultText = await tool.execute(argumentsJSON: argsString)
+                        if let registry = try? await self.toolRegistry(config: self.settings.builtInToolConfig, servers: self.settings.mcpServers),
+                           let tool = registry.tools.first(where: { $0.schema.name == toolCall.tool || $0.schema.name.lowercased() == toolCall.tool.lowercased() }) {
 
-                        let argsSummary = (try? String(data: JSONSerialization.data(withJSONObject: toolCall.arguments), encoding: .utf8)) ?? "{}"
-                        let run = ToolRun(name: toolCall.tool, arguments: argsSummary, result: toolResultText)
-                        toolRuns.append(run)
+                            self.streaming?.warmingNote = "正在执行工具: \(toolCall.tool)..."
+                            let argsData = (try? JSONSerialization.data(withJSONObject: toolCall.arguments, options: [])) ?? Data()
+                            let argsString = String(data: argsData, encoding: .utf8) ?? "{}"
+                            let toolResultText = await tool.execute(argumentsJSON: argsString)
 
-                        // 保留原始提问与上下文，将工具执行结果传递给快捷指令模型
-                        currentMsg = ShortcutsModelPromptBuilder.buildMessage(
-                            systemPrompt: system,
-                            toolDescriptions: toolDesc,
-                            history: historyTuples,
-                            currentPrompt: """
-                            【原始提问】
-                            \(currentPrompt)
+                            let argsSummary = (try? String(data: JSONSerialization.data(withJSONObject: toolCall.arguments), encoding: .utf8)) ?? "{}"
+                            let run = ToolRun(name: toolCall.tool, arguments: argsSummary, result: toolResultText)
+                            toolRuns.append(run)
 
-                            【工具执行结果（tool: \(toolCall.tool)）】
-                            \(toolResultText)
+                            // 保留原始提问与上下文，将工具执行结果传递给快捷指令模型
+                            currentMsg = ShortcutsModelPromptBuilder.buildMessage(
+                                systemPrompt: system,
+                                toolDescriptions: toolDesc,
+                                history: historyTuples,
+                                currentPrompt: """
+                                【原始提问】
+                                \(currentPrompt)
 
-                            请根据上述工具执行结果，以自然语言直接回答用户最初的提问。
-                            """
-                        )
-                        continue
+                                【工具执行结果（tool: \(toolCall.tool)）】
+                                \(toolResultText)
+
+                                请根据上述工具执行结果，以自然语言直接回答用户最初的提问。
+                                """
+                            )
+                            continue
+                        } else {
+                            // 工具不存在（模型幻觉防范）：回传明确错误提示，让模型改用其他工具或直接回答
+                            currentMsg = ShortcutsModelPromptBuilder.buildMessage(
+                                systemPrompt: system,
+                                toolDescriptions: toolDesc,
+                                history: historyTuples,
+                                currentPrompt: """
+                                【原始提问】
+                                \(currentPrompt)
+
+                                【工具执行错误】
+                                未找到名为 '\(toolCall.tool)' 的工具。请仅使用【可用工具说明】中声明的工具，或直接以自然语言回答用户最初的提问。
+                                """
+                            )
+                            continue
+                        }
                     } else {
                         // 无工具调用，完成并以打字机呈现最终回答
                         await self.streamShortcutsTypewriter(
@@ -2397,11 +2422,32 @@ public final class ChatStore {
                     assistantMessageID: assistantID,
                     message: "快捷指令工具调用已达最大轮次上限"
                 )
+            } catch is CancellationError {
+                if Task.isCancelled || self.streaming?.phase == .stopping {
+                    self.finalizeIfNeeded(assistantID: assistantID, stopReason: .cancelled, failed: false)
+                }
             } catch {
+                if Task.isCancelled || self.streaming?.phase == .stopping {
+                    self.finalizeIfNeeded(assistantID: assistantID, stopReason: .cancelled, failed: false)
+                    return
+                }
+                var failureMessage = "快捷指令执行失败: \(error.localizedDescription)"
+                if let shortcutError = error as? ShortcutAutomationError {
+                    switch shortcutError {
+                    case .timeout(let sec):
+                        failureMessage = "快捷指令【\(shortcutName)】响应超时（\(sec)秒）。请检查系统快捷指令中是否存在同名指令，以及自动化是否已开启。"
+                    case .permissionDenied:
+                        failureMessage = "快捷指令自动化缺少通知权限，请在系统设置中允许本应用发送通知。"
+                    case .missingShortcut:
+                        failureMessage = "未指定快捷指令名称，请在设置中配置对应的快捷指令。"
+                    default:
+                        break
+                    }
+                }
                 self.commitShortcutsFailure(
                     conversationID: conversationID,
                     assistantMessageID: assistantID,
-                    message: "快捷指令执行失败: \(error.localizedDescription)"
+                    message: failureMessage
                 )
             }
         }
