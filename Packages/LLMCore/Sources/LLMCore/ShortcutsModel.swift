@@ -66,7 +66,8 @@ public enum ShortcutsModelPromptBuilder {
             var historyText = "【历史对话】"
             for item in nonTrivialHistory {
                 let roleName = item.role == "user" ? "用户" : "助手"
-                historyText += "\n\(roleName): \(item.content)"
+                let cleanContent = item.role == "user" ? item.content : extractResultContent(from: item.content)
+                historyText += "\n\(roleName): \(cleanContent)"
             }
             sections.append(historyText)
         }
@@ -78,6 +79,27 @@ public enum ShortcutsModelPromptBuilder {
             sections.append("【当前提问】\n\(trimmedCurrent)")
             return sections.joined(separator: "\n\n")
         }
+    }
+
+    /// Extracts the real answer content from the shortcut automation executor's raw response.
+    /// The raw response is typically wrapped in `{"action":"exec","result":"...","status":"completed",...}`.
+    /// If wrapped, returns the inner `result` string; otherwise returns the input text.
+    public static func extractResultContent(from text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{") && trimmed.hasSuffix("}"),
+              let data = trimmed.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let resultValue = json["result"] else {
+            return text
+        }
+        if let str = resultValue as? String {
+            return str
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: resultValue, options: []),
+           let str = String(data: data, encoding: .utf8) {
+            return str
+        }
+        return text
     }
 
     /// Constructs the parameters dictionary matching the shortcut automation schema.

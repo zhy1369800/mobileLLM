@@ -78,4 +78,32 @@ final class ShortcutsModelTests: XCTestCase {
         let parsed = ShortcutsModelPromptBuilder.parseToolCall(from: response)
         XCTAssertNil(parsed)
     }
+
+    func testExtractResultContentFromWrappedJSON() {
+        let rawJSON = """
+        {"action":"exec","result":"你好！有什么我可以帮你的吗？","shortcut":"发消息问豆包","status":"completed","success":true,"taskId":"B3E75CF3-FFD7-4E78-9A9B-3CBA452A45F1"}
+        """
+        let extracted = ShortcutsModelPromptBuilder.extractResultContent(from: rawJSON)
+        XCTAssertEqual(extracted, "你好！有什么我可以帮你的吗？")
+    }
+
+    func testExtractResultContentFromPlainText() {
+        let text = "这是普通纯文本回答"
+        let extracted = ShortcutsModelPromptBuilder.extractResultContent(from: text)
+        XCTAssertEqual(extracted, "这是普通纯文本回答")
+    }
+
+    func testBuildMessageSanitizesAssistantHistory() {
+        let rawAssistantHistory = """
+        {"action":"exec","result":"我可以帮您解答各种问题。","shortcut":"发消息问豆包","status":"completed","success":true,"taskId":"123"}
+        """
+        let msg = ShortcutsModelPromptBuilder.buildMessage(
+            systemPrompt: "系统提示",
+            history: [("user", "你能做什么"), ("assistant", rawAssistantHistory)],
+            currentPrompt: "写一首诗"
+        )
+        XCTAssertFalse(msg.contains("taskId"))
+        XCTAssertFalse(msg.contains("shortcut"))
+        XCTAssertTrue(msg.contains("助手: 我可以帮您解答各种问题。"))
+    }
 }

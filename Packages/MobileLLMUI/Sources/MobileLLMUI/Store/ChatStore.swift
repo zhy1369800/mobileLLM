@@ -2346,9 +2346,11 @@ public final class ChatStore {
                         timeoutSeconds: 25
                     )
 
+                    let answerContent = ShortcutsModelPromptBuilder.extractResultContent(from: rawResult)
+
                     // 检查是否包含工具调用
                     if self.settings.toolsEnabled,
-                       let toolCall = ShortcutsModelPromptBuilder.parseToolCall(from: rawResult),
+                       let toolCall = ShortcutsModelPromptBuilder.parseToolCall(from: answerContent),
                        let registry = try? await self.toolRegistry(config: self.settings.builtInToolConfig, servers: self.settings.mcpServers),
                        let tool = registry.tools.first(where: { $0.schema.name == toolCall.tool || $0.schema.name.lowercased() == toolCall.tool.lowercased() }) {
 
@@ -2361,17 +2363,26 @@ public final class ChatStore {
                         let run = ToolRun(name: toolCall.tool, arguments: argsSummary, result: toolResultText)
                         toolRuns.append(run)
 
-                        currentMsg = """
-                        【工具执行结果（tool: \(toolCall.tool)）】
-                        \(toolResultText)
+                        // 保留原始提问与上下文，将工具执行结果传递给快捷指令模型
+                        currentMsg = ShortcutsModelPromptBuilder.buildMessage(
+                            systemPrompt: system,
+                            toolDescriptions: toolDesc,
+                            history: historyTuples,
+                            currentPrompt: """
+                            【原始提问】
+                            \(currentPrompt)
 
-                        请根据上述工具执行结果，以自然语言直接回答用户。
-                        """
+                            【工具执行结果（tool: \(toolCall.tool)）】
+                            \(toolResultText)
+
+                            请根据上述工具执行结果，以自然语言直接回答用户最初的提问。
+                            """
+                        )
                         continue
                     } else {
                         // 无工具调用，完成并以打字机呈现最终回答
                         await self.streamShortcutsTypewriter(
-                            result: rawResult,
+                            result: answerContent,
                             assistantID: assistantID,
                             conversationID: conversationID,
                             toolRuns: toolRuns
