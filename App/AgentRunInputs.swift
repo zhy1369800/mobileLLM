@@ -38,6 +38,8 @@ public struct AgentRunRequestSnapshot: Sendable {
     public let eventSeamAvailable: Bool
     /// Whether the CoreLocation seam is available for the location tool (TCC granted lazily).
     public let locationSeamAvailable: Bool
+    /// Whether the Shortcut automation seam is available for shortcut_automation_tool.
+    public let shortcutSeamAvailable: Bool
     /// MCP tools explicitly discovered by the user's server setup/refresh flow (spec §13: discovery
     /// never happens during prompt compilation).
     public let mcpToolDescriptors: [AgentToolDescriptor]
@@ -93,6 +95,7 @@ public struct AgentRunRequestSnapshot: Sendable {
         memorySeamAvailable: Bool,
         eventSeamAvailable: Bool,
         locationSeamAvailable: Bool,
+        shortcutSeamAvailable: Bool = true,
         mcpToolDescriptors: [AgentToolDescriptor],
         webSearchDestinations: [ExternalDestination],
         toolPolicy: ConversationToolPolicy?,
@@ -130,6 +133,7 @@ public struct AgentRunRequestSnapshot: Sendable {
         self.memorySeamAvailable = memorySeamAvailable
         self.eventSeamAvailable = eventSeamAvailable
         self.locationSeamAvailable = locationSeamAvailable
+        self.shortcutSeamAvailable = shortcutSeamAvailable
         self.mcpToolDescriptors = mcpToolDescriptors
         self.webSearchDestinations = webSearchDestinations
         self.toolPolicy = toolPolicy
@@ -180,6 +184,7 @@ extension AgentRunRequestSnapshot {
             memorySeamAvailable: memorySeamAvailable,
             eventSeamAvailable: eventSeamAvailable,
             locationSeamAvailable: locationSeamAvailable,
+            shortcutSeamAvailable: shortcutSeamAvailable,
             mcpToolDescriptors: mcpToolDescriptors,
             webSearchDestinations: webSearchDestinations,
             // Candidate/repair generation is a pure source-compilation pass. When its caller turns
@@ -410,6 +415,7 @@ struct AppFrozenInputBuilder: Sendable {
             memoryAvailable: snapshot.memorySeamAvailable,
             eventSeamAvailable: snapshot.eventSeamAvailable,
             locationSeamAvailable: snapshot.locationSeamAvailable,
+            shortcutSeamAvailable: snapshot.shortcutSeamAvailable,
             mcpDescriptors: snapshot.toolsEnabled ? snapshot.mcpToolDescriptors : []
         )
         let rawPolicy = try snapshot.toolPolicy ?? ConversationToolPolicy(
@@ -547,6 +553,13 @@ struct AppFrozenInputBuilder: Sendable {
                 normalizedIdentity: "mobilellm.location"
             ))
             ceilingDataCategories.append(try AgentDataCategory(rawValue: "user.location"))
+        }
+        if snapshot.shortcutSeamAvailable, enabledTools.contains("shortcut_automation_tool") {
+            ceilingDestinations.append(try ExternalDestination(
+                kind: .privateDataStore,
+                normalizedIdentity: "mobilellm.shortcuts"
+            ))
+            ceilingDataCategories.append(try AgentDataCategory(rawValue: "user.shortcuts"))
         }
         for descriptor in snapshot.mcpToolDescriptors {
             let providerID = descriptor.id.logicalID.providerID

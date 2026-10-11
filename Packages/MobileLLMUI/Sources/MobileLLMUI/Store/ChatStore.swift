@@ -147,6 +147,7 @@ public final class ChatStore {
     /// toggle is on AND its seam is present (see `ToolRegistry.assemble`).
     private let eventStore: (any EventStoring)?
     private let locationProvider: (any LocationProviding)?
+    private let shortcutExecutor: (any ShortcutAutomationExecuting)?
     /// What the assistant remembers about the user. Read on every send to compose the memory block into the
     /// system prompt — the automatic recall that makes memory work with a 2B model that never thinks to
     /// call `recall` — and unwrapped to its durable store when the memory tools are assembled. Public so
@@ -204,6 +205,7 @@ public final class ChatStore {
                 memoryBook: MemoryBook? = nil,
                 eventStore: (any EventStoring)? = nil,
                 locationProvider: (any LocationProviding)? = nil,
+                shortcutExecutor: (any ShortcutAutomationExecuting)? = nil,
                 skillStore: SkillStore? = nil,
                 agentRuns: AgentRunStore? = nil,
                 workflowStore: WorkflowStore? = nil) {
@@ -214,6 +216,7 @@ public final class ChatStore {
         self.memoryBook = memoryBook
         self.eventStore = eventStore
         self.locationProvider = locationProvider
+        self.shortcutExecutor = shortcutExecutor
         self.skillStore = skillStore
         self.agentRuns = agentRuns
         self.workflowStore = workflowStore
@@ -1847,7 +1850,8 @@ public final class ChatStore {
         // The tools get the DURABLE store, not the book: they run inside the agent loop, off the main
         // actor, and the book is only the screen's (and the injector's) main-actor mirror of it.
         let builtIns = ToolRegistry.assemble(config: config, memoryStore: memoryBook?.store,
-                                             eventStore: eventStore, locationProvider: locationProvider)
+                                             eventStore: eventStore, locationProvider: locationProvider,
+                                             shortcutExecutor: shortcutExecutor)
         let registry: ToolRegistry
         if servers.isEmpty {
             registry = builtIns

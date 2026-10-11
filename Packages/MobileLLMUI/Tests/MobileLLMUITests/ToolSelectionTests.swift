@@ -49,8 +49,8 @@ final class ToolSelectionTests: XCTestCase {
         let settings = AppSettings(defaults: defaults)
         settings.disabledBuiltInTools = Set(ToolID.allCases.map(\.rawValue))
 
-        XCTAssertEqual(ToolsView.summary(for: settings), "Off · 0 of 9 built-in tools selected")
+        XCTAssertEqual(ToolsView.summary(for: settings), "Off · 0 of 10 built-in tools selected")
         settings.toolsEnabled = true
-        XCTAssertEqual(ToolsView.summary(for: settings), "0 of 9 built-in tools selected")
+        XCTAssertEqual(ToolsView.summary(for: settings), "0 of 10 built-in tools selected")
     }
 }

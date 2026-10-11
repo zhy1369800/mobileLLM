@@ -25,6 +25,7 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         memoryAvailable: Bool,
         eventSeamAvailable: Bool,
         locationSeamAvailable: Bool,
+        shortcutSeamAvailable: Bool = true,
         mcpDescriptors: [AgentToolDescriptor] = [],
         trustRevision: String = "builtin.v1"
     ) throws -> ToolCatalogSnapshot {
@@ -113,6 +114,7 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
             ("list_calendar_events", ListCalendarEventsTool.schema, eventSeamAvailable),
             ("create_reminder", CreateReminderTool.schema, eventSeamAvailable),
             ("current_location", CurrentLocationTool.schema, locationSeamAvailable),
+            ("shortcut_automation_tool", ShortcutAutomationTool.schema, shortcutSeamAvailable),
         ]
         for entry in systemDataTools {
             let logicalID = try AgentToolLogicalID(providerID: "builtin", name: entry.name)
@@ -161,6 +163,7 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         memoryStore: (any MemoryStoring)?,
         eventStore: (any EventStoring)?,
         locationProvider: (any LocationProviding)?,
+        shortcutExecutor: (any ShortcutAutomationExecuting)? = nil,
         mcpCache: MCPDiscoveryCache,
         session: URLSession = .shared
     ) throws {
@@ -245,6 +248,17 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
                 timeoutMilliseconds: 15_000
             ))
         }
+        if enabled.contains("shortcut_automation_tool"), let shortcutExecutor {
+            try register(AppSystemDataToolAdapter(
+                tool: ShortcutAutomationTool(executor: shortcutExecutor),
+                effects: [.localWrite, .unknownExternal],
+                destinationIdentity: "mobilellm.shortcuts",
+                dataCategory: "user.shortcuts",
+                userPreview: "Execute iOS Shortcuts automation",
+                trustRevision: "builtin.v1",
+                timeoutMilliseconds: 30_000
+            ))
+        }
         if enabled.contains("remember"), let memoryStore {
             try register(AppMemoryToolAdapter(
                 tool: RememberTool(store: memoryStore),
@@ -263,7 +277,8 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
             enabledToolNames: enabledToolNames,
             memoryAvailable: memoryStore != nil,
             eventSeamAvailable: eventStore != nil,
-            locationSeamAvailable: locationProvider != nil
+            locationSeamAvailable: locationProvider != nil,
+            shortcutSeamAvailable: shortcutExecutor != nil
         )
         self.adapters = adapters
         self.mcpCache = mcpCache
@@ -277,6 +292,7 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         case "recall": [.localRead]
         case "create_calendar_event", "create_reminder": [.localWrite]
         case "list_calendar_events", "current_location": [.localRead]
+        case "shortcut_automation_tool": [.localWrite, .unknownExternal]
         default: [.localPure]
         }
     }
@@ -287,13 +303,13 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
 
     private static func idempotency(for name: String) -> ExternalIdempotency {
         // A write tool cannot declare pure-read idempotency (descriptor semantics validation).
-        name == "remember" || name == "create_calendar_event" || name == "create_reminder"
+        name == "remember" || name == "create_calendar_event" || name == "create_reminder" || name == "shortcut_automation_tool"
             ? .nonIdempotent : .pureRead
     }
 
     private static func timeoutMilliseconds(for name: String) -> UInt64 {
         switch name {
-        case "web_search", "wikipedia", "fetch_webpage": 30_000
+        case "web_search", "wikipedia", "fetch_webpage", "shortcut_automation_tool": 30_000
         case "current_location": 15_000
         default: 5_000
         }

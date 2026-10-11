@@ -33,6 +33,7 @@ public final class AppContainer {
     /// request the system permission right there (nil in tests/previews — the screen then skips prompting).
     public let toolEventStore: (any EventStoring)?
     public let toolLocationProvider: (any LocationProviding)?
+    public let toolShortcutExecutor: (any ShortcutAutomationExecuting)?
     /// OpenAI Responses API key store (Keychain-backed in the app; injectable for tests/previews).
     public let openAICredentials: any OpenAICredentialStoring
     /// The durable agent runtime projection and command surface (spec §20). Tests/previews may omit it;
@@ -90,6 +91,7 @@ public final class AppContainer {
                 availableMemory: @escaping @Sendable () -> Int64 = { Int64(bitPattern: MemoryProbe.availableBytes()) },
                 eventStore: (any EventStoring)? = nil,
                 locationProvider: (any LocationProviding)? = nil,
+                shortcutExecutor: (any ShortcutAutomationExecuting)? = nil,
                 openAICredentials: (any OpenAICredentialStoring)? = nil,
                 agentRuns: AgentRunStore? = nil,
                 lifecycle: LifecycleCoordinator? = nil,
@@ -127,11 +129,14 @@ public final class AppContainer {
         self.skills = skillStore
         self.toolEventStore = eventStore
         self.toolLocationProvider = locationProvider
+        self.toolShortcutExecutor = shortcutExecutor
         self.openAICredentials = openAICredentials ?? KeychainOpenAICredentialStore()
         self.agentRuns = agentRuns
         self.chat = ChatStore(engine: engine, store: store, settings: settings,
                               memoryBook: memoryBook, eventStore: eventStore,
-                              locationProvider: locationProvider, skillStore: skillStore,
+                              locationProvider: locationProvider,
+                              shortcutExecutor: shortcutExecutor,
+                              skillStore: skillStore,
                               agentRuns: agentRuns,
                               workflowStore: self.workflowStore)
         // Cold launch restores identity only, so the first turn is where the weights are actually loaded.

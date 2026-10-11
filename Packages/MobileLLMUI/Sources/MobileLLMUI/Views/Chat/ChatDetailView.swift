@@ -72,6 +72,7 @@ struct ChatDetailView: View {
                              onOpenModels: onOpenModels,
                              toolEventStore: container.toolEventStore,
                              toolLocationProvider: container.toolLocationProvider,
+                             toolShortcutExecutor: container.toolShortcutExecutor,
                              onOpenToolSettings: { showTools = true })
                 }
                     .padding(.bottom, keyboardOverlap)
@@ -200,7 +201,8 @@ struct ChatDetailView: View {
             NavigationStack {
                 ToolsView(settings: container.settings,
                           eventStore: container.toolEventStore,
-                          locationProvider: container.toolLocationProvider)
+                          locationProvider: container.toolLocationProvider,
+                          shortcutExecutor: container.toolShortcutExecutor)
             }
             #if os(macOS)
             .frame(minWidth: 520, minHeight: 560)

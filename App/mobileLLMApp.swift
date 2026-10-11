@@ -322,6 +322,11 @@ struct MobileLLMApp: App {
         #else
         let locationProvider: (any LocationProviding)? = nil
         #endif
+        #if canImport(UserNotifications)
+        let shortcutExecutor: (any ShortcutAutomationExecuting)? = ShortcutAutomationService()
+        #else
+        let shortcutExecutor: (any ShortcutAutomationExecuting)? = nil
+        #endif
         let container = MainActor.assumeIsolated {
             #if os(iOS)
             // Production finite drain lease over UIApplication.beginBackgroundTask (spec §19.1).
@@ -342,6 +347,7 @@ struct MobileLLMApp: App {
                 systemModelProbe: { AppleSystemModel.status() },
                 eventStore: eventStore,
                 locationProvider: locationProvider,
+                shortcutExecutor: shortcutExecutor,
                 lifecycle: lifecycle,
                 continuedProcessing: continuedProcessing
             )
@@ -473,6 +479,7 @@ struct MobileLLMApp: App {
                     memoryStore: container.chat.memoryBook?.store,
                     eventStore: container.toolEventStore,
                     locationProvider: container.toolLocationProvider,
+                    shortcutExecutor: container.toolShortcutExecutor,
                     mcpDiscovery: container.mcpDiscovery,
                     session: agentRuntimeURLSession(),
                     onlineConfiguration: { onlineConfigBox.configuration(for: $0) }
@@ -821,6 +828,7 @@ func makeAgentSnapshot(
         memorySeamAvailable: container.chat.memoryBook != nil,
         eventSeamAvailable: container.toolEventStore != nil,
         locationSeamAvailable: container.toolLocationProvider != nil,
+        shortcutSeamAvailable: container.toolShortcutExecutor != nil,
         mcpToolDescriptors: toolsEnabled
             ? container.mcpDiscovery.descriptors(for: container.settings.mcpServers)
             : [],

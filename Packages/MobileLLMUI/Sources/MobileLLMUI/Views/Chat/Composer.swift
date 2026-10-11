@@ -25,6 +25,7 @@ struct Composer: View {
     /// user's decision point, just like the full Tool Settings screen.
     var toolEventStore: (any EventStoring)? = nil
     var toolLocationProvider: (any LocationProviding)? = nil
+    var toolShortcutExecutor: (any ShortcutAutomationExecuting)? = nil
     /// Opens the full screen for descriptions, search-engine priority, MCP per-tool mute, and permissions.
     var onOpenToolSettings: () -> Void = {}
 
@@ -454,7 +455,7 @@ struct Composer: View {
     private static let onDeviceToolRows =
         BuiltInToolRow.all.filter { ["calculator", "clock", "memory"].contains($0.id) }
     private static let personalToolRows =
-        BuiltInToolRow.all.filter { ["calendar", "reminders", "location"].contains($0.id) }
+        BuiltInToolRow.all.filter { ["calendar", "reminders", "location", "shortcut_automation"].contains($0.id) }
 
     private func toolToggle(_ row: BuiltInToolRow) -> some View {
         Toggle(isOn: Binding(
@@ -469,7 +470,8 @@ struct Composer: View {
                 if enabled, row.privacy {
                     Task { @MainActor in
                         if await row.requestPermission(eventStore: toolEventStore,
-                                                       locationProvider: toolLocationProvider) == .denied {
+                                                       locationProvider: toolLocationProvider,
+                                                       shortcutExecutor: toolShortcutExecutor) == .denied {
                             chat.showToast(Toast(
                                 "\(row.title) is selected, but access is off in system Settings.",
                                 kind: .warning, autoDismiss: 5

@@ -81,7 +81,7 @@ public enum AppLocalToolIDs {
     public static let names = [
         "calculator", "current_datetime", "wikipedia", "web_search", "fetch_webpage",
         "remember", "recall", "create_calendar_event", "list_calendar_events",
-        "create_reminder", "current_location",
+        "create_reminder", "current_location", "shortcut_automation_tool",
     ]
 
     public static var current: [AgentToolLogicalID] {

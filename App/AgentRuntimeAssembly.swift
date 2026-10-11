@@ -696,6 +696,7 @@ public final class AgentRuntimeAssembly {
         memoryStore: (any MemoryStoring)? = nil,
         eventStore: (any EventStoring)? = nil,
         locationProvider: (any LocationProviding)? = nil,
+        shortcutExecutor: (any ShortcutAutomationExecuting)? = nil,
         mcpDiscovery: MCPDiscoveryCache = MCPDiscoveryCache(),
         session: URLSession = .shared,
         onlineConfiguration: @escaping @Sendable (AgentModelSelection) -> ResponsesAPIConfiguration? = { _ in nil }
@@ -785,6 +786,7 @@ public final class AgentRuntimeAssembly {
             memoryStore: memoryStore,
             eventStore: eventStore,
             locationProvider: locationProvider,
+            shortcutExecutor: shortcutExecutor,
             mcpCache: mcpDiscovery,
             session: session
         )

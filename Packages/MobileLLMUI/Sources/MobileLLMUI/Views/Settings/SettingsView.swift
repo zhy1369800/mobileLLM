@@ -69,7 +69,8 @@ struct SettingsView: View {
             NavigationStack {
                 ToolsView(settings: settings,
                           eventStore: container.toolEventStore,
-                          locationProvider: container.toolLocationProvider)
+                          locationProvider: container.toolLocationProvider,
+                          shortcutExecutor: container.toolShortcutExecutor)
             }
             #if os(macOS)
             .frame(minWidth: 520, minHeight: 560)

@@ -18,6 +18,7 @@ public enum ToolID: String, Sendable, Codable, Hashable, CaseIterable {
     case listCalendarEvents   = "list_calendar_events"
     case createReminder       = "create_reminder"
     case currentLocation      = "current_location"
+    case shortcutAutomation   = "shortcut_automation_tool"
 }
 
 /// Which built-in tools to assemble and how to configure them. `enabled` is the UI-persisted toggle set;
@@ -54,6 +55,7 @@ public extension ToolRegistry {
                          memoryStore: (any MemoryStoring)? = nil,
                          eventStore: (any EventStoring)? = nil,
                          locationProvider: (any LocationProviding)? = nil,
+                         shortcutExecutor: (any ShortcutAutomationExecuting)? = nil,
                          session: URLSession = .shared) -> ToolRegistry {
         var tools: [Tool] = []
         func on(_ id: ToolID) -> Bool { config.enabled.contains(id) }
@@ -75,6 +77,9 @@ public extension ToolRegistry {
         }
         if let locationProvider, on(.currentLocation) {
             tools.append(CurrentLocationTool(provider: locationProvider))
+        }
+        if let shortcutExecutor, on(.shortcutAutomation) {
+            tools.append(ShortcutAutomationTool(executor: shortcutExecutor))
         }
         return ToolRegistry(tools)
     }

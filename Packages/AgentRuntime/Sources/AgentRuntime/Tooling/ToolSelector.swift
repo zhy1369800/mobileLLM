@@ -344,6 +344,12 @@ public struct DeterministicToolSelector: Sendable {
                 score += 300
             }
         }
+        if ["shortcut_automation_tool", "shortcut_automation", "shortcuts"].contains(name) {
+            let shortcutKeywords = ["快捷指令", "捷径", "自动化", "shortcut", "shortcuts", "执行指令", "运行指令", "跑个捷径"]
+            if shortcutKeywords.contains(where: { lower.contains($0) }) {
+                score += 300
+            }
+        }
         return score
     }
 

@@ -19,6 +19,7 @@ struct ToolsView: View {
     /// denial routes to Settings instead of silently arming a tool that can only fail.
     var eventStore: (any EventStoring)? = nil
     var locationProvider: (any LocationProviding)? = nil
+    var shortcutExecutor: (any ShortcutAutomationExecuting)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var showMCP = false
     /// Which privacy row's "allowed it off in system Settings" alert is up (nil = none).
@@ -183,7 +184,9 @@ struct ToolsView: View {
     /// there. The toggle itself stays on either way (the user's intent is recorded; a denied tool call
     /// returns an instructive error until access is granted).
     private func requestSystemPermission(for row: BuiltInToolRow) async {
-        let result = await row.requestPermission(eventStore: eventStore, locationProvider: locationProvider)
+        let result = await row.requestPermission(eventStore: eventStore,
+                                                 locationProvider: locationProvider,
+                                                 shortcutExecutor: shortcutExecutor)
         if result == .denied { deniedRow = row }
     }
 
@@ -275,11 +278,13 @@ struct BuiltInToolRow: Identifiable {
 
     /// The permission flow shared by the full Tools screen and the chat's compact picker.
     func requestPermission(eventStore: (any EventStoring)?,
-                           locationProvider: (any LocationProviding)?) async -> ToolPermission? {
+                           locationProvider: (any LocationProviding)?,
+                           shortcutExecutor: (any ShortcutAutomationExecuting)? = nil) async -> ToolPermission? {
         switch id {
         case "calendar": return await eventStore?.requestPermission(for: .events)
         case "reminders": return await eventStore?.requestPermission(for: .reminders)
         case "location": return await locationProvider?.requestPermission()
+        case "shortcut_automation": return await shortcutExecutor?.requestPermission()
         default: return nil
         }
     }
@@ -317,6 +322,9 @@ struct BuiltInToolRow: Identifiable {
         .init(id: "location", title: "Location",
               subtitle: "Use your approximate (city-level) location.",
               icon: "location", toolIDs: [.currentLocation], privacy: true),
+        .init(id: "shortcut_automation", title: "Shortcuts",
+              subtitle: "Run iOS Shortcuts automations via notification triggers and file exchange.",
+              icon: "command", toolIDs: [.shortcutAutomation], privacy: true),
     ]
 }
 
