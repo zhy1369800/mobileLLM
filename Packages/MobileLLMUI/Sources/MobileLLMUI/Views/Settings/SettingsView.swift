@@ -20,6 +20,7 @@ struct SettingsView: View {
     @State private var showOpenAI = false
     @State private var newShortcutName = ""
     @State private var newShortcutTarget = ""
+    @FocusState private var isShortcutFieldFocused: Bool
 
     init(container: AppContainer) {
         self.container = container
@@ -41,6 +42,7 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity)
             .padding(Theme.Space.xl)
         }
+        .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
         .scrollDismissesKeyboard(.interactively)   // drag to dismiss the system-prompt keyboard
         .background(Theme.bg)
         .task { storageBytes = await container.conversationStore.storageBytes() }
@@ -343,8 +345,10 @@ struct SettingsView: View {
                 HStack(spacing: Theme.Space.sm) {
                     TextField("Model name (e.g. 豆包)", text: $newShortcutName)
                         .textFieldStyle(.roundedBorder)
+                        .focused($isShortcutFieldFocused)
                     TextField("Shortcut (e.g. 发消息问豆包)", text: $newShortcutTarget)
                         .textFieldStyle(.roundedBorder)
+                        .focused($isShortcutFieldFocused)
                 }
                 Button {
                     let name = newShortcutName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -353,6 +357,8 @@ struct SettingsView: View {
                     settings.upsertShortcutsService(ShortcutsService(name: name, shortcutName: target))
                     newShortcutName = ""
                     newShortcutTarget = ""
+                    isShortcutFieldFocused = false
+                    dismissKeyboard()
                 } label: {
                     Label("Add Model", systemImage: "plus")
                         .font(.caption.weight(.medium))
@@ -636,6 +642,13 @@ struct SettingsView: View {
             Clipboard.copy(json)
             container.chat.showToast(Toast("Copied \(convos.count) chats as JSON", kind: .success))
         }
+    }
+
+    private func dismissKeyboard() {
+        isShortcutFieldFocused = false
+        #if os(iOS)
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        #endif
     }
 
     // MARK: Builders
