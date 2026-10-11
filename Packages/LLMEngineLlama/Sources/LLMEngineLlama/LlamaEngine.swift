@@ -81,6 +81,7 @@ public actor LlamaEngine: LLMEngine {
     private var contextCap: Int = 0          // the n_ctx the live context was built with
     private var contextKVBits: Int = -1      // the Sampling.kvBits the live context's KV cache was built for
     private var cachedSessionTurns: [ChatTurn] = []
+    private var cachedSessionTokenCount: Int = 0
     private var loadedID: String?
     private var thinkingCapable = true
     private var eosText = "<|im_end|>"
@@ -228,6 +229,7 @@ public actor LlamaEngine: LLMEngine {
         projectorPath = nil
         context = nil; model = nil; vocab = nil; loadedID = nil; contextCap = 0; contextKVBits = -1
         cachedSessionTurns.removeAll()
+        cachedSessionTokenCount = 0
     }
 
     /// (Re)create the decode context sized to `cap` tokens with the requested KV-cache width. Kept separate
@@ -241,6 +243,7 @@ public actor LlamaEngine: LLMEngine {
             return
         }
         cachedSessionTurns.removeAll()
+        cachedSessionTokenCount = 0
         if let context { llama_free(context) }
         // Reset BEFORE the fallible init below: if llama_init_from_model throws out of this function,
         // `context` must not keep pointing at the freed allocation (a retry would double-free, and the
@@ -409,27 +412,36 @@ public actor LlamaEngine: LLMEngine {
 
             // Check if this turn is an incremental continuation of the cached session:
             // Condition:
-            // 1. Not in thinking mode (reasoning chain differs turn-to-turn; full evaluation guarantees context safety)
-            // 2. Prefix of `kept` exactly matches `cachedSessionTurns`
-            // 3. Exactly 1 new turn added (the new user query)
-            // 4. The new query carries no images
+            // 1. Prefix of `kept` exactly matches `cachedSessionTurns`
+            // 2. Exactly 1 new turn added (the new user query)
+            // 3. The new query carries no images
+            // 4. Physical KV cache has sufficient headroom for suffix + answer reserve
             let previousCount = cachedSessionTurns.count
-            let isIncrementalContinuation = !wantThinking &&
-                previousCount > 0 &&
+            let canAttemptIncremental = previousCount > 0 &&
                 kept.count == previousCount + 1 &&
                 Array(kept.prefix(previousCount)) == cachedSessionTurns &&
                 kept.last?.images.isEmpty == true
 
-            if isIncrementalContinuation {
+            var incrementalSuffixTokens: [llama_token]? = nil
+            if canAttemptIncremental {
+                let newTurnPrompt = Self.buildPrompt(messages: [kept.last!], template: promptTemplate,
+                                                     reasoning: reasoningStyle, thinking: wantThinking)
+                let suffixText = newTurnPrompt.hasPrefix("\n") ? newTurnPrompt : ("\n" + newTurnPrompt)
+                let tokens = Self.tokenize(vocab: vocab, text: suffixText, addSpecial: false)
+                if cachedSessionTokenCount + tokens.count + reserve <= contextCap {
+                    incrementalSuffixTokens = tokens
+                } else {
+                    NSLog("[LlamaEngine] Incremental continuation skipped: KV cache headroom exceeded (used=%d, suffix=%d, reserve=%d, cap=%d). Falling back to full evaluation.",
+                          Int32(cachedSessionTokenCount), Int32(tokens.count), Int32(reserve), Int32(contextCap))
+                }
+            }
+
+            if let suffixTokens = incrementalSuffixTokens {
                 // MULTI-TURN CONTINUATION (text or multimodal):
                 // All prior turns (including visual ViT embeddings and previous answers) already reside
                 // in the KV cache with the assistant turn cleanly closed by EOG. Decode ONLY the suffix
                 // of the new user query — completely skipping mtmd re-evaluation and saving ~3-5 seconds
                 // of image ViT compute!
-                let newTurnPrompt = Self.buildPrompt(messages: [kept.last!], template: promptTemplate,
-                                                     reasoning: reasoningStyle, thinking: wantThinking)
-                let suffixText = newTurnPrompt.hasPrefix("\n") ? newTurnPrompt : ("\n" + newTurnPrompt)
-                let suffixTokens = Self.tokenize(vocab: vocab, text: suffixText, addSpecial: false)
                 NSLog("[LlamaEngine] Incremental continuation matched! Suffix tokens: %d (skipped image/history recompute)",
                       Int32(suffixTokens.count))
                 var i = 0
@@ -451,6 +463,7 @@ public actor LlamaEngine: LLMEngine {
                 // Multimodal full evaluation: new image introduced or conversation diverged
                 llama_memory_clear(llama_get_memory(context), true)
                 cachedSessionTurns.removeAll()
+                cachedSessionTokenCount = 0
                 promptTokenCount = try await mtmdPrefill(kept: kept, context: context,
                                                          renderPrompt: renderPrompt, nBatch: nBatch,
                                                          governance: governance)
@@ -458,6 +471,7 @@ public actor LlamaEngine: LLMEngine {
                 // Pure text full evaluation: clean slate to ensure 100% position alignment
                 llama_memory_clear(llama_get_memory(context), true)
                 cachedSessionTurns.removeAll()
+                cachedSessionTokenCount = 0
                 let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true)
                 var i = 0
                 while i < promptTokens.count {
@@ -501,15 +515,36 @@ public actor LlamaEngine: LLMEngine {
             let genStart = Date()
             let maxTokens = params.maxTokens
 
+            var lastCheckpointUptime: UInt64 = DispatchTime.now().uptimeNanoseconds
+            let checkpointIntervalNanos: UInt64 = 150_000_000
+
             while true {
-                // Pause/cancel is checked every token. GenerationGovernance wall-clock-gates the heavier
-                // thermal/memory probe to at most once per ~250 ms, independently of token throughput.
-                try await governance.checkpoint()
+                // Cooperative fast-path: check Task and governance cancellation synchronously with zero allocation
+                if Task.isCancelled || governance.isCancelled {
+                    throw CancellationError()
+                }
                 guard self.context == context else { throw CancellationError() }
-                if genTokens & 0b111 == 0 {
+
+                // Pause checkpoint: only yield into asynchronous wait when generation is actively paused
+                if governance.isPaused {
+                    try await governance.cooperativeCheckpoint()
+                    guard self.context == context else { throw CancellationError() }
+                }
+
+                // Periodic thermal and system pressure checkpoint (~150ms cadence or every 32 tokens)
+                let now = DispatchTime.now().uptimeNanoseconds
+                if (genTokens & 0b11111 == 0) || (now >= lastCheckpointUptime && now - lastCheckpointUptime >= checkpointIntervalNanos) {
+                    try await governance.checkpoint()
+                    guard self.context == context else { throw CancellationError() }
+                    lastCheckpointUptime = now
+                }
+
+                // Cooperative yield to system scheduler (every 64 tokens instead of 8, preventing GPU pipeline bubbles)
+                if genTokens & 0b111111 == 0 && genTokens > 0 {
                     await Task.yield()
                     guard self.context == context else { throw CancellationError() }
                 }
+
                 if maxTokens > 0 && genTokens >= maxTokens { stop = .maxTokens; break }
                 let tokenID = llama_sampler_sample(sampler, context, -1)
 
@@ -529,9 +564,6 @@ public actor LlamaEngine: LLMEngine {
                     for d in splitter.feed(text) { emit(d) }
                 }
                 genTokens += 1
-                if genTokens & 0b111 == 0 {
-                    peak = max(peak, Self.footprintBytes())
-                }
 
                 var one = [tokenID]
                 let ok = one.withUnsafeMutableBufferPointer { buf -> Bool in
@@ -560,21 +592,25 @@ public actor LlamaEngine: LLMEngine {
                 stopReason: stop)))
 
             // Multi-turn and multimodal reuse: record valid conversational turn on natural EOS completion
-            if stop == .eos && !wantThinking && answerStripper.isNoop {
+            if stop == .eos && answerStripper.isNoop && !fullGeneratedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 cachedSessionTurns = kept + [ChatTurn(role: .assistant, content: fullGeneratedAnswer)]
+                cachedSessionTokenCount = (incrementalSuffixTokens != nil ? cachedSessionTokenCount : 0) + promptTokenCount + genTokens + 1
             } else {
                 cachedSessionTurns.removeAll()
+                cachedSessionTokenCount = 0
             }
             cont.finish()
         } catch is CancellationError {
             if let context { llama_memory_clear(llama_get_memory(context), true) }
             cachedSessionTurns.removeAll()
+            cachedSessionTokenCount = 0
             cont.yield(.done(Stats(promptTokens: 0, genTokens: 0, promptTPS: 0, tokensPerSecond: 0,
                                    peakMemoryBytes: Self.footprintBytes(), stopReason: .cancelled)))
             cont.finish()
         } catch {
             if let context { llama_memory_clear(llama_get_memory(context), true) }
             cachedSessionTurns.removeAll()
+            cachedSessionTokenCount = 0
             cont.finish(throwing: error)
         }
     }
