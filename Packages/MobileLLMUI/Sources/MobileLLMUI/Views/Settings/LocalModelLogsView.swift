@@ -119,9 +119,9 @@ struct LocalModelLogsView: View {
 
             if let stats = entry.stats {
                 HStack(spacing: Theme.Space.sm) {
-                    Label("\(stats.completionTokens) tok", systemImage: "number")
-                    Label(String(format: "%.1f tok/s", stats.tokPerSec), systemImage: "bolt.fill")
-                    Label(String(format: "%.2fs", stats.totalTime), systemImage: "clock")
+                    Label("\(stats.genTokens) tok", systemImage: "number")
+                    Label(String(format: "%.1f tok/s", stats.tokensPerSecond), systemImage: "bolt.fill")
+                    Label(stats.stopReason.rawValue, systemImage: "flag")
                 }
                 .font(.caption2)
                 .foregroundStyle(Theme.textSecondary)
@@ -186,9 +186,12 @@ struct LocalModelLogDetailView: View {
                 if let stats = entry.stats {
                     Divider().background(Theme.hairline)
                     metricRow("Prompt Tokens", value: "\(stats.promptTokens)")
-                    metricRow("Completion Tokens", value: "\(stats.completionTokens)")
-                    metricRow("Speed", value: String(format: "%.1f tok/s", stats.tokPerSec))
-                    metricRow("Duration", value: String(format: "%.2fs", stats.totalTime))
+                    metricRow("Gen Tokens", value: "\(stats.genTokens)")
+                    metricRow("Speed", value: String(format: "%.1f tok/s", stats.tokensPerSecond))
+                    if stats.promptTPS > 0 {
+                        metricRow("Prefill Speed", value: String(format: "%.1f tok/s", stats.promptTPS))
+                    }
+                    metricRow("Stop Reason", value: stats.stopReason.rawValue)
                 }
                 if let err = entry.error {
                     Divider().background(Theme.hairline)
@@ -318,12 +321,7 @@ struct LocalModelLogDetailView: View {
 
     private func copyRequestText() {
         let full = entry.messages.map { "[\($0.role.rawValue.uppercased())]\n\($0.content)" }.joined(separator: "\n\n")
-        #if os(iOS)
-        UIPasteboard.general.string = full
-        #elseif os(macOS)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(full, forType: .string)
-        #endif
+        Clipboard.copy(full)
         showCopiedPromptToast = true
         Task {
             try? await Task.sleep(nanoseconds: 1_500_000_000)
@@ -332,12 +330,7 @@ struct LocalModelLogDetailView: View {
     }
 
     private func copyResponseText() {
-        #if os(iOS)
-        UIPasteboard.general.string = entry.response
-        #elseif os(macOS)
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(entry.response, forType: .string)
-        #endif
+        Clipboard.copy(entry.response)
         showCopiedResponseToast = true
         Task {
             try? await Task.sleep(nanoseconds: 1_500_000_000)

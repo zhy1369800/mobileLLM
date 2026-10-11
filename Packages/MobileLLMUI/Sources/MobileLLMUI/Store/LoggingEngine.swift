@@ -7,22 +7,31 @@ import LLMCore
 /// into `LocalModelLogStore` when enabled in settings.
 public final class LoggingEngine: LLMEngine, @unchecked Sendable {
     private let inner: any LLMEngine
-    private let isLoggingEnabled: @Sendable () -> Bool
-    private let getActiveModelID: @Sendable () -> String
+    private let config: LoggingConfiguration
     private let onLogEntry: @Sendable (LocalModelLogEntry) -> Void
     private let lock = NSLock()
     private var loadedModelID: String?
 
     public init(
         inner: any LLMEngine,
-        isLoggingEnabled: @escaping @Sendable () -> Bool,
-        getActiveModelID: @escaping @Sendable () -> String,
+        config: LoggingConfiguration,
         onLogEntry: @escaping @Sendable (LocalModelLogEntry) -> Void
     ) {
         self.inner = inner
-        self.isLoggingEnabled = isLoggingEnabled
-        self.getActiveModelID = getActiveModelID
+        self.config = config
         self.onLogEntry = onLogEntry
+    }
+
+    private func setLoadedModel(_ id: String?) {
+        lock.lock()
+        loadedModelID = id
+        lock.unlock()
+    }
+
+    private func getLoadedModel() -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return loadedModelID
     }
 
     public func load(
@@ -32,30 +41,24 @@ public final class LoggingEngine: LLMEngine, @unchecked Sendable {
         progress: @escaping @Sendable (Double) -> Void
     ) async throws {
         try await inner.load(model: model, variant: variant, weightsDir: weightsDir, progress: progress)
-        lock.lock()
-        loadedModelID = "\(model.id) · \(variant.id)"
-        lock.unlock()
+        setLoadedModel("\(model.id) · \(variant.id)")
     }
 
     public func unload() async {
         await inner.unload()
-        lock.lock()
-        loadedModelID = nil
-        lock.unlock()
+        setLoadedModel(nil)
     }
 
     public func generate(
         messages: [ChatTurn],
         params: Sampling
     ) -> AsyncThrowingStream<EngineDelta, Error> {
-        guard isLoggingEnabled() else {
+        guard config.isEnabled else {
             return inner.generate(messages: messages, params: params)
         }
 
-        lock.lock()
-        let activeID = loadedModelID
-        lock.unlock()
-        let fallbackID = getActiveModelID()
+        let activeID = getLoadedModel()
+        let fallbackID = config.defaultModelID
         let resolvedModelID = activeID ?? (fallbackID.isEmpty ? "local-model" : fallbackID)
         let logID = UUID()
         let startTime = Date()
@@ -85,12 +88,21 @@ public final class LoggingEngine: LLMEngine, @unchecked Sendable {
                     continuation.finish(throwing: error)
                 }
 
+                let sanitizedMessages = messages.map { turn in
+                    if turn.images.isEmpty {
+                        return turn
+                    } else {
+                        let tag = " [+\(turn.images.count) image(s)]"
+                        return ChatTurn(role: turn.role, content: turn.content.isEmpty ? tag : "\(turn.content)\(tag)", images: [])
+                    }
+                }
+
                 let entry = LocalModelLogEntry(
                     id: logID,
                     timestamp: startTime,
                     modelID: resolvedModelID,
                     sampling: params,
-                    messages: messages,
+                    messages: sanitizedMessages,
                     reasoning: reasoningAccumulator.isEmpty ? nil : reasoningAccumulator,
                     response: answerAccumulator,
                     stats: statsResult,

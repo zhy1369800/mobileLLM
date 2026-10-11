@@ -108,12 +108,7 @@ public final class AppContainer {
         self.localModelLogs = logStore
         let loggingEngine = LoggingEngine(
             inner: engine,
-            isLoggingEnabled: { [weak settings] in
-                settings?.localModelLoggingEnabled ?? false
-            },
-            getActiveModelID: { [weak settings] in
-                settings?.defaultModelID ?? "local-model"
-            },
+            config: settings.loggingConfig,
             onLogEntry: { entry in
                 Task { @MainActor in
                     logStore.append(entry)

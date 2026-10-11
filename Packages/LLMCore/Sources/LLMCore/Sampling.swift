@@ -3,7 +3,7 @@
 import Foundation
 
 /// Decode / sampling parameters for one generation (DESIGN §2.2). Defaults are the shipped values.
-public struct Sampling: Sendable, Equatable {
+public struct Sampling: Sendable, Equatable, Codable {
     public var temperature: Double
     public var topP: Double
     public var topK: Int

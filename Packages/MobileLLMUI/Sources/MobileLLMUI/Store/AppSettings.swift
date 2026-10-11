@@ -5,6 +5,44 @@ import Observation
 import AppRuntime
 import LLMCore
 
+/// Thread-safe configuration mirror for `LoggingEngine` that can be read across concurrency boundaries.
+public final class LoggingConfiguration: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _isEnabled: Bool
+    private var _defaultModelID: String
+
+    public init(isEnabled: Bool = false, defaultModelID: String = "local-model") {
+        self._isEnabled = isEnabled
+        self._defaultModelID = defaultModelID
+    }
+
+    public var isEnabled: Bool {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _isEnabled
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            _isEnabled = newValue
+        }
+    }
+
+    public var defaultModelID: String {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _defaultModelID
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            _defaultModelID = newValue
+        }
+    }
+}
+
 /// User preferences (DESIGN §4 Settings): the default model, chat behavior, sampling, and appearance.
 /// `@Observable` so SwiftUI bindings drive it directly; changes persist to `UserDefaults` as one small
 /// Codable snapshot (chat data itself lives in files — DESIGN §2.4).
@@ -12,8 +50,15 @@ import LLMCore
 @Observable
 public final class AppSettings {
 
+    public let loggingConfig: LoggingConfiguration
+
     // MARK: Model
-    public var defaultModelID: String { didSet { persist() } }
+    public var defaultModelID: String {
+        didSet {
+            loggingConfig.defaultModelID = defaultModelID
+            persist()
+        }
+    }
     /// Which inference engine to prefer (Auto = greenest fit; or pin MLX / llama.cpp).
     public var enginePreference: EnginePreference { didSet { persist() } }
 
@@ -226,7 +271,12 @@ public final class AppSettings {
     public var continuedProcessingEnabled: Bool { didSet { persist() } }
 
     /// Explicit opt-in for recording local model request and response logs. Defaults OFF.
-    public var localModelLoggingEnabled: Bool { didSet { persist() } }
+    public var localModelLoggingEnabled: Bool {
+        didSet {
+            loggingConfig.isEnabled = localModelLoggingEnabled
+            persist()
+        }
+    }
 
     // MARK: Appearance
     public var appearance: AppearanceMode { didSet { persist() } }
@@ -251,7 +301,10 @@ public final class AppSettings {
         self.fallbackDefaultModelID = fallbackDefaultModelID
         var outputBudgetMigrated = false
         let snap = Self.loadSnapshot(from: defaults, key: key)
-        defaultModelID = snap?.defaultModelID ?? fallbackDefaultModelID
+        let initialModelID = snap?.defaultModelID ?? fallbackDefaultModelID
+        let initialLoggingEnabled = snap?.localModelLoggingEnabled ?? false
+        self.loggingConfig = LoggingConfiguration(isEnabled: initialLoggingEnabled, defaultModelID: initialModelID)
+        defaultModelID = initialModelID
         enginePreference = snap?.enginePreference ?? .auto
         // The stock prompt arrived after v1 shipped with no prompt at all, so seed it once into installs
         // that predate it. `systemPromptSeeded` is what makes that a migration and not a bug: without it,

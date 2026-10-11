@@ -32,7 +32,7 @@ final class LocalModelLogStoreTests: XCTestCase {
             sampling: Sampling(),
             messages: [ChatTurn(role: .user, content: "Hello")],
             response: "Hi there",
-            stats: Stats(promptTokens: 5, completionTokens: 2, tokPerSec: 10.0, totalTime: 0.2)
+            stats: Stats(promptTokens: 5, genTokens: 2, promptTPS: 25.0, tokensPerSecond: 10.0, peakMemoryBytes: 1024, stopReason: .eos)
         )
         let entry2 = LocalModelLogEntry(
             id: UUID(),
@@ -42,7 +42,7 @@ final class LocalModelLogStoreTests: XCTestCase {
             messages: [ChatTurn(role: .user, content: "Explain quantum computing")],
             reasoning: "Thinking process...",
             response: "Quantum computing is...",
-            stats: Stats(promptTokens: 10, completionTokens: 20, tokPerSec: 15.0, totalTime: 1.3)
+            stats: Stats(promptTokens: 10, genTokens: 20, promptTPS: 30.0, tokensPerSecond: 15.0, peakMemoryBytes: 2048, stopReason: .maxTokens)
         )
 
         store.append(entry1)
@@ -105,10 +105,10 @@ final class LocalModelLogStoreTests: XCTestCase {
     func testLoggingEnginePassthroughWhenDisabled() async throws {
         var recorded: [LocalModelLogEntry] = []
         let mock = MockEngine(chunks: [.answer("Hello world")])
+        let config = LoggingConfiguration(isEnabled: false, defaultModelID: "test-model")
         let loggingEngine = LoggingEngine(
             inner: mock,
-            isLoggingEnabled: { false },
-            getActiveModelID: { "test-model" },
+            config: config,
             onLogEntry: { recorded.append($0) }
         )
 
@@ -128,12 +128,12 @@ final class LocalModelLogStoreTests: XCTestCase {
         let mock = MockEngine(chunks: [
             .reasoning("Let me think..."),
             .answer("4"),
-            .done(Stats(promptTokens: 5, completionTokens: 1, tokPerSec: 10.0, totalTime: 0.1))
+            .done(Stats(promptTokens: 5, genTokens: 1, promptTPS: 10.0, tokensPerSecond: 10.0, peakMemoryBytes: 1024, stopReason: .eos))
         ])
+        let config = LoggingConfiguration(isEnabled: true, defaultModelID: "fallback-default")
         let loggingEngine = LoggingEngine(
             inner: mock,
-            isLoggingEnabled: { true },
-            getActiveModelID: { "fallback-default" },
+            config: config,
             onLogEntry: { recorded.append($0) }
         )
 
@@ -164,7 +164,7 @@ final class LocalModelLogStoreTests: XCTestCase {
         XCTAssertEqual(entry.messages.first?.content, "2+2=")
         XCTAssertEqual(entry.reasoning, "Let me think...")
         XCTAssertEqual(entry.response, "4")
-        XCTAssertEqual(entry.stats?.completionTokens, 1)
+        XCTAssertEqual(entry.stats?.genTokens, 1)
     }
 
     func testSettingsPersistence() {
