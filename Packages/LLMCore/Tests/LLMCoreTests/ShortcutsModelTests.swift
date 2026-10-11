@@ -35,6 +35,7 @@ final class ShortcutsModelTests: XCTestCase {
         XCTAssertTrue(msg.contains("【可用工具说明】"))
         XCTAssertTrue(msg.contains("create_calendar_event"))
         XCTAssertTrue(msg.contains("【工具调用格式规范】"))
+        XCTAssertTrue(msg.contains("重要重要！！！当需要用客户端工具时，你不需要考虑执行，只需要决策返回相应的工具格式就好"))
     }
 
     func testBuildParamsWithoutFileName() {

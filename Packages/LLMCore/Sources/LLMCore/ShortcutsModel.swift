@@ -73,10 +73,15 @@ public enum ShortcutsModelPromptBuilder {
         }
 
         let trimmedCurrent = currentPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let toolConstraint = !trimmedTools.isEmpty
+            ? "\n\n（重要重要！！！当需要用客户端工具时，你不需要考虑执行，只需要决策返回相应的工具格式就好）"
+            : ""
+        let promptWithConstraint = trimmedCurrent + toolConstraint
+
         if sections.isEmpty {
-            return trimmedCurrent
+            return promptWithConstraint
         } else {
-            sections.append("【当前提问】\n\(trimmedCurrent)")
+            sections.append("【当前提问】\n\(promptWithConstraint)")
             return sections.joined(separator: "\n\n")
         }
     }
