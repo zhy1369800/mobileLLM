@@ -2262,7 +2262,7 @@ public final class ChatStore {
     ) {
         guard let convo = conversations.first(where: { $0.id == conversationID }) else { return }
         var state = StreamingState(messageID: assistantID)
-        state.phase = .generating
+        state.phase = .warming
         state.warmingNote = "正在调用快捷指令..."
         streaming = state
         streamingMessageID = assistantID
@@ -2270,17 +2270,13 @@ public final class ChatStore {
         let historyMessages = convo.messages.filter { $0.id != assistantID && $0.role != .system }
         let historyTuples: [(role: String, content: String)] = historyMessages.map { ($0.role.rawValue, $0.answer) }
         let system = composedSystemPrompt(query: currentPrompt)
-        let msg = ShortcutsModelPromptBuilder.buildMessage(
-            systemPrompt: system,
-            history: historyTuples,
-            currentPrompt: currentPrompt
-        )
 
         let store = self.store
         let shortcutName = settings.shortcutsShortcutName
         let executor = self.shortcutExecutor
 
         genTask = Task { @MainActor [weak self] in
+            guard let self else { return }
             do {
                 var firstImageFileName: String? = nil
                 do {
@@ -2299,13 +2295,13 @@ public final class ChatStore {
                 } catch {
                     await store.removeAttachments(writeAttachments.map { ImageRef(id: $0.id) })
                     if let attachmentRollback {
-                        self?.recoverFailedAttachmentSend(attachmentRollback, error: error)
+                        self.recoverFailedAttachmentSend(attachmentRollback, error: error)
                     }
                     return
                 }
 
                 guard let executor else {
-                    self?.commitShortcutsFailure(
+                    self.commitShortcutsFailure(
                         conversationID: conversationID,
                         assistantMessageID: assistantID,
                         message: "快捷指令服务未初始化"
@@ -2313,22 +2309,85 @@ public final class ChatStore {
                     return
                 }
 
-                let params = ShortcutsModelPromptBuilder.buildParams(msg: msg, fileName: firstImageFileName)
-                let taskId = UUID().uuidString
-                let result = try await executor.execute(
-                    shortcut: shortcutName,
-                    taskId: taskId,
-                    params: params,
-                    timeout: 60
+                // 格式化可用工具说明
+                var toolDesc = ""
+                if self.settings.toolsEnabled,
+                   let registry = try? await self.toolRegistry(config: self.settings.builtInToolConfig, servers: self.settings.mcpServers) {
+                    for tool in registry.tools {
+                        toolDesc += "- \(tool.schema.name): \(tool.schema.description)\n"
+                    }
+                }
+
+                var currentMsg = ShortcutsModelPromptBuilder.buildMessage(
+                    systemPrompt: system,
+                    toolDescriptions: toolDesc,
+                    history: historyTuples,
+                    currentPrompt: currentPrompt
                 )
 
-                await self?.streamShortcutsTypewriter(
-                    result: result,
-                    assistantID: assistantID,
-                    conversationID: conversationID
+                var toolRuns: [ToolRun] = []
+                var iteration = 0
+                let maxIterations = 5
+
+                while iteration < maxIterations {
+                    iteration += 1
+                    let paramsDict = ShortcutsModelPromptBuilder.buildParams(msg: currentMsg, fileName: firstImageFileName)
+                    firstImageFileName = nil // 仅首次传递附件图片
+                    let paramsData = (try? JSONSerialization.data(withJSONObject: paramsDict, options: [])) ?? Data()
+                    let paramsString = String(data: paramsData, encoding: .utf8) ?? "{}"
+                    let taskId = UUID().uuidString
+                    self.streaming?.warmingNote = iteration > 1 ? "正在将工具结果回传给快捷指令..." : "正在调用快捷指令..."
+
+                    let rawResult = try await executor.executeTask(
+                        action: "exec",
+                        shortcut: shortcutName,
+                        params: paramsString,
+                        taskId: taskId,
+                        timeoutSeconds: 25
+                    )
+
+                    // 检查是否包含工具调用
+                    if self.settings.toolsEnabled,
+                       let toolCall = ShortcutsModelPromptBuilder.parseToolCall(from: rawResult),
+                       let registry = try? await self.toolRegistry(config: self.settings.builtInToolConfig, servers: self.settings.mcpServers),
+                       let tool = registry.tools.first(where: { $0.schema.name == toolCall.tool || $0.schema.name.lowercased() == toolCall.tool.lowercased() }) {
+
+                        self.streaming?.warmingNote = "正在执行工具: \(toolCall.tool)..."
+                        let argsData = (try? JSONSerialization.data(withJSONObject: toolCall.arguments, options: [])) ?? Data()
+                        let argsString = String(data: argsData, encoding: .utf8) ?? "{}"
+                        let toolResultText = await tool.execute(argumentsJSON: argsString)
+
+                        let argsSummary = (try? String(data: JSONSerialization.data(withJSONObject: toolCall.arguments), encoding: .utf8)) ?? "{}"
+                        let run = ToolRun(name: toolCall.tool, arguments: argsSummary, result: toolResultText)
+                        toolRuns.append(run)
+
+                        currentMsg = """
+                        【工具执行结果（tool: \(toolCall.tool)）】
+                        \(toolResultText)
+
+                        请根据上述工具执行结果，以自然语言直接回答用户。
+                        """
+                        continue
+                    } else {
+                        // 无工具调用，完成并以打字机呈现最终回答
+                        await self.streamShortcutsTypewriter(
+                            result: rawResult,
+                            assistantID: assistantID,
+                            conversationID: conversationID,
+                            toolRuns: toolRuns
+                        )
+                        return
+                    }
+                }
+
+                // 达到最大轮次时的安全退出
+                self.commitShortcutsFailure(
+                    conversationID: conversationID,
+                    assistantMessageID: assistantID,
+                    message: "快捷指令工具调用已达最大轮次上限"
                 )
             } catch {
-                self?.commitShortcutsFailure(
+                self.commitShortcutsFailure(
                     conversationID: conversationID,
                     assistantMessageID: assistantID,
                     message: "快捷指令执行失败: \(error.localizedDescription)"
@@ -2340,16 +2399,19 @@ public final class ChatStore {
     private func streamShortcutsTypewriter(
         result: String,
         assistantID: UUID,
-        conversationID: UUID
+        conversationID: UUID,
+        toolRuns: [ToolRun] = []
     ) async {
         guard streamingMessageID == assistantID else { return }
         streaming?.warmingNote = nil
+        streaming?.phase = .answering
         let text = result.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty {
             commitShortcutsAnswer(
                 conversationID: conversationID,
                 assistantMessageID: assistantID,
-                text: "快捷指令未返回任何结果。"
+                text: "快捷指令未返回任何结果。",
+                toolRuns: toolRuns
             )
             return
         }
@@ -2370,20 +2432,23 @@ public final class ChatStore {
         commitShortcutsAnswer(
             conversationID: conversationID,
             assistantMessageID: assistantID,
-            text: text
+            text: text,
+            toolRuns: toolRuns
         )
     }
 
     private func commitShortcutsAnswer(
         conversationID: UUID,
         assistantMessageID: UUID,
-        text: String
+        text: String,
+        toolRuns: [ToolRun] = []
     ) {
         guard let ci = conversations.firstIndex(where: { $0.id == conversationID }),
               let mi = conversations[ci].messages.firstIndex(where: { $0.id == assistantMessageID })
         else { return }
         var message = conversations[ci].messages[mi]
         message.answer = text
+        if !toolRuns.isEmpty { message.toolRuns = toolRuns }
         if let generation = currentGenerationModel() { message.generatedBy = generation }
         conversations[ci].messages[mi] = message
         conversations[ci].updatedAt = Date()

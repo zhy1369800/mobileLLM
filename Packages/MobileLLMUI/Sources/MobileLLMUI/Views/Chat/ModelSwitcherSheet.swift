@@ -34,19 +34,28 @@ struct ModelSwitcherSheet: View {
         }
     }
 
+    private var shortcutsServices: [ShortcutsService] {
+        container.settings.shortcutsServices.filter {
+            !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && !$0.shortcutName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
     var body: some View {
         NavigationStack {
             Group {
-                if onlineServices.isEmpty && installed.isEmpty && !container.settings.shortcutsModelEnabled {
+                if onlineServices.isEmpty && installed.isEmpty && shortcutsServices.isEmpty {
                     ChatPlaceholder(icon: "square.and.arrow.down",
                                     title: "No models installed",
                                     message: "Download a model to start chatting on-device.",
                                     actionTitle: "Open Models", action: { dismiss(); onOpenModels() })
                 } else {
                     List {
-                        if container.settings.shortcutsModelEnabled {
+                        if !shortcutsServices.isEmpty {
                             Section("Shortcuts") {
-                                shortcutsRow
+                                ForEach(shortcutsServices) { service in
+                                    shortcutsRow(service)
+                                }
                             }
                         }
                         if !onlineServices.isEmpty {
@@ -93,19 +102,19 @@ struct ModelSwitcherSheet: View {
         }
     }
 
-    private var shortcutsRow: some View {
-        let isActive = container.settings.shortcutsModelActive
+    private func shortcutsRow(_ service: ShortcutsService) -> some View {
+        let isActive = container.settings.shortcutsActiveService?.id == service.id
         return Button {
-            container.settings.shortcutsModelActive = true
+            container.settings.setShortcutsServiceEnabled(id: service.id, enabled: true)
             container.settings.openAIOnlineEnabled = false
             Task { await container.models.deactivate() }
             dismiss()
         } label: {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(container.settings.shortcutsModelName) (快捷指令)")
+                    Text(service.name)
                         .font(.subheadline.weight(.medium)).foregroundStyle(Theme.textPrimary)
-                    Text("调用快捷指令: \(container.settings.shortcutsShortcutName)")
+                    Text("快捷指令: \(service.shortcutName)")
                         .font(.caption).foregroundStyle(Theme.textSecondary)
                 }
                 Spacer()
@@ -117,7 +126,7 @@ struct ModelSwitcherSheet: View {
         }
         .buttonStyle(.plain)
         .listRowBackground(isActive ? Theme.accentSoft : Color.clear)
-        .accessibilityLabel("\(container.settings.shortcutsModelName) (快捷指令)")
+        .accessibilityLabel(service.name)
         .accessibilityValue(isActive ? "Active" : "")
         .accessibilityAddTraits(isActive ? [.isSelected] : [])
     }
@@ -126,7 +135,7 @@ struct ModelSwitcherSheet: View {
         let isActive = !container.settings.shortcutsModelActive
             && container.settings.onlineActiveService?.id == service.id
         return Button {
-            container.settings.shortcutsModelActive = false
+            container.settings.disableAllShortcutsServices()
             container.settings.setOnlineServiceEnabled(id: service.id, enabled: true)
             // Online is a first-class selection: drop the local identity/weights so the UI never shows
             // two active models at once.
@@ -162,7 +171,7 @@ struct ModelSwitcherSheet: View {
         let presentation = container.models.fitPresentation(model, variant, context: container.settings.contextLength)
         return Button {
             // Model selection is exclusive: picking an on-device model turns online and shortcuts off.
-            container.settings.shortcutsModelActive = false
+            container.settings.disableAllShortcutsServices()
             container.settings.openAIOnlineEnabled = false
             activating = variant.id
             container.activate(model, variant: variant)

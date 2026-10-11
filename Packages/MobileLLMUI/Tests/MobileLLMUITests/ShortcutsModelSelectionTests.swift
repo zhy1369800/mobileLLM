@@ -20,35 +20,39 @@ final class ShortcutsModelSelectionTests: XCTestCase {
         super.tearDown()
     }
 
-    func testAppSettingsShortcutsDefaultsAndPersistence() {
+    func testAppSettingsShortcutsMultiServicesPersistence() {
         let settings = AppSettings(defaults: defaults)
-        XCTAssertTrue(settings.shortcutsModelEnabled)
-        XCTAssertEqual(settings.shortcutsModelName, "豆包")
-        XCTAssertEqual(settings.shortcutsShortcutName, "发消息问豆包")
+        XCTAssertFalse(settings.shortcutsServices.isEmpty)
         XCTAssertFalse(settings.shortcutsModelActive)
 
-        settings.shortcutsModelName = "Kimi"
-        settings.shortcutsShortcutName = "问Kimi"
-        settings.shortcutsModelActive = true
+        // 添加一个新服务并激活
+        let kimi = ShortcutsService(name: "Kimi", shortcutName: "问Kimi", isEnabled: true)
+        settings.upsertShortcutsService(kimi)
+        settings.setShortcutsServiceEnabled(id: kimi.id, enabled: true)
 
+        XCTAssertTrue(settings.shortcutsModelActive)
+        XCTAssertEqual(settings.shortcutsModelName, "Kimi")
+        XCTAssertEqual(settings.shortcutsShortcutName, "问Kimi")
+
+        // 重新从 defaults 加载
         let reloaded = AppSettings(defaults: defaults)
+        XCTAssertTrue(reloaded.shortcutsModelActive)
         XCTAssertEqual(reloaded.shortcutsModelName, "Kimi")
         XCTAssertEqual(reloaded.shortcutsShortcutName, "问Kimi")
-        XCTAssertTrue(reloaded.shortcutsModelActive)
     }
 
-    func testChatStoreRecognizesShortcutsModel() {
+    func testChatStoreRecognizesActiveShortcutsService() {
         let settings = AppSettings(defaults: defaults)
-        settings.shortcutsModelActive = true
-        settings.shortcutsModelName = "豆包"
-        settings.shortcutsShortcutName = "发消息问豆包"
+        let service = ShortcutsService(name: "自定义AI", shortcutName: "问AI", isEnabled: true)
+        settings.upsertShortcutsService(service)
+        settings.setShortcutsServiceEnabled(id: service.id, enabled: true)
 
         let store = ConversationStore(root: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString))
         let chat = ChatStore(engine: MockEngine(), store: store, settings: settings)
 
         XCTAssertTrue(chat.isShortcutsActive)
         XCTAssertTrue(chat.hasModel)
-        XCTAssertEqual(chat.activeModelLabel, "豆包 (快捷指令)")
+        XCTAssertEqual(chat.activeModelLabel, "自定义AI (快捷指令)")
     }
 }
 

@@ -18,6 +18,8 @@ struct SettingsView: View {
     @State private var showSkills = false
     @State private var showMemory = false
     @State private var showOpenAI = false
+    @State private var newShortcutName = ""
+    @State private var newShortcutTarget = ""
 
     init(container: AppContainer) {
         self.container = container
@@ -310,33 +312,56 @@ struct SettingsView: View {
         return "\(settings.onlineServices.count) service\(settings.onlineServices.count == 1 ? "" : "s") · Off"
     }
 
-    // MARK: Shortcuts model
+    // MARK: Shortcuts models
 
     @ViewBuilder private var shortcutsSection: some View {
-        section("Shortcuts model", icon: "command") {
-            Toggle(isOn: $settings.shortcutsModelEnabled) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Enable shortcuts model").font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("Expose external iOS Shortcuts as a model in the switcher.")
-                        .font(.caption).foregroundStyle(Theme.textTertiary)
-                }
-            }
-            .tint(Theme.accent)
-            if settings.shortcutsModelEnabled {
-                Divider().background(Theme.hairline)
-                VStack(alignment: .leading, spacing: Theme.Space.xs) {
-                    Text("Model display name").font(.caption).foregroundStyle(Theme.textSecondary)
-                    TextField("豆包", text: $settings.shortcutsModelName)
-                        .textFieldStyle(.roundedBorder)
-                }
-                VStack(alignment: .leading, spacing: Theme.Space.xs) {
-                    Text("Shortcut name in iOS Shortcuts").font(.caption).foregroundStyle(Theme.textSecondary)
-                    TextField("发消息问豆包", text: $settings.shortcutsShortcutName)
-                        .textFieldStyle(.roundedBorder)
-                }
-                Text("Chats using this model will pass your message in the 'msg' key (and image in 'fileName') to this shortcut.")
+        section("Shortcuts models", icon: "command") {
+            if settings.shortcutsServices.isEmpty {
+                Text("No shortcut models configured.")
                     .font(.caption).foregroundStyle(Theme.textTertiary)
+            } else {
+                ForEach(settings.shortcutsServices) { service in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(service.name).font(.subheadline.weight(.medium)).foregroundStyle(Theme.textPrimary)
+                            Text("Shortcut: \(service.shortcutName)").font(.caption).foregroundStyle(Theme.textTertiary)
+                        }
+                        Spacer()
+                        Button(role: .destructive) {
+                            settings.removeShortcutsService(id: service.id)
+                        } label: {
+                            Image(systemName: "trash").font(.subheadline).foregroundStyle(Theme.danger)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    Divider().background(Theme.hairline)
+                }
             }
+
+            VStack(alignment: .leading, spacing: Theme.Space.sm) {
+                Text("Add shortcut model").font(.caption.weight(.semibold)).foregroundStyle(Theme.textSecondary)
+                HStack(spacing: Theme.Space.sm) {
+                    TextField("Model name (e.g. 豆包)", text: $newShortcutName)
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Shortcut (e.g. 发消息问豆包)", text: $newShortcutTarget)
+                        .textFieldStyle(.roundedBorder)
+                }
+                Button {
+                    let name = newShortcutName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let target = newShortcutTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !name.isEmpty && !target.isEmpty else { return }
+                    settings.upsertShortcutsService(ShortcutsService(name: name, shortcutName: target))
+                    newShortcutName = ""
+                    newShortcutTarget = ""
+                } label: {
+                    Label("Add Model", systemImage: "plus")
+                        .font(.caption.weight(.medium))
+                }
+                .disabled(newShortcutName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || newShortcutTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            Text("Passes message in 'msg' (and image in 'fileName') to this shortcut, with automatic tool calling loop support.")
+                .font(.caption).foregroundStyle(Theme.textTertiary)
         }
     }
 

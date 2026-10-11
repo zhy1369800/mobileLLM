@@ -95,15 +95,55 @@ public final class AppSettings {
         }
     }
 
-    // MARK: Shortcuts model
-    /// Whether the shortcuts model feature is enabled (shows in switcher).
-    public var shortcutsModelEnabled: Bool { didSet { persist() } }
-    /// User-visible name of the shortcuts model (default: "豆包").
-    public var shortcutsModelName: String { didSet { persist() } }
-    /// Name of the shortcut in iOS Shortcuts app (default: "发消息问豆包").
-    public var shortcutsShortcutName: String { didSet { persist() } }
-    /// Whether the shortcuts model is currently the active model selection.
-    public var shortcutsModelActive: Bool { didSet { persist() } }
+    // MARK: Shortcuts models
+    /// Configured Shortcuts automation services. Each maps a display name to a shortcut in iOS Shortcuts app.
+    public private(set) var shortcutsServices: [ShortcutsService] {
+        didSet { persist() }
+    }
+
+    /// The currently active shortcuts service, or nil if none is enabled.
+    public var shortcutsActiveService: ShortcutsService? {
+        shortcutsServices.first { $0.isEnabled }
+    }
+
+    /// Backwards compatibility accessors.
+    public var shortcutsModelActive: Bool { shortcutsActiveService != nil }
+    public var shortcutsModelName: String { shortcutsActiveService?.name ?? "" }
+    public var shortcutsShortcutName: String { shortcutsActiveService?.shortcutName ?? "" }
+
+    /// Sets which shortcuts service is enabled (at most one enabled at a time).
+    public func setShortcutsServiceEnabled(id: String, enabled: Bool) {
+        shortcutsServices = shortcutsServices.map {
+            if $0.id == id {
+                return $0.withEnabled(enabled)
+            } else if enabled {
+                return $0.withEnabled(false)
+            } else {
+                return $0
+            }
+        }
+    }
+
+    /// Disables all shortcuts services (e.g. when picking an on-device or online model).
+    public func disableAllShortcutsServices() {
+        shortcutsServices = shortcutsServices.map { $0.withEnabled(false) }
+    }
+
+    /// Add or replace one shortcuts service.
+    public func upsertShortcutsService(_ service: ShortcutsService) {
+        var updated = shortcutsServices
+        if let idx = updated.firstIndex(where: { $0.id == service.id }) {
+            updated[idx] = service
+        } else {
+            updated.append(service)
+        }
+        shortcutsServices = updated
+    }
+
+    /// Remove a shortcuts service.
+    public func removeShortcutsService(id: String) {
+        shortcutsServices.removeAll { $0.id == id }
+    }
 
     /// Add or replace one service. Enabling it disables every other service (single active online model).
     public func upsertOnlineService(_ service: OnlineService) {
@@ -258,10 +298,17 @@ public final class AppSettings {
         } else {
             onlineServices = []
         }
-        shortcutsModelEnabled = snap?.shortcutsModelEnabled ?? true
-        shortcutsModelName = snap?.shortcutsModelName ?? "豆包"
-        shortcutsShortcutName = snap?.shortcutsShortcutName ?? "发消息问豆包"
-        shortcutsModelActive = snap?.shortcutsModelActive ?? false
+        if let services = snap?.shortcutsServices, !services.isEmpty {
+            shortcutsServices = services
+        } else if let legacyName = snap?.shortcutsModelName, let legacyShortcut = snap?.shortcutsShortcutName {
+            shortcutsServices = [
+                ShortcutsService(name: legacyName, shortcutName: legacyShortcut, isEnabled: snap?.shortcutsModelActive ?? false)
+            ]
+        } else {
+            shortcutsServices = [
+                ShortcutsService(name: "豆包", shortcutName: "发消息问豆包", isEnabled: false)
+            ]
+        }
         temperature = snap?.temperature ?? 0.7
         topP = snap?.topP ?? 0.95
         topK = snap?.topK ?? 20
@@ -418,6 +465,7 @@ public final class AppSettings {
         var shortcutsModelName: String? = nil
         var shortcutsShortcutName: String? = nil
         var shortcutsModelActive: Bool? = nil
+        var shortcutsServices: [ShortcutsService]? = nil
         var temperature: Double
         var topP: Double
         var topK: Int
@@ -450,10 +498,11 @@ public final class AppSettings {
                             openAIModelID: defaultService?.modelID,
                             openAIOnlineEnabled: defaultService?.isEnabled ?? false,
                             onlineServices: onlineServices,
-                            shortcutsModelEnabled: shortcutsModelEnabled,
+                            shortcutsModelEnabled: shortcutsModelActive,
                             shortcutsModelName: shortcutsModelName,
                             shortcutsShortcutName: shortcutsShortcutName,
                             shortcutsModelActive: shortcutsModelActive,
+                            shortcutsServices: shortcutsServices,
                             temperature: temperature, topP: topP, topK: topK,
                             repetitionPenalty: repetitionPenalty, maxTokens: maxTokens,
                             onlineMaxTokens: onlineMaxTokens,
@@ -491,10 +540,7 @@ public final class AppSettings {
         dictationLocale = nil
         mcpServers = []
         onlineServices = []
-        shortcutsModelEnabled = true
-        shortcutsModelName = "豆包"
-        shortcutsShortcutName = "发消息问豆包"
-        shortcutsModelActive = false
+        shortcutsServices = [ShortcutsService(name: "豆包", shortcutName: "发消息问豆包", isEnabled: false)]
         disabledBuiltInTools = Self.defaultDisabledBuiltInTools
         searchEngines = [.duckduckgo, .bing, .brave, .yahoo, .marginalia]
         temperature = 0.7

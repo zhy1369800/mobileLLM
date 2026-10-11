@@ -25,6 +25,18 @@ final class ShortcutsModelTests: XCTestCase {
         XCTAssertTrue(msg.contains("【当前提问】\n那明天呢？"))
     }
 
+    func testBuildMessageWithTools() {
+        let msg = ShortcutsModelPromptBuilder.buildMessage(
+            systemPrompt: "你是一个助手",
+            toolDescriptions: "- create_calendar_event(title: String): 创建日程",
+            history: [],
+            currentPrompt: "帮我定个明早9点的会"
+        )
+        XCTAssertTrue(msg.contains("【可用工具说明】"))
+        XCTAssertTrue(msg.contains("create_calendar_event"))
+        XCTAssertTrue(msg.contains("【工具调用格式规范】"))
+    }
+
     func testBuildParamsWithoutFileName() {
         let params = ShortcutsModelPromptBuilder.buildParams(msg: "测试信息")
         XCTAssertEqual(params["msg"] as? String, "测试信息")
@@ -35,5 +47,35 @@ final class ShortcutsModelTests: XCTestCase {
         let params = ShortcutsModelPromptBuilder.buildParams(msg: "看下这张图", fileName: "image_123.jpg")
         XCTAssertEqual(params["msg"] as? String, "看下这张图")
         XCTAssertEqual(params["fileName"] as? String, "image_123.jpg")
+    }
+
+    func testParseToolCallFromMarkdownCodeBlock() {
+        let response = """
+        好的，正在为您创建日程：
+        ```tool_call
+        {"tool": "create_calendar_event", "arguments": {"title": "团队周会", "time": "2026-10-12 10:00"}}
+        ```
+        请稍候。
+        """
+        let parsed = ShortcutsModelPromptBuilder.parseToolCall(from: response)
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.tool, "create_calendar_event")
+        XCTAssertEqual(parsed?.arguments["title"] as? String, "团队周会")
+    }
+
+    func testParseToolCallFromBareJSON() {
+        let response = """
+        {"tool": "calculator", "args": {"expression": "125 * 8"}}
+        """
+        let parsed = ShortcutsModelPromptBuilder.parseToolCall(from: response)
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.tool, "calculator")
+        XCTAssertEqual(parsed?.arguments["expression"] as? String, "125 * 8")
+    }
+
+    func testParseToolCallReturnsNilForNormalText() {
+        let response = "今天的天气非常晴朗，气温大约20摄氏度。"
+        let parsed = ShortcutsModelPromptBuilder.parseToolCall(from: response)
+        XCTAssertNil(parsed)
     }
 }
