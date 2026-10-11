@@ -92,6 +92,7 @@ public extension AppContainer {
             do { try openAICredentials.deleteAllAPIKeys(serviceIDs: intent.serviceIDs) }
             catch { failures.append("Online credentials: \(error.localizedDescription)") }
             mcpDiscovery.removeAll()
+            localModelLogs.clearAll()
             do { try settings.resetForDataErase() }
             catch { failures.append("Settings and MCP credentials: \(error.localizedDescription)") }
         }

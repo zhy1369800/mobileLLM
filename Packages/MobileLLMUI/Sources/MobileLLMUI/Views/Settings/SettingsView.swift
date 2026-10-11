@@ -18,6 +18,7 @@ struct SettingsView: View {
     @State private var showSkills = false
     @State private var showMemory = false
     @State private var showOpenAI = false
+    @State private var showLocalLogs = false
     @State private var newShortcutName = ""
     @State private var newShortcutTarget = ""
     @FocusState private var isShortcutFieldFocused: Bool
@@ -45,7 +46,10 @@ struct SettingsView: View {
         .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
         .scrollDismissesKeyboard(.interactively)   // drag to dismiss the system-prompt keyboard
         .background(Theme.bg)
-        .task { storageBytes = await container.conversationStore.storageBytes() }
+        .task {
+            storageBytes = await container.conversationStore.storageBytes()
+            await container.localModelLogs.reloadAsync()
+        }
         .alert("Delete all chats?", isPresented: $confirmDeleteChats) {
             Button("Delete all chats", role: .destructive) { deleteAllChats() }
             Button("Cancel", role: .cancel) {}
@@ -105,6 +109,14 @@ struct SettingsView: View {
             }
             #if os(macOS)
             .frame(minWidth: 520, minHeight: 440)
+            #endif
+        }
+        .sheet(isPresented: $showLocalLogs) {
+            NavigationStack {
+                LocalModelLogsView(logStore: container.localModelLogs)
+            }
+            #if os(macOS)
+            .frame(minWidth: 520, minHeight: 560)
             #endif
         }
     }
@@ -169,6 +181,17 @@ struct SettingsView: View {
             }
             .tint(Theme.accent)
             manageToolsRow
+            Divider().background(Theme.hairline)
+            Toggle(isOn: $settings.localModelLoggingEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Record local model logs")
+                        .font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    Text("Captures requests, generation parameters, and responses for on-device models.")
+                        .font(.caption).foregroundStyle(Theme.textTertiary)
+                }
+            }
+            .tint(Theme.accent)
+            localModelLogsRow
             #if os(iOS)
             Divider().background(Theme.hairline)
             Toggle(isOn: Binding(
@@ -389,6 +412,31 @@ struct SettingsView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    @ViewBuilder private var localModelLogsRow: some View {
+        Divider().background(Theme.hairline)
+        Button { showLocalLogs = true } label: {
+            HStack(spacing: Theme.Space.sm) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.subheadline).foregroundStyle(Theme.accent).frame(width: 22)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Local model request logs")
+                        .font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    Text(localLogsSummary)
+                        .font(.caption).foregroundStyle(Theme.textTertiary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption).foregroundStyle(Theme.textTertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var localLogsSummary: String {
+        let count = container.localModelLogs.entries.count
+        return count == 0 ? "No logs recorded" : "\(count) logged"
     }
 
     // MARK: Sampling

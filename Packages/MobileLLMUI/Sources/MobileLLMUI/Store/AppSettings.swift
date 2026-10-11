@@ -225,6 +225,9 @@ public final class AppSettings {
     /// finite runs with a truthful bounded progress model may be submitted.
     public var continuedProcessingEnabled: Bool { didSet { persist() } }
 
+    /// Explicit opt-in for recording local model request and response logs. Defaults OFF.
+    public var localModelLoggingEnabled: Bool { didSet { persist() } }
+
     // MARK: Appearance
     public var appearance: AppearanceMode { didSet { persist() } }
 
@@ -329,6 +332,7 @@ public final class AppSettings {
         onlineContextLength = snap?.onlineContextLength ?? 32_768
         kvBits = snap?.kvBits ?? 8
         continuedProcessingEnabled = snap?.continuedProcessingEnabled ?? false
+        localModelLoggingEnabled = snap?.localModelLoggingEnabled ?? false
         appearance = snap?.appearance ?? .system
         loading = false
         // First launch after an update: any plaintext token was just moved into the Keychain — re-persist
@@ -478,6 +482,7 @@ public final class AppSettings {
         var onlineContextLength: Int? = nil
         var kvBits: Int
         var continuedProcessingEnabled: Bool? = nil
+        var localModelLoggingEnabled: Bool? = nil
         var appearance: AppearanceMode
     }
 
@@ -510,6 +515,7 @@ public final class AppSettings {
                             contextLength: contextLength, onlineContextLength: onlineContextLength,
                             kvBits: kvBits,
                             continuedProcessingEnabled: continuedProcessingEnabled,
+                            localModelLoggingEnabled: localModelLoggingEnabled,
                             appearance: appearance)
         if let data = try? JSONEncoder().encode(snap) { defaults.set(data, forKey: key) }
     }
@@ -553,6 +559,7 @@ public final class AppSettings {
         onlineContextLength = 32_768
         kvBits = 8
         continuedProcessingEnabled = false
+        localModelLoggingEnabled = false
         appearance = .system
         loading = false
         defaults.removeObject(forKey: key)

@@ -13,6 +13,8 @@ import AgentRuntime
 @MainActor
 @Observable
 public final class AppContainer {
+    public let engine: any LLMEngine
+    public let localModelLogs: LocalModelLogStore
     public let settings: AppSettings
     public let conversationStore: ConversationStore
     public let models: ModelManager
@@ -96,18 +98,36 @@ public final class AppContainer {
                 agentRuns: AgentRunStore? = nil,
                 lifecycle: LifecycleCoordinator? = nil,
                 continuedProcessing: ContinuedProcessingCoordinator? = nil,
+                localModelLogs: LocalModelLogStore? = nil,
                 workflowStore: WorkflowStore? = nil,
                 mcpDiscovery: MCPDiscoveryCache = .shared) {
         let settings = settings ?? AppSettings(fallbackDefaultModelID: LLMCatalog.defaultModel(for: device).id)
         let store = conversationStore ?? ConversationStore()
+        let logStore = localModelLogs ?? LocalModelLogStore()
         self.settings = settings
+        self.localModelLogs = logStore
+        let loggingEngine = LoggingEngine(
+            inner: engine,
+            isLoggingEnabled: { [weak settings] in
+                settings?.localModelLoggingEnabled ?? false
+            },
+            getActiveModelID: { [weak settings] in
+                settings?.defaultModelID ?? "local-model"
+            },
+            onLogEntry: { entry in
+                Task { @MainActor in
+                    logStore.append(entry)
+                }
+            }
+        )
+        self.engine = loggingEngine
         self.mcpDiscovery = mcpDiscovery
         self.lifecycle = lifecycle ?? LifecycleCoordinator()
         self.continuedProcessing = continuedProcessing
             ?? ContinuedProcessingCoordinator()
         self.workflowStore = workflowStore ?? WorkflowStore(directory: store.directory)
         self.conversationStore = store
-        self.models = ModelManager(engine: engine, device: device, downloadBase: downloadBase,
+        self.models = ModelManager(engine: loggingEngine, device: device, downloadBase: downloadBase,
                                    downloader: downloader, installProbe: installProbe,
                                    systemModelProbe: systemModelProbe,
                                    availableMemory: availableMemory)
@@ -132,7 +152,7 @@ public final class AppContainer {
         self.toolShortcutExecutor = shortcutExecutor
         self.openAICredentials = openAICredentials ?? KeychainOpenAICredentialStore()
         self.agentRuns = agentRuns
-        self.chat = ChatStore(engine: engine, store: store, settings: settings,
+        self.chat = ChatStore(engine: loggingEngine, store: store, settings: settings,
                               memoryBook: memoryBook, eventStore: eventStore,
                               locationProvider: locationProvider,
                               shortcutExecutor: shortcutExecutor,

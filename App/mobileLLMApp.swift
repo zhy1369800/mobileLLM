@@ -454,7 +454,7 @@ struct MobileLLMApp: App {
             #endif
             do {
                 let assembly = try AgentRuntimeAssembly(
-                    engine: engine,
+                    engine: container.engine,
                     downloadBase: base,
                     conversationDirectory: container.conversationStore.directory,
                     models: container.models.allModels,

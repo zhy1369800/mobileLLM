@@ -77,6 +77,11 @@ final class AppDataEraseTests: XCTestCase {
         container.settings.mcpServers = [
             MCPServer(name: "Private", url: "https://mcp.example.test", token: "secret-token")
         ]
+        container.localModelLogs.append(LocalModelLogEntry(
+            modelID: "secret-model",
+            sampling: Sampling(),
+            messages: [ChatTurn(role: .user, content: "confidential prompt")]
+        ))
 
         try await container.eraseAllAppData()
 
@@ -85,6 +90,7 @@ final class AppDataEraseTests: XCTestCase {
         let remainingRegistry = await DurableStore<LLMModel>(fileURL: registryURL).load()
         XCTAssertTrue(remainingChats.isEmpty)
         XCTAssertNil(remainingAttachment)
+        XCTAssertTrue(container.localModelLogs.entries.isEmpty)
         XCTAssertTrue(container.memory.facts.isEmpty)
         XCTAssertTrue(container.skills.customSkills.isEmpty)
         XCTAssertEqual(container.skills.skills, Skill.builtIns)
