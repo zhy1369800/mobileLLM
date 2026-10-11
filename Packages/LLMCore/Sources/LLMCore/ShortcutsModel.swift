@@ -74,7 +74,7 @@ public enum ShortcutsModelPromptBuilder {
 
         let trimmedCurrent = currentPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let toolConstraint = !trimmedTools.isEmpty
-            ? "\n\n（重要重要！！！当需要用客户端工具时，你不需要考虑执行，只需要决策返回相应的工具格式就好）"
+            ? "\n\n##重要重要!!! 你不需要执行工具，只用决策返回工具格式就好##"
             : ""
         let promptWithConstraint = trimmedCurrent + toolConstraint
 
