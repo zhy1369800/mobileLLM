@@ -65,7 +65,7 @@ public enum LLMMemoryGovernor {
         case .mlx:      return planMLX(model: model, variant: variant, device: device, context: context)
         case .llamaCpp: return planLlamaCpp(model: model, variant: variant, device: device, context: context)
         case .apple:    return planSystem()
-        case .online:   return .comfortable   // unreachable for catalog variants; no local memory exists
+        case .online, .shortcuts: return .comfortable   // unreachable for catalog variants; no local memory exists
         }
     }
 

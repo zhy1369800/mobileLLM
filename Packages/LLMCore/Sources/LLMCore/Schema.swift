@@ -114,6 +114,8 @@ public enum EngineKind: String, Sendable, Codable, CaseIterable, Hashable {
     /// OpenAI-compatible Responses API service. Owns no local weights and never enters the routing
     /// engine; present so message identity/stats can label online generations honestly.
     case online
+    /// iOS Shortcuts automation bridge. Invokes on-device shortcut automations (e.g. Doubao/Kimi).
+    case shortcuts
 
     /// Human-facing name for the picker + subtitles.
     public var label: String {
@@ -122,6 +124,7 @@ public enum EngineKind: String, Sendable, Codable, CaseIterable, Hashable {
         case .llamaCpp: "llama.cpp"
         case .apple: "Apple Intelligence"
         case .online: "Online"
+        case .shortcuts: "Shortcuts"
         }
     }
 }
@@ -265,8 +268,7 @@ public enum Backend: Sendable, Hashable, Codable {
         switch engine {
         case .mlx: 500_000_000
         case .llamaCpp: 350_000_000
-        case .apple: 0
-        case .online: 0
+        case .apple, .online, .shortcuts: 0
         }
     }
 

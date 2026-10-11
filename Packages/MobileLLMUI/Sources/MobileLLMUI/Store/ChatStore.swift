@@ -518,9 +518,10 @@ public final class ChatStore {
     /// Whether the next turn routes to the online provider. First-class model choice: it needs no local
     /// weights and no `activeModel`, so a device with zero installed models can still chat online.
     public var isOnlineActive: Bool { onlineModelID != nil }
+    public var isShortcutsActive: Bool { settings.shortcutsModelActive }
 
     public var isStreaming: Bool { streaming != nil }
-    public var hasModel: Bool { activeModel != nil || isOnlineActive }
+    public var hasModel: Bool { activeModel != nil || isOnlineActive || isShortcutsActive }
     public var canSend: Bool {
         acceptingNewActions && !conversationEraseInProgress && agentRuntimeUnavailableReason == nil
             && hasModel && streaming == nil
@@ -541,6 +542,9 @@ public final class ChatStore {
 
     /// Header/switcher label for whatever will answer the next turn.
     public var activeModelLabel: String {
+        if settings.shortcutsModelActive {
+            return "\(settings.shortcutsModelName) (快捷指令)"
+        }
         if let service = settings.onlineActiveService {
             return OnlineModelIdentity.displayLabel(service.name)
         }
@@ -550,6 +554,14 @@ public final class ChatStore {
     /// The durable generation identity for the current selection: online when active, else the local
     /// model. Also used to stamp conversations so a thread remembers its model across relaunch.
     private func currentGenerationModel() -> GenerationModel? {
+        if settings.shortcutsModelActive {
+            return GenerationModel(
+                modelID: "shortcuts:\(settings.shortcutsShortcutName)",
+                variantID: "shortcuts.default",
+                displayName: "\(settings.shortcutsModelName) (快捷指令)",
+                engine: .shortcuts
+            )
+        }
         if let service = settings.onlineActiveService {
             return GenerationModel(
                 modelID: OnlineModelIdentity.conversationModelID(service.id, model: service.modelID ?? ""),
@@ -1041,6 +1053,7 @@ public final class ChatStore {
         // composer or creating provisional messages, otherwise that path silently sends an all-text prompt
         // and loses the user's staged image. Draft + images remain intact for a retry after switching.
         if !images.isEmpty,
+           !isShortcutsActive,
            isOnlineActive
                 || activeModel?.variant.engine != .llamaCpp
                 || activeModel?.variant.supportsVisionInput != true {
@@ -1091,6 +1104,16 @@ public final class ChatStore {
             assistantID: assistant.id,
             conversation: conversations[idx]
         )
+        if isShortcutsActive {
+            startShortcutsGeneration(
+                assistantID: assistant.id,
+                in: conversations[idx].id,
+                currentPrompt: text,
+                writeAttachments: attachments,
+                attachmentRollback: finalRollback
+            )
+            return
+        }
         if let agentRuns {
             // Legacy conversations materialize the global tool template exactly once on their first
             // agent-runtime run (spec §14).
@@ -2228,4 +2251,156 @@ public final class ChatStore {
         for convo in pending { persist(convo) }
     }
 
+    // MARK: - Shortcuts Model Generation
+
+    private func startShortcutsGeneration(
+        assistantID: UUID,
+        in conversationID: UUID,
+        currentPrompt: String,
+        writeAttachments: [(id: UUID, data: Data)] = [],
+        attachmentRollback: AttachmentSendRollback? = nil
+    ) {
+        guard let convo = conversations.first(where: { $0.id == conversationID }) else { return }
+        var state = StreamingState(messageID: assistantID)
+        state.phase = .generating
+        state.warmingNote = "正在调用快捷指令..."
+        streaming = state
+        streamingMessageID = assistantID
+
+        let historyMessages = convo.messages.filter { $0.id != assistantID && $0.role != .system }
+        let historyTuples: [(role: String, content: String)] = historyMessages.map { ($0.role.rawValue, $0.answer) }
+        let system = composedSystemPrompt(query: currentPrompt)
+        let msg = ShortcutsModelPromptBuilder.buildMessage(
+            systemPrompt: system,
+            history: historyTuples,
+            currentPrompt: currentPrompt
+        )
+
+        let store = self.store
+        let shortcutName = settings.shortcutsShortcutName
+        let executor = self.shortcutExecutor
+
+        genTask = Task { @MainActor [weak self] in
+            do {
+                var firstImageFileName: String? = nil
+                do {
+                    for attachment in writeAttachments {
+                        try await store.writeAttachment(attachment.data, id: attachment.id)
+                        if firstImageFileName == nil {
+                            let fileName = "\(attachment.id.uuidString).jpg"
+                            firstImageFileName = fileName
+                            let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+                            let tasksDir = documentsURL.appendingPathComponent("tasks")
+                            try? FileManager.default.createDirectory(at: tasksDir, withIntermediateDirectories: true)
+                            let taskImageURL = tasksDir.appendingPathComponent(fileName)
+                            try? attachment.data.write(to: taskImageURL)
+                        }
+                    }
+                } catch {
+                    await store.removeAttachments(writeAttachments.map { ImageRef(id: $0.id) })
+                    if let attachmentRollback {
+                        self?.recoverFailedAttachmentSend(attachmentRollback, error: error)
+                    }
+                    return
+                }
+
+                guard let executor else {
+                    self?.commitShortcutsFailure(
+                        conversationID: conversationID,
+                        assistantMessageID: assistantID,
+                        message: "快捷指令服务未初始化"
+                    )
+                    return
+                }
+
+                let params = ShortcutsModelPromptBuilder.buildParams(msg: msg, fileName: firstImageFileName)
+                let taskId = UUID().uuidString
+                let result = try await executor.execute(
+                    shortcut: shortcutName,
+                    taskId: taskId,
+                    params: params,
+                    timeout: 60
+                )
+
+                await self?.streamShortcutsTypewriter(
+                    result: result,
+                    assistantID: assistantID,
+                    conversationID: conversationID
+                )
+            } catch {
+                self?.commitShortcutsFailure(
+                    conversationID: conversationID,
+                    assistantMessageID: assistantID,
+                    message: "快捷指令执行失败: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
+    private func streamShortcutsTypewriter(
+        result: String,
+        assistantID: UUID,
+        conversationID: UUID
+    ) async {
+        guard streamingMessageID == assistantID else { return }
+        streaming?.warmingNote = nil
+        let text = result.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty {
+            commitShortcutsAnswer(
+                conversationID: conversationID,
+                assistantMessageID: assistantID,
+                text: "快捷指令未返回任何结果。"
+            )
+            return
+        }
+
+        var currentText = ""
+        let chars = Array(text)
+        let chunkSize = max(1, chars.count / 40)
+        var index = 0
+        while index < chars.count {
+            if Task.isCancelled || streamingMessageID != assistantID { break }
+            let nextIndex = min(index + chunkSize, chars.count)
+            currentText.append(contentsOf: chars[index..<nextIndex])
+            streaming?.answer = currentText
+            index = nextIndex
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        commitShortcutsAnswer(
+            conversationID: conversationID,
+            assistantMessageID: assistantID,
+            text: text
+        )
+    }
+
+    private func commitShortcutsAnswer(
+        conversationID: UUID,
+        assistantMessageID: UUID,
+        text: String
+    ) {
+        guard let ci = conversations.firstIndex(where: { $0.id == conversationID }),
+              let mi = conversations[ci].messages.firstIndex(where: { $0.id == assistantMessageID })
+        else { return }
+        var message = conversations[ci].messages[mi]
+        message.answer = text
+        if let generation = currentGenerationModel() { message.generatedBy = generation }
+        conversations[ci].messages[mi] = message
+        conversations[ci].updatedAt = Date()
+        persist(conversations[ci])
+        if streamingMessageID == assistantMessageID {
+            streaming = nil
+            streamingMessageID = nil
+            genTask = nil
+        }
+    }
+
+    private func commitShortcutsFailure(
+        conversationID: UUID,
+        assistantMessageID: UUID,
+        message: String
+    ) {
+        finalizeIfNeeded(assistantID: assistantMessageID, stopReason: .cancelled, failed: true)
+        showToast(Toast(message, kind: .error, autoDismiss: 5))
+    }
 }

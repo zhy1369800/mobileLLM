@@ -95,6 +95,16 @@ public final class AppSettings {
         }
     }
 
+    // MARK: Shortcuts model
+    /// Whether the shortcuts model feature is enabled (shows in switcher).
+    public var shortcutsModelEnabled: Bool { didSet { persist() } }
+    /// User-visible name of the shortcuts model (default: "豆包").
+    public var shortcutsModelName: String { didSet { persist() } }
+    /// Name of the shortcut in iOS Shortcuts app (default: "发消息问豆包").
+    public var shortcutsShortcutName: String { didSet { persist() } }
+    /// Whether the shortcuts model is currently the active model selection.
+    public var shortcutsModelActive: Bool { didSet { persist() } }
+
     /// Add or replace one service. Enabling it disables every other service (single active online model).
     public func upsertOnlineService(_ service: OnlineService) {
         var normalized = service
@@ -248,6 +258,10 @@ public final class AppSettings {
         } else {
             onlineServices = []
         }
+        shortcutsModelEnabled = snap?.shortcutsModelEnabled ?? true
+        shortcutsModelName = snap?.shortcutsModelName ?? "豆包"
+        shortcutsShortcutName = snap?.shortcutsShortcutName ?? "发消息问豆包"
+        shortcutsModelActive = snap?.shortcutsModelActive ?? false
         temperature = snap?.temperature ?? 0.7
         topP = snap?.topP ?? 0.95
         topK = snap?.topK ?? 20
@@ -400,6 +414,10 @@ public final class AppSettings {
         var openAIModelID: String? = nil
         var openAIOnlineEnabled: Bool? = nil
         var onlineServices: [OnlineService]? = nil
+        var shortcutsModelEnabled: Bool? = nil
+        var shortcutsModelName: String? = nil
+        var shortcutsShortcutName: String? = nil
+        var shortcutsModelActive: Bool? = nil
         var temperature: Double
         var topP: Double
         var topK: Int
@@ -432,6 +450,10 @@ public final class AppSettings {
                             openAIModelID: defaultService?.modelID,
                             openAIOnlineEnabled: defaultService?.isEnabled ?? false,
                             onlineServices: onlineServices,
+                            shortcutsModelEnabled: shortcutsModelEnabled,
+                            shortcutsModelName: shortcutsModelName,
+                            shortcutsShortcutName: shortcutsShortcutName,
+                            shortcutsModelActive: shortcutsModelActive,
                             temperature: temperature, topP: topP, topK: topK,
                             repetitionPenalty: repetitionPenalty, maxTokens: maxTokens,
                             onlineMaxTokens: onlineMaxTokens,
@@ -469,6 +491,10 @@ public final class AppSettings {
         dictationLocale = nil
         mcpServers = []
         onlineServices = []
+        shortcutsModelEnabled = true
+        shortcutsModelName = "豆包"
+        shortcutsShortcutName = "发消息问豆包"
+        shortcutsModelActive = false
         disabledBuiltInTools = Self.defaultDisabledBuiltInTools
         searchEngines = [.duckduckgo, .bing, .brave, .yahoo, .marginalia]
         temperature = 0.7

@@ -37,13 +37,18 @@ struct ModelSwitcherSheet: View {
     var body: some View {
         NavigationStack {
             Group {
-                if onlineServices.isEmpty && installed.isEmpty {
+                if onlineServices.isEmpty && installed.isEmpty && !container.settings.shortcutsModelEnabled {
                     ChatPlaceholder(icon: "square.and.arrow.down",
                                     title: "No models installed",
                                     message: "Download a model to start chatting on-device.",
                                     actionTitle: "Open Models", action: { dismiss(); onOpenModels() })
                 } else {
                     List {
+                        if container.settings.shortcutsModelEnabled {
+                            Section("Shortcuts") {
+                                shortcutsRow
+                            }
+                        }
                         if !onlineServices.isEmpty {
                             Section("Online") {
                                 ForEach(onlineServices) { service in
@@ -88,9 +93,40 @@ struct ModelSwitcherSheet: View {
         }
     }
 
-    private func onlineRow(_ service: OnlineService) -> some View {
-        let isActive = container.settings.onlineActiveService?.id == service.id
+    private var shortcutsRow: some View {
+        let isActive = container.settings.shortcutsModelActive
         return Button {
+            container.settings.shortcutsModelActive = true
+            container.settings.openAIOnlineEnabled = false
+            Task { await container.models.deactivate() }
+            dismiss()
+        } label: {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(container.settings.shortcutsModelName) (快捷指令)")
+                        .font(.subheadline.weight(.medium)).foregroundStyle(Theme.textPrimary)
+                    Text("调用快捷指令: \(container.settings.shortcutsShortcutName)")
+                        .font(.caption).foregroundStyle(Theme.textSecondary)
+                }
+                Spacer()
+                if isActive {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.accent)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(isActive ? Theme.accentSoft : Color.clear)
+        .accessibilityLabel("\(container.settings.shortcutsModelName) (快捷指令)")
+        .accessibilityValue(isActive ? "Active" : "")
+        .accessibilityAddTraits(isActive ? [.isSelected] : [])
+    }
+
+    private func onlineRow(_ service: OnlineService) -> some View {
+        let isActive = !container.settings.shortcutsModelActive
+            && container.settings.onlineActiveService?.id == service.id
+        return Button {
+            container.settings.shortcutsModelActive = false
             container.settings.setOnlineServiceEnabled(id: service.id, enabled: true)
             // Online is a first-class selection: drop the local identity/weights so the UI never shows
             // two active models at once.
@@ -119,13 +155,14 @@ struct ModelSwitcherSheet: View {
     }
 
     private func row(_ model: LLMModel, _ variant: LLMVariant) -> some View {
-        // When the online service is armed, no on-device model is the active selection.
-        let isActive = !container.chat.isOnlineActive
+        // When online or shortcuts is armed, no on-device model is the active selection.
+        let isActive = !container.chat.isOnlineActive && !container.chat.isShortcutsActive
             && container.models.active?.variant.id == variant.id
         let isActivating = activating == variant.id || container.models.activatingVariantID == variant.id
         let presentation = container.models.fitPresentation(model, variant, context: container.settings.contextLength)
         return Button {
-            // Model selection is exclusive: picking an on-device model turns the online service off.
+            // Model selection is exclusive: picking an on-device model turns online and shortcuts off.
+            container.settings.shortcutsModelActive = false
             container.settings.openAIOnlineEnabled = false
             activating = variant.id
             container.activate(model, variant: variant)

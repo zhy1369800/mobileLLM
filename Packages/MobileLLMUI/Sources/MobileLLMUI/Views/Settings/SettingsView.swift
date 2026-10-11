@@ -29,6 +29,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: Theme.Space.xl) {
                 behaviorSection
                 onlineSection
+                shortcutsSection
                 samplingSection
                 appearanceSection
                 privacySection
@@ -307,6 +308,36 @@ struct SettingsView: View {
             return "No services configured"
         }
         return "\(settings.onlineServices.count) service\(settings.onlineServices.count == 1 ? "" : "s") · Off"
+    }
+
+    // MARK: Shortcuts model
+
+    @ViewBuilder private var shortcutsSection: some View {
+        section("Shortcuts model", icon: "command") {
+            Toggle(isOn: $settings.shortcutsModelEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Enable shortcuts model").font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    Text("Expose external iOS Shortcuts as a model in the switcher.")
+                        .font(.caption).foregroundStyle(Theme.textTertiary)
+                }
+            }
+            .tint(Theme.accent)
+            if settings.shortcutsModelEnabled {
+                Divider().background(Theme.hairline)
+                VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                    Text("Model display name").font(.caption).foregroundStyle(Theme.textSecondary)
+                    TextField("豆包", text: $settings.shortcutsModelName)
+                        .textFieldStyle(.roundedBorder)
+                }
+                VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                    Text("Shortcut name in iOS Shortcuts").font(.caption).foregroundStyle(Theme.textSecondary)
+                    TextField("发消息问豆包", text: $settings.shortcutsShortcutName)
+                        .textFieldStyle(.roundedBorder)
+                }
+                Text("Chats using this model will pass your message in the 'msg' key (and image in 'fileName') to this shortcut.")
+                    .font(.caption).foregroundStyle(Theme.textTertiary)
+            }
+        }
     }
 
     // MARK: Choose tools
