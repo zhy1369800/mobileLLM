@@ -2277,13 +2277,6 @@ public final class ChatStore {
 
         genTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            var taskImageURLToClean: URL? = nil
-            defer {
-                if let url = taskImageURLToClean {
-                    try? FileManager.default.removeItem(at: url)
-                }
-            }
-
             do {
                 var firstImageFileName: String? = nil
                 do {
@@ -2297,7 +2290,6 @@ public final class ChatStore {
                             try? FileManager.default.createDirectory(at: tasksDir, withIntermediateDirectories: true)
                             let imageURL = tasksDir.appendingPathComponent(fileName)
                             try? attachment.data.write(to: imageURL)
-                            taskImageURLToClean = imageURL
                         }
                     }
                 } catch {
