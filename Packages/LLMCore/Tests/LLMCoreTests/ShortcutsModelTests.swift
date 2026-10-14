@@ -38,6 +38,29 @@ final class ShortcutsModelTests: XCTestCase {
         XCTAssertTrue(msg.contains("重要重要！！！当需要用客户端工具时，你不需要考虑执行，只需要决策返回相应的工具格式就好"))
     }
 
+    func testFormatToolDeclarations() {
+        let schemas = [
+            ToolSchema(
+                name: "calculator",
+                description: "计算数学表达式",
+                parameters: [
+                    ToolParam(name: "expression", kind: .string, description: "算式字符串，如 1+2", required: true)
+                ]
+            ),
+            ToolSchema(
+                name: "current_datetime",
+                description: "获取当前时间",
+                parameters: []
+            )
+        ]
+        let formatted = ShortcutsModelPromptBuilder.formatToolDeclarations(schemas)
+        XCTAssertTrue(formatted.contains("- calculator: 计算数学表达式"))
+        XCTAssertTrue(formatted.contains("expression (string, 必填): 算式字符串，如 1+2"))
+        XCTAssertTrue(formatted.contains("- current_datetime: 获取当前时间"))
+        XCTAssertTrue(formatted.contains("参数: 无"))
+        XCTAssertTrue(formatted.contains("返回: 工具执行结果文本"))
+    }
+
     func testBuildParamsWithoutFileName() {
         let params = ShortcutsModelPromptBuilder.buildParams(msg: "测试信息")
         XCTAssertEqual(params["msg"] as? String, "测试信息")

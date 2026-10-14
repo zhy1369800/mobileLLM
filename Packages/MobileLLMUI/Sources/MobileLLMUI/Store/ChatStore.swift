@@ -2313,9 +2313,7 @@ public final class ChatStore {
                 var toolDesc = ""
                 if self.settings.toolsEnabled,
                    let registry = try? await self.toolRegistry(config: self.settings.builtInToolConfig, servers: self.settings.mcpServers) {
-                    for tool in registry.tools {
-                        toolDesc += "- \(tool.schema.name): \(tool.schema.description)\n"
-                    }
+                    toolDesc = ShortcutsModelPromptBuilder.formatToolDeclarations(registry.tools.map(\.schema))
                 }
 
                 var currentMsg = ShortcutsModelPromptBuilder.buildMessage(

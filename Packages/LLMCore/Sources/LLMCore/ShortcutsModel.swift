@@ -26,6 +26,25 @@ public struct ShortcutsService: Identifiable, Codable, Sendable, Equatable {
 /// Helper for constructing parameters and parsing tool calls for external shortcuts.
 public enum ShortcutsModelPromptBuilder {
 
+    /// Formats tool schemas into structured declarations with parameters and return value descriptions.
+    public static func formatToolDeclarations(_ tools: [ToolSchema]) -> String {
+        guard !tools.isEmpty else { return "" }
+        return tools.map { tool -> String in
+            var lines = ["- \(tool.name): \(tool.description)"]
+            if !tool.parameters.isEmpty {
+                lines.append("  * 参数:")
+                for param in tool.parameters {
+                    let reqText = param.required ? "必填" : "选填"
+                    lines.append("    - \(param.name) (\(param.kind.rawValue), \(reqText)): \(param.description)")
+                }
+            } else {
+                lines.append("  * 参数: 无")
+            }
+            lines.append("  * 返回: 工具执行结果文本（若失败则返回以 \"Error:\" 开头的错误说明）")
+            return lines.joined(separator: "\n")
+        }.joined(separator: "\n\n")
+    }
+
     /// Formats system prompt, tools, history, and current user prompt into a cohesive `msg` string.
     public static func buildMessage(
         systemPrompt: String = "",
