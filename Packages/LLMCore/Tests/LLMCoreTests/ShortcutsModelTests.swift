@@ -97,6 +97,46 @@ final class ShortcutsModelTests: XCTestCase {
         XCTAssertEqual(parsed?.arguments["expression"] as? String, "125 * 8")
     }
 
+    func testParseToolCallFromUnquotedPrefix() {
+        let response = #"tool_call {"tool": "shortcut_automation_tool", "arguments": {"action": "list"}}"#
+        let parsed = ShortcutsModelPromptBuilder.parseToolCall(from: response)
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.tool, "shortcut_automation_tool")
+        XCTAssertEqual(parsed?.arguments["action"] as? String, "list")
+    }
+
+    func testParseToolCallFromColonPrefix() {
+        let response = #"tool_call: {"name": "calculator", "args": {"expression": "2+2"}}"#
+        let parsed = ShortcutsModelPromptBuilder.parseToolCall(from: response)
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.tool, "calculator")
+        XCTAssertEqual(parsed?.arguments["expression"] as? String, "2+2")
+    }
+
+    func testParseToolCallFromXMLTags() {
+        let response = #"<tool_call>{"tool": "wikipedia", "arguments": {"query": "Swift"}}</tool_call>"#
+        let parsed = ShortcutsModelPromptBuilder.parseToolCall(from: response)
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.tool, "wikipedia")
+        XCTAssertEqual(parsed?.arguments["query"] as? String, "Swift")
+    }
+
+    func testParseToolCallWithMixedProse() {
+        let response = "好的，正在为您查询：tool_call {\"tool\": \"shortcut_automation_tool\", \"arguments\": {\"action\": \"list\"}} 请稍后。"
+        let parsed = ShortcutsModelPromptBuilder.parseToolCall(from: response)
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.tool, "shortcut_automation_tool")
+        XCTAssertEqual(parsed?.arguments["action"] as? String, "list")
+    }
+
+    func testParseToolCallWithSerializedArgumentsString() {
+        let response = #"tool_call {"tool": "calculator", "arguments": "{\"expression\": \"10 * 10\"}"}"#
+        let parsed = ShortcutsModelPromptBuilder.parseToolCall(from: response)
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.tool, "calculator")
+        XCTAssertEqual(parsed?.arguments["expression"] as? String, "10 * 10")
+    }
+
     func testParseToolCallReturnsNilForNormalText() {
         let response = "今天的天气非常晴朗，气温大约20摄氏度。"
         let parsed = ShortcutsModelPromptBuilder.parseToolCall(from: response)

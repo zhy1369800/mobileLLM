@@ -150,30 +150,88 @@ public enum ShortcutsModelPromptBuilder {
     }
 
     /// Parses a tool call from the model's response text.
-    /// Supports ```tool_call { ... } ``` as well as bare JSON with "tool" and "arguments" / "args".
+    /// Supports:
+    /// 1. Markdown code blocks: ```tool_call { ... } ``` or ```json { ... } ```
+    /// 2. Tagged blocks: <tool_call> { ... } </tool_call> or <call> ... </call>
+    /// 3. Prefixes: tool_call { ... } or tool_call: { ... } or call: { ... }
+    /// 4. Embedded or bare JSON with "tool" (or "name") and "arguments" (or "args")
     public static func parseToolCall(from text: String) -> ParsedToolCall? {
-        let pattern = #"(?s)```(?:tool_call|json)?\s*(\{[\s\S]*?\})\s*```"#
-        if let regex = try? NSRegularExpression(pattern: pattern) {
+        // 1. Markdown code block: ```tool_call { ... } ``` or ```json { ... } ```
+        let codeBlockPattern = #"(?s)```(?:tool_call|json)?\s*(\{[\s\S]*?\})\s*```"#
+        if let regex = try? NSRegularExpression(pattern: codeBlockPattern) {
             let nsText = text as NSString
             let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
-            for match in matches {
-                if match.numberOfRanges > 1 {
-                    let jsonString = nsText.substring(with: match.range(at: 1))
-                    if let parsed = parseToolJSON(jsonString) {
-                        return parsed
-                    }
+            for match in matches where match.numberOfRanges > 1 {
+                let jsonString = nsText.substring(with: match.range(at: 1))
+                if let parsed = parseToolJSON(jsonString) {
+                    return parsed
                 }
             }
         }
 
-        // Fallback: try parsing the entire text as JSON
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix("{") && trimmed.hasSuffix("}") {
-            if let parsed = parseToolJSON(trimmed) {
-                return parsed
+        // 2. Tagged block: <tool_call> { ... } </tool_call> or <call> ... </call>
+        let tagPattern = #"(?s)<(?:tool_call|call)>\s*(\{[\s\S]*?\})\s*</(?:tool_call|call)>"#
+        if let regex = try? NSRegularExpression(pattern: tagPattern) {
+            let nsText = text as NSString
+            let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+            for match in matches where match.numberOfRanges > 1 {
+                let jsonString = nsText.substring(with: match.range(at: 1))
+                if let parsed = parseToolJSON(jsonString) {
+                    return parsed
+                }
             }
         }
 
+        // 3. Prefixed: tool_call { ... } or tool_call: { ... } or call: { ... }
+        let prefixPattern = #"(?s)(?:tool_call|call)\s*:?\s*(\{[\s\S]*?\})"#
+        if let regex = try? NSRegularExpression(pattern: prefixPattern) {
+            let nsText = text as NSString
+            let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+            for match in matches where match.numberOfRanges > 1 {
+                let jsonString = nsText.substring(with: match.range(at: 1))
+                if let parsed = parseToolJSON(jsonString) {
+                    return parsed
+                }
+            }
+        }
+
+        // 4. Scan any balanced JSON object inside text
+        var searchIndex = text.startIndex
+        while searchIndex < text.endIndex, let openBrace = text[searchIndex...].firstIndex(of: "{") {
+            if let closeBrace = balancedEnd(of: text[openBrace...]) {
+                let candidate = String(text[openBrace..<closeBrace])
+                if let parsed = parseToolJSON(candidate) {
+                    return parsed
+                }
+                searchIndex = closeBrace
+            } else {
+                break
+            }
+        }
+
+        return nil
+    }
+
+    /// Finds index just past the matching closing brace '}', honoring quotes and escapes.
+    private static func balancedEnd(of s: some StringProtocol) -> String.Index? {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        var i = s.startIndex
+        while i < s.endIndex {
+            let c = s[i]
+            if inString {
+                if escaped { escaped = false }
+                else if c == "\\" { escaped = true }
+                else if c == "\"" { inString = false }
+            } else if c == "\"" { inString = true }
+            else if c == "{" { depth += 1 }
+            else if c == "}" {
+                depth -= 1
+                if depth == 0 { return s.index(after: i) }
+            }
+            i = s.index(after: i)
+        }
         return nil
     }
 
@@ -186,7 +244,14 @@ public enum ShortcutsModelPromptBuilder {
               !toolName.isEmpty else {
             return nil
         }
-        let args = (json["arguments"] as? [String: Any]) ?? (json["args"] as? [String: Any]) ?? [:]
+        var args: [String: Any] = [:]
+        if let directArgs = (json["arguments"] as? [String: Any]) ?? (json["args"] as? [String: Any]) {
+            args = directArgs
+        } else if let argsString = (json["arguments"] as? String) ?? (json["args"] as? String),
+                  let argsData = argsString.data(using: .utf8),
+                  let parsedArgs = try? JSONSerialization.jsonObject(with: argsData) as? [String: Any] {
+            args = parsedArgs
+        }
         return ParsedToolCall(tool: toolName, arguments: args)
     }
 }
