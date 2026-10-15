@@ -13,9 +13,18 @@ enum LocalModelPromptRenderer {
     static func bindings(
         for descriptors: [AgentToolDescriptor]
     ) -> [LocalModelToolBinding] {
-        let nameCounts = Dictionary(grouping: descriptors, by: { $0.id.logicalID.name })
+        let sorted = descriptors.sorted {
+            if $0.id.logicalID.providerID != $1.id.logicalID.providerID {
+                return $0.id.logicalID.providerID < $1.id.logicalID.providerID
+            }
+            if $0.id.logicalID.name != $1.id.logicalID.name {
+                return $0.id.logicalID.name < $1.id.logicalID.name
+            }
+            return $0.id < $1.id
+        }
+        let nameCounts = Dictionary(grouping: sorted, by: { $0.id.logicalID.name })
             .mapValues(\.count)
-        return descriptors.enumerated().map { index, descriptor in
+        return sorted.enumerated().map { index, descriptor in
             let name = descriptor.id.logicalID.name
             if nameCounts[name] == 1, isSafeWireName(name) {
                 return LocalModelToolBinding(wireName: name, descriptor: descriptor)

@@ -241,6 +241,30 @@ final class LocalModelRegistrationAndPromptTests: XCTestCase {
         XCTAssertTrue(gemma.contains("<|\"|>x unsafe<|\"|>"), gemma)
     }
 
+    func testBindingsCanonicalOrderingIsStableAcrossPermutations() throws {
+        let toolA = try nestedTool(provider: "builtin", name: "calculator")
+        let toolB = try nestedTool(provider: "builtin", name: "current_datetime")
+        let toolC = try nestedTool(provider: "builtin", name: "web_search")
+
+        let forwardBindings = LocalModelPromptRenderer.bindings(for: [toolA, toolB, toolC])
+        let reversedBindings = LocalModelPromptRenderer.bindings(for: [toolC, toolA, toolB])
+
+        XCTAssertEqual(
+            forwardBindings.map(\.descriptor.id),
+            reversedBindings.map(\.descriptor.id),
+            "Tools must always be ordered canonically regardless of candidate input order"
+        )
+
+        let forwardPrompt = try LocalModelPromptRenderer.toolBlock(bindings: forwardBindings, dialect: .qwen)
+        let reversedPrompt = try LocalModelPromptRenderer.toolBlock(bindings: reversedBindings, dialect: .qwen)
+
+        XCTAssertEqual(
+            forwardPrompt,
+            reversedPrompt,
+            "Rendered prompt must be byte-identical across permutations to preserve KV Cache"
+        )
+    }
+
     func testPreloadedResolverVerifiesExactReferenceDigestAndIdentity() async throws {
         let reference = try ModelFixture.imageArtifact()
         let artifact = try PreloadedLocalModelArtifact(
