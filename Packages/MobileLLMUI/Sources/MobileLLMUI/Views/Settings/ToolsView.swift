@@ -73,6 +73,17 @@ struct ToolsView: View {
                 }
             }
             .tint(Theme.accent)
+            if settings.toolsEnabled {
+                Divider().background(Theme.hairline)
+                Toggle(isOn: $settings.alwaysExposeTools) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Always expose enabled tools").font(.subheadline).foregroundStyle(Theme.textPrimary)
+                        Text("Keep selected tools active in every turn, bypassing keyword matching so tools stay available during follow-up questions.")
+                            .font(.caption).foregroundStyle(Theme.textTertiary)
+                    }
+                }
+                .tint(Theme.accent)
+            }
             Text("The model decides whether to call an allowed tool. Each call adds another model pass; "
                  + "network tools such as web search, Wikipedia, and remote MCP also wait for the network, "
                  + "so they can make a reply noticeably slower.")

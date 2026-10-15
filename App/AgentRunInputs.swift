@@ -70,6 +70,8 @@ public struct AgentRunRequestSnapshot: Sendable {
     public let approvalMode: AgentApprovalMode
     /// Per-conversation reasoning effort (nil = service default; medium is the product default).
     public let onlineReasoningEffort: ReasoningEffort?
+    /// Whether all enabled tools should always remain exposed to the model across turns (OGAM style).
+    public let alwaysExposeTools: Bool
 
     public init(
         conversationID: UUID,
@@ -108,7 +110,8 @@ public struct AgentRunRequestSnapshot: Sendable {
         onlineOutputBudgetAuto: Bool,
         onlineMaximumOutputTokens: Int?,
         approvalMode: AgentApprovalMode,
-        onlineReasoningEffort: ReasoningEffort?
+        onlineReasoningEffort: ReasoningEffort?,
+        alwaysExposeTools: Bool = false
     ) {
         self.conversationID = conversationID
         self.userTurnID = userTurnID
@@ -147,6 +150,7 @@ public struct AgentRunRequestSnapshot: Sendable {
         self.onlineMaximumOutputTokens = onlineMaximumOutputTokens
         self.approvalMode = approvalMode
         self.onlineReasoningEffort = onlineReasoningEffort
+        self.alwaysExposeTools = alwaysExposeTools
     }
 }
 
@@ -200,7 +204,8 @@ extension AgentRunRequestSnapshot {
             onlineOutputBudgetAuto: maximumOutputTokens == nil && onlineOutputBudgetAuto,
             onlineMaximumOutputTokens: onlineMaximumOutputTokens,
             approvalMode: approvalMode,
-            onlineReasoningEffort: onlineReasoningEffort
+            onlineReasoningEffort: onlineReasoningEffort,
+            alwaysExposeTools: alwaysExposeTools
         )
     }
 }
@@ -425,12 +430,11 @@ struct AppFrozenInputBuilder: Sendable {
             selectionPolicyVersion: 1,
             materializedFromGlobalTemplate: false
         )
-        // For online URL model APIs, cloud LLMs (DeepSeek, OpenAI, Claude, etc.) possess massive context
-        // windows and autonomous function-calling reasoning. Completely unbind local keyword gatekeeping:
-        // advertise all user-selected tools as pinned directly so the cloud model can autonomously
-        // decide when to call them without fragile local keyword friction. Local models keep smart ranking.
+        // For online models or when alwaysExposeTools (OGAM mode) is enabled:
+        // advertise all user-selected tools as pinned directly so the model can autonomously
+        // decide when to call them without fragile local keyword friction.
         let policy: ConversationToolPolicy
-        if snapshot.onlineModelEnabled {
+        if snapshot.onlineModelEnabled || snapshot.alwaysExposeTools {
             policy = try ConversationToolPolicy(
                 masterEnabled: rawPolicy.masterEnabled,
                 allowedToolIDs: rawPolicy.allowedToolIDs,

@@ -848,7 +848,8 @@ func makeAgentSnapshot(
         onlineOutputBudgetAuto: onlineOutputBudgetAuto,
         onlineMaximumOutputTokens: onlineService?.maximumOutputTokens,
         approvalMode: conversation.approvalMode ?? .safePreset,
-        onlineReasoningEffort: conversation.reasoningEffort ?? .medium
+        onlineReasoningEffort: conversation.reasoningEffort ?? .medium,
+        alwaysExposeTools: container.settings.alwaysExposeTools
     )
 }
 

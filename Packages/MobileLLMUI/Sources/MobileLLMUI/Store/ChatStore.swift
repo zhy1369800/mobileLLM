@@ -662,9 +662,9 @@ public final class ChatStore {
         return try? ConversationToolPolicy(
             masterEnabled: settings.toolsEnabled,
             allowedToolIDs: deduped,
-            // A visible switch grants availability. Pinning is a separate selector override and the
-            // current UI has no pin control, so selected tools must remain eligible for smart ranking.
-            pinnedToolIDs: [],
+            // When alwaysExposeTools is on, pin all allowed tools so they are always
+            // exposed to the model across all turns, avoiding keyword-based filtering friction.
+            pinnedToolIDs: settings.alwaysExposeTools ? deduped : [],
             selectionPolicyVersion: 1,
             materializedFromGlobalTemplate: materializedFromGlobalTemplate
         )
@@ -683,14 +683,16 @@ public final class ChatStore {
     }
 
     /// One-time materialization for a legacy conversation on its first agent-runtime edit/run
-    /// (spec §14). Later global changes never silently expand an existing policy.
+    /// (spec §14). When alwaysExposeTools is enabled, also refreshes existing policies to keep them in sync.
     private func materializeToolPolicyIfNeeded(at index: Int) {
-        guard agentRuns != nil,
-              conversations[index].toolPolicy == nil,
-              let template = globalToolTemplate()
-        else { return }
-        conversations[index].toolPolicy = template
-        persist(conversations[index])
+        guard agentRuns != nil else { return }
+        if conversations[index].toolPolicy == nil, let template = globalToolTemplate() {
+            conversations[index].toolPolicy = template
+            persist(conversations[index])
+        } else if settings.alwaysExposeTools, let policy = currentToolPolicy(materializedFromGlobalTemplate: false) {
+            conversations[index].toolPolicy = policy
+            persist(conversations[index])
+        }
     }
 
     /// Set by the app shell: activate the given (modelID, variantID) if installed. Called when the user
