@@ -521,7 +521,7 @@ public actor LlamaEngine: LLMEngine {
             let maxTokens = params.maxTokens
 
             // Speculative decoding mode configuration
-            let drafter = PromptLookupDrafter(maxDraftTokens: 2, minNgram: 3, maxNgram: 5)
+            let drafter = PromptLookupDrafter(maxDraftTokens: 2, minNgram: 3, maxNgram: 5, maxLookbackWindow: 512)
             var mtpDriver: NativeMtpDriver? = nil
             let useSpeculative: Bool
 
@@ -638,7 +638,7 @@ public actor LlamaEngine: LLMEngine {
                                 stepDriver = "Native MTP"
                             } else {
                                 drafts = drafter.propose(from: conversationTokens)
-                                stepDriver = "Prompt Lookup"
+                                stepDriver = "Prompt Lookup (Fallback)"
                             }
                         } else {
                             drafts = drafter.propose(from: conversationTokens)
@@ -670,6 +670,7 @@ public actor LlamaEngine: LLMEngine {
 
                         var acceptedDrafts = 0
                         var hitEos = false
+                        var hitMaxTokensInDrafts = false
 
                         for dIdx in 0..<draftCount {
                             let actual = llama_sampler_sample(sampler, context, Int32(dIdx))
@@ -683,10 +684,12 @@ public actor LlamaEngine: LLMEngine {
                                 conversationTokens.append(actual)
                                 acceptedDrafts += 1
                                 if maxTokens > 0 && genTokens >= maxTokens {
+                                    let discardFromPos = kvPos + 1 + Int32(acceptedDrafts)
                                     if acceptedDrafts < draftCount {
-                                        let discardFromPos = kvPos + 1 + Int32(acceptedDrafts)
                                         _ = llama_memory_seq_rm(llama_get_memory(context), 0, discardFromPos, -1)
                                     }
+                                    kvPos = discardFromPos
+                                    hitMaxTokensInDrafts = true
                                     break
                                 }
                             } else {
@@ -709,7 +712,7 @@ public actor LlamaEngine: LLMEngine {
                                     supportsKvRollback = false
                                 }
 
-                                Self.setBatchItem(&specBatch, at: 0, token: actual, pos: discardFromPos, logits: true)
+                                Self.setBatchItem(&specBatch, at: 0, token: actual, pos: discardFromPos, logits: !actualIsEog)
                                 specBatch.n_tokens = 1
                                 _ = llama_decode(context, specBatch)
 
@@ -719,6 +722,11 @@ public actor LlamaEngine: LLMEngine {
                         }
 
                         totalAcceptedTokens += acceptedDrafts
+
+                        if hitMaxTokensInDrafts {
+                            stop = .maxTokens
+                            break
+                        }
 
                         if acceptedDrafts == draftCount {
                             kvPos += Int32(1 + draftCount)

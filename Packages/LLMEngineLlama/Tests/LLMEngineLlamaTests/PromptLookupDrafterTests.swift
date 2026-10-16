@@ -53,4 +53,24 @@ final class PromptLookupDrafterTests: XCTestCase {
         XCTAssertEqual(candidates.count, 2)
         XCTAssertEqual(candidates, [10, 20])
     }
+
+    func testIgnoresMatchesOutsideLookbackWindow() {
+        // Lookback window of 16 tokens: match at position 0 is 30 tokens behind, must be ignored
+        let drafter = PromptLookupDrafter(maxDraftTokens: 2, minNgram: 2, maxNgram: 2, maxLookbackWindow: 16)
+        var tokens: [llama_token] = [88, 99, 42] // Old pattern far away
+        tokens.append(contentsOf: [llama_token](repeating: 1, count: 30)) // 30 spacer tokens
+        tokens.append(contentsOf: [88, 99]) // Fresh trailing pattern
+        let candidates = drafter.propose(from: tokens)
+        XCTAssertTrue(candidates.isEmpty, "Patterns beyond maxLookbackWindow should not be matched")
+    }
+
+    func testFindsMatchInsideLookbackWindow() {
+        let drafter = PromptLookupDrafter(maxDraftTokens: 2, minNgram: 2, maxNgram: 2, maxLookbackWindow: 32)
+        var tokens: [llama_token] = [88, 99, 42]
+        tokens.append(contentsOf: [llama_token](repeating: 1, count: 10)) // 10 spacer tokens (within 32 window)
+        tokens.append(contentsOf: [88, 99])
+        let candidates = drafter.propose(from: tokens)
+        XCTAssertEqual(candidates, [42, 1])
+    }
 }
+

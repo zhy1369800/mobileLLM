@@ -24,6 +24,9 @@ LLAMA_API llama_mtp_runner_t * llama_mtp_init(
 );
 
 /// Predict draft candidate tokens using the model's embedded next-n / MTP prediction heads.
+/// NOTE: In the experimental bridge phase, when native nextn tensor evaluation is not linked or
+/// does not produce proposal tokens, this returns 0, signaling the engine to safely fallback
+/// to Prompt Lookup without interrupting generation.
 /// Returns the number of proposed draft tokens (written to out_drafts).
 LLAMA_API int32_t llama_mtp_predict(
     llama_mtp_runner_t * runner,

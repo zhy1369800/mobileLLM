@@ -10,11 +10,13 @@ public struct PromptLookupDrafter: Sendable {
     public let maxDraftTokens: Int
     public let minNgram: Int
     public let maxNgram: Int
+    public let maxLookbackWindow: Int
 
-    public init(maxDraftTokens: Int = 3, minNgram: Int = 2, maxNgram: Int = 4) {
+    public init(maxDraftTokens: Int = 3, minNgram: Int = 2, maxNgram: Int = 4, maxLookbackWindow: Int = 512) {
         self.maxDraftTokens = max(1, min(maxDraftTokens, 8))
         self.minNgram = max(1, minNgram)
         self.maxNgram = max(self.minNgram, maxNgram)
+        self.maxLookbackWindow = max(16, maxLookbackWindow)
     }
 
     /// Propose up to `maxDraftTokens` candidates by searching for matching n-gram occurrences in `tokens`.
@@ -31,9 +33,10 @@ public struct PromptLookupDrafter: Sendable {
             if searchLimit < ngram { continue }
 
             var foundFollowIndex: Int? = nil
+            let searchStart = max(0, searchLimit - maxLookbackWindow)
             // Search backwards so the freshest context takes precedence
             var i = searchLimit - ngram
-            while i >= 0 {
+            while i >= searchStart {
                 if tokens[i..<(i + ngram)].elementsEqual(pattern) {
                     foundFollowIndex = i + ngram
                     break

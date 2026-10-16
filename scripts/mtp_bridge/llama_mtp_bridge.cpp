@@ -76,6 +76,8 @@ int32_t llama_mtp_predict(
     // Native MTP evaluation: forward the hidden state of last_token through nextn layers.
     // In standard llama.cpp upstream, draft predictions are sampled from the nextn logits.
     // If the nextn head produces proposal tokens, copy them to out_drafts.
+    // In this initial contract bridge phase, returning 0 signals LlamaEngine to perform
+    // seamless fallback to PromptLookupDrafter without stalls.
     int32_t produced = 0;
     runner->draft_history.push_back(last_token);
 
