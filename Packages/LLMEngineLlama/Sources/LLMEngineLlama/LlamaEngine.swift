@@ -522,23 +522,30 @@ public actor LlamaEngine: LLMEngine {
 
             // Speculative decoding mode configuration
             let drafter = PromptLookupDrafter(maxDraftTokens: 2, minNgram: 3, maxNgram: 5)
-            let usePromptLookup: Bool
+            var mtpDriver: NativeMtpDriver? = nil
+            let useSpeculative: Bool
+
             switch params.speculativeMode {
             case .off:
-                usePromptLookup = false
+                useSpeculative = false
             case .promptLookup:
-                usePromptLookup = true
+                useSpeculative = true
             case .mtp:
                 if hasMtpSupport {
-                    NSLog("[LlamaEngine] Speculative mode: Native MTP preferred (model has draft layers)")
-                    usePromptLookup = false
+                    if NativeMtpDriver.isCompiledIn {
+                        mtpDriver = NativeMtpDriver(context: context, model: model, nDraft: 2)
+                        NSLog("[LlamaEngine] Speculative mode: Native MTP driver initialized successfully")
+                    } else {
+                        NSLog("[LlamaEngine] Speculative mode: Native MTP symbols not linked in framework, fallback to Prompt Lookup")
+                    }
+                    useSpeculative = true
                 } else {
-                    usePromptLookup = true
+                    useSpeculative = true
                 }
             }
 
             var conversationTokens: [llama_token] = []
-            if usePromptLookup, let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true) as [llama_token]? {
+            if useSpeculative, let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true) as [llama_token]? {
                 conversationTokens.append(contentsOf: promptTokens)
             }
 
@@ -598,7 +605,7 @@ public actor LlamaEngine: LLMEngine {
                     for d in splitter.feed(text) { emit(d) }
                 }
                 genTokens += 1
-                if usePromptLookup { conversationTokens.append(tokenID) }
+                if useSpeculative { conversationTokens.append(tokenID) }
 
                 if maxTokens > 0 && genTokens >= maxTokens {
                     Self.setBatchItem(&specBatch, at: 0, token: tokenID, pos: kvPos, logits: false)
@@ -609,7 +616,7 @@ public actor LlamaEngine: LLMEngine {
                     break
                 }
 
-                if !usePromptLookup {
+                if !useSpeculative {
                     // Standard autoregressive fast-path: zero draft matching, zero token caching overhead
                     Self.setBatchItem(&specBatch, at: 0, token: tokenID, pos: kvPos, logits: true)
                     specBatch.n_tokens = 1
@@ -618,7 +625,12 @@ public actor LlamaEngine: LLMEngine {
                 } else {
                     let drafts: [llama_token]
                     if supportsKvRollback && backoffCooldown == 0 {
-                        drafts = drafter.propose(from: conversationTokens)
+                        if let mtpDriver {
+                            let mtpDrafts = mtpDriver.predict(lastToken: tokenID, maxDrafts: 2)
+                            drafts = mtpDrafts.isEmpty ? drafter.propose(from: conversationTokens) : mtpDrafts
+                        } else {
+                            drafts = drafter.propose(from: conversationTokens)
+                        }
                     } else {
                         drafts = []
                         if backoffCooldown > 0 { backoffCooldown -= 1 }

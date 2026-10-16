@@ -25,11 +25,12 @@ fi
 git -C "$WORK" fetch --depth 1 origin "$LLAMA_COMMIT"
 git -C "$WORK" checkout "$LLAMA_COMMIT"
 
+echo "Injecting native MTP bridge sources …"
+mkdir -p "$WORK/include" "$WORK/src"
+cp "$ROOT/scripts/mtp_bridge/llama_mtp_bridge.h" "$WORK/include/"
+cp "$ROOT/scripts/mtp_bridge/llama_mtp_bridge.cpp" "$WORK/src/"
+
 echo "Building XCFramework (this is the slow part) …"
-# Note on MTP / Speculative Decoding:
-# The standard ./build-xcframework.sh builds the C-API target `llama`. If downstream targets
-# require native MTP C++ controllers (`common_speculative_impl_draft_mtp`), compile
-# `common/speculative.cpp` with standard C bridges or compile with -DLLAMA_BUILD_COMMON=ON.
 ( cd "$WORK" && ./build-xcframework.sh )
 
 echo "Trimming to iOS + macOS slices …"
@@ -43,6 +44,16 @@ keep = {"ios-arm64", "ios-arm64_x86_64-simulator", "macos-arm64_x86_64"}
 d["AvailableLibraries"] = [l for l in d["AvailableLibraries"] if l["LibraryIdentifier"] in keep]
 with open(p, "wb") as f: plistlib.dump(d, f)
 PY
+
+echo "Publishing MTP bridge headers to framework slices …"
+for slice in "$BUILT"/*; do
+    if [ -d "$slice/Headers" ]; then
+        cp "$ROOT/scripts/mtp_bridge/llama_mtp_bridge.h" "$slice/Headers/"
+    fi
+    if [ -d "$slice/llama.framework/Headers" ]; then
+        cp "$ROOT/scripts/mtp_bridge/llama_mtp_bridge.h" "$slice/llama.framework/Headers/"
+    fi
+done
 
 echo "Installing to $DEST …"
 rm -rf "$DEST"
