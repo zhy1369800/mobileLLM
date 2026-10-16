@@ -538,7 +538,7 @@ public actor LlamaEngine: LLMEngine {
             }
 
             var conversationTokens: [llama_token] = []
-            if let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true) as [llama_token]? {
+            if usePromptLookup, let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true) as [llama_token]? {
                 conversationTokens.append(contentsOf: promptTokens)
             }
 
@@ -598,7 +598,7 @@ public actor LlamaEngine: LLMEngine {
                     for d in splitter.feed(text) { emit(d) }
                 }
                 genTokens += 1
-                conversationTokens.append(tokenID)
+                if usePromptLookup { conversationTokens.append(tokenID) }
 
                 if maxTokens > 0 && genTokens >= maxTokens {
                     Self.setBatchItem(&specBatch, at: 0, token: tokenID, pos: kvPos, logits: false)
@@ -609,20 +609,27 @@ public actor LlamaEngine: LLMEngine {
                     break
                 }
 
-                let drafts: [llama_token]
-                if usePromptLookup && supportsKvRollback && backoffCooldown == 0 {
-                    drafts = drafter.propose(from: conversationTokens)
-                } else {
-                    drafts = []
-                    if backoffCooldown > 0 { backoffCooldown -= 1 }
-                }
-
-                if drafts.isEmpty {
+                if !usePromptLookup {
+                    // Standard autoregressive fast-path: zero draft matching, zero token caching overhead
                     Self.setBatchItem(&specBatch, at: 0, token: tokenID, pos: kvPos, logits: true)
                     specBatch.n_tokens = 1
                     guard llama_decode(context, specBatch) == 0 else { throw EngineError.decodeFailed }
                     kvPos += 1
                 } else {
+                    let drafts: [llama_token]
+                    if supportsKvRollback && backoffCooldown == 0 {
+                        drafts = drafter.propose(from: conversationTokens)
+                    } else {
+                        drafts = []
+                        if backoffCooldown > 0 { backoffCooldown -= 1 }
+                    }
+
+                    if drafts.isEmpty {
+                        Self.setBatchItem(&specBatch, at: 0, token: tokenID, pos: kvPos, logits: true)
+                        specBatch.n_tokens = 1
+                        guard llama_decode(context, specBatch) == 0 else { throw EngineError.decodeFailed }
+                        kvPos += 1
+                    } else {
                     let draftCount = drafts.count
                     Self.setBatchItem(&specBatch, at: 0, token: tokenID, pos: kvPos, logits: true)
                     for dIdx in 0..<draftCount {
