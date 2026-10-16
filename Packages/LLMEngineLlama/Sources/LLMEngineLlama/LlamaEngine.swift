@@ -495,6 +495,7 @@ public actor LlamaEngine: LLMEngine {
                 promptTokenCount = promptTokens.count
             }
             let promptSecs = max(Date().timeIntervalSince(prefillStart), 0.0001)
+            let cachedPromptTokensCount: Int = incrementalSuffixTokens != nil ? cachedSessionTokenCount : 0
 
             // Decode loop. Implicit-open reasoning (Qwen3.5) begins inside the think block. The answer
             // stripper removes a model's answer-wrapper tags (Hunyuan's <answer>…</answer>) so they never
@@ -503,12 +504,18 @@ public actor LlamaEngine: LLMEngine {
             var decoder = PieceDecoder()
             var answerStripper = LiteralStripper(tags: Self.answerStripTags(for: promptTemplate))
             var fullGeneratedAnswer = ""
+            var firstTokenTime: Date? = nil
             func emit(_ d: ThinkSplitter.Delta) {
                 switch d {
-                case .reasoning(let s): cont.yield(.reasoning(s))
+                case .reasoning(let s):
+                    if !s.isEmpty {
+                        if firstTokenTime == nil { firstTokenTime = Date() }
+                        cont.yield(.reasoning(s))
+                    }
                 case .answer(let s):
                     let out = answerStripper.isNoop ? s : answerStripper.feed(s)
                     if !out.isEmpty {
+                        if firstTokenTime == nil { firstTokenTime = Date() }
                         cont.yield(.answer(out))
                         fullGeneratedAnswer += out
                     }
@@ -752,6 +759,7 @@ public actor LlamaEngine: LLMEngine {
             for d in splitter.finish() { emit(d) }
             let strippedTail = answerStripper.isNoop ? "" : answerStripper.flush()
             if !strippedTail.isEmpty {
+                if firstTokenTime == nil { firstTokenTime = Date() }
                 cont.yield(.answer(strippedTail))
                 fullGeneratedAnswer += strippedTail
             }
@@ -779,6 +787,13 @@ public actor LlamaEngine: LLMEngine {
                 speculativeStatsResult = nil
             }
 
+            let ttftSeconds: Double? = firstTokenTime.map { max(0, $0.timeIntervalSince(prefillStart)) }
+            if let ttft = ttftSeconds {
+                let hitRatePct = (Double(cachedPromptTokensCount) / Double(max(1, cachedPromptTokensCount + promptTokenCount))) * 100.0
+                NSLog("[LlamaEngine] TTFT: %.1f ms | Prompt cache: %d hit (%.1f%%)",
+                      ttft * 1000.0, cachedPromptTokensCount, hitRatePct)
+            }
+
             cont.yield(.done(Stats(
                 promptTokens: promptTokenCount,
                 genTokens: genTokens,
@@ -786,7 +801,9 @@ public actor LlamaEngine: LLMEngine {
                 tokensPerSecond: Double(genTokens) / genSecs,
                 peakMemoryBytes: peak,
                 stopReason: stop,
-                speculativeStats: speculativeStatsResult)))
+                speculativeStats: speculativeStatsResult,
+                ttftSeconds: ttftSeconds,
+                cachedPromptTokens: cachedPromptTokensCount)))
 
             // Multi-turn and multimodal reuse: record valid conversational turn on natural EOS completion
             if stop == .eos && answerStripper.isNoop && !fullGeneratedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

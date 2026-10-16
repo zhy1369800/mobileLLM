@@ -121,6 +121,15 @@ struct LocalModelLogsView: View {
                 HStack(spacing: Theme.Space.sm) {
                     Label("\(stats.genTokens) tok", systemImage: "number")
                     Label(String(format: "%.1f tok/s", stats.tokensPerSecond), systemImage: "bolt.fill")
+                    if let ttft = stats.ttftSeconds, ttft > 0 {
+                        let ms = Int(round(ttft * 1000))
+                        Label("\(ms)ms", systemImage: "stopwatch")
+                    }
+                    if let cached = stats.cachedPromptTokens, cached > 0 {
+                        let pct = Int(round(stats.cacheHitRate * 100))
+                        Label("Hit \(pct)%", systemImage: "sparkles")
+                            .foregroundStyle(Theme.accent)
+                    }
                     if let spec = stats.speculativeStats, spec.draftedTokens > 0 {
                         let pct = Int(round(spec.acceptanceRate * 100))
                         Label("\(spec.driver) \(pct)%", systemImage: "bolt.badge.checkmark")
@@ -192,8 +201,15 @@ struct LocalModelLogDetailView: View {
                 if let stats = entry.stats {
                     Divider().background(Theme.hairline)
                     metricRow("Prompt Tokens", value: "\(stats.promptTokens)")
+                    if let cached = stats.cachedPromptTokens, cached > 0 {
+                        let pct = String(format: "%.1f%%", stats.cacheHitRate * 100)
+                        metricRow("Prompt Cache Hit", value: "\(pct) (\(cached) / \(cached + stats.promptTokens) tok)")
+                    }
                     metricRow("Gen Tokens", value: "\(stats.genTokens)")
                     metricRow("Speed", value: String(format: "%.1f tok/s", stats.tokensPerSecond))
+                    if let ttft = stats.ttftSeconds {
+                        metricRow("TTFT (First Token)", value: "\(Int(round(ttft * 1000))) ms (\(String(format: "%.2f", ttft)) s)")
+                    }
                     if stats.promptTPS > 0 {
                         metricRow("Prefill Speed", value: String(format: "%.1f tok/s", stats.promptTPS))
                     }

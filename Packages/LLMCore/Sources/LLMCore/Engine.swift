@@ -76,10 +76,23 @@ public struct Stats: Sendable, Equatable, Codable {
     public var peakMemoryBytes: Int64
     public var stopReason: StopReason
     public var speculativeStats: SpeculativeStats?
+    /// Time to first token in seconds (from prefill start to first emitted token).
+    public var ttftSeconds: Double?
+    /// Tokens matched and reused from the KV cache without recomputation.
+    public var cachedPromptTokens: Int?
+
+    /// Cache hit rate (0.0 ... 1.0) of prompt tokens.
+    public var cacheHitRate: Double {
+        let cached = cachedPromptTokens ?? 0
+        let total = promptTokens + cached
+        return total > 0 ? Double(cached) / Double(total) : 0.0
+    }
 
     public init(promptTokens: Int, genTokens: Int, promptTPS: Double, tokensPerSecond: Double,
                 peakMemoryBytes: Int64, stopReason: StopReason,
-                speculativeStats: SpeculativeStats? = nil) {
+                speculativeStats: SpeculativeStats? = nil,
+                ttftSeconds: Double? = nil,
+                cachedPromptTokens: Int? = nil) {
         self.promptTokens = promptTokens
         self.genTokens = genTokens
         self.promptTPS = promptTPS
@@ -87,10 +100,13 @@ public struct Stats: Sendable, Equatable, Codable {
         self.peakMemoryBytes = peakMemoryBytes
         self.stopReason = stopReason
         self.speculativeStats = speculativeStats
+        self.ttftSeconds = ttftSeconds
+        self.cachedPromptTokens = cachedPromptTokens
     }
 
     enum CodingKeys: String, CodingKey {
         case promptTokens, genTokens, promptTPS, tokensPerSecond, peakMemoryBytes, stopReason, speculativeStats
+        case ttftSeconds, cachedPromptTokens
     }
 
     public init(from decoder: Decoder) throws {
@@ -102,6 +118,8 @@ public struct Stats: Sendable, Equatable, Codable {
         peakMemoryBytes = try container.decode(Int64.self, forKey: .peakMemoryBytes)
         stopReason = try container.decode(StopReason.self, forKey: .stopReason)
         speculativeStats = try container.decodeIfPresent(SpeculativeStats.self, forKey: .speculativeStats)
+        ttftSeconds = try container.decodeIfPresent(Double.self, forKey: .ttftSeconds)
+        cachedPromptTokens = try container.decodeIfPresent(Int.self, forKey: .cachedPromptTokens)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -113,6 +131,8 @@ public struct Stats: Sendable, Equatable, Codable {
         try container.encode(peakMemoryBytes, forKey: .peakMemoryBytes)
         try container.encode(stopReason, forKey: .stopReason)
         try container.encodeIfPresent(speculativeStats, forKey: .speculativeStats)
+        try container.encodeIfPresent(ttftSeconds, forKey: .ttftSeconds)
+        try container.encodeIfPresent(cachedPromptTokens, forKey: .cachedPromptTokens)
     }
 }
 

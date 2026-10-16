@@ -57,10 +57,8 @@ enum Format {
             if stats.tokensPerSecond < 0.1 {
                 // A very slow but positive decode rate must not be rounded into a false zero.
                 parts.append("<0.1 tok/s")
-            } else if stats.tokensPerSecond < 1 {
-                parts.append(String(format: "%.1f tok/s", stats.tokensPerSecond))
             } else {
-                parts.append(String(format: "%.0f tok/s", stats.tokensPerSecond))
+                parts.append(String(format: "%.1f tok/s", stats.tokensPerSecond))
             }
         }
         parts.append("stop: \(stats.stopReason.rawValue)")

@@ -69,10 +69,10 @@ final class SupportLogicTests: XCTestCase {
         )
     }
 
-    func testStatsFooterKeepsWholeNumberDisplayForNormalThroughput() {
+    func testStatsFooterFormatsAccurateTenthsForNormalThroughput() {
         XCTAssertEqual(
             Format.statsFooter(stats(tokensPerSecond: 12.4), modelName: "Gemma 4 E2B"),
-            "Gemma 4 E2B · 4 tok · 12 tok/s · stop: eos"
+            "Gemma 4 E2B · 4 tok · 12.4 tok/s · stop: eos"
         )
     }
 

@@ -212,7 +212,69 @@ final class LocalModelLogStoreTests: XCTestCase {
         XCTAssertEqual(loaded?.stats?.speculativeStats?.acceptedTokens, 21)
         XCTAssertEqual(loaded?.stats?.speculativeStats?.acceptanceRate ?? 0, 0.7, accuracy: 0.001)
     }
+
+    func testTtftAndCacheHitStatsSavedAndReloadedInLogEntry() async throws {
+        let store = LocalModelLogStore(directory: tempDir, autoReload: false)
+        let entry = LocalModelLogEntry(
+            id: UUID(),
+            timestamp: Date(),
+            modelID: "qwen3.5-4b",
+            sampling: Sampling(),
+            messages: [ChatTurn(role: .user, content: "Second turn prompt")],
+            response: "Second turn response",
+            stats: Stats(
+                promptTokens: 200,
+                genTokens: 50,
+                promptTPS: 45.0,
+                tokensPerSecond: 18.0,
+                peakMemoryBytes: 8192,
+                stopReason: .eos,
+                ttftSeconds: 0.185,
+                cachedPromptTokens: 800
+            )
+        )
+
+        store.append(entry)
+        await store.reloadAsync()
+
+        XCTAssertEqual(store.entries.count, 1)
+        let loaded = store.entries.first
+        XCTAssertEqual(loaded?.stats?.ttftSeconds ?? 0, 0.185, accuracy: 0.001)
+        XCTAssertEqual(loaded?.stats?.cachedPromptTokens, 800)
+        XCTAssertEqual(loaded?.stats?.promptTokens, 200)
+        XCTAssertEqual(loaded?.stats?.cacheHitRate ?? 0, 0.8, accuracy: 0.001)
+    }
+
+    func testLegacyStatsWithoutTtftAndCacheHitDecodesGracefully() async throws {
+        let store = LocalModelLogStore(directory: tempDir, autoReload: false)
+        let entry = LocalModelLogEntry(
+            id: UUID(),
+            timestamp: Date(),
+            modelID: "qwen3.5-4b",
+            sampling: Sampling(),
+            messages: [ChatTurn(role: .user, content: "Legacy turn prompt")],
+            response: "Legacy turn response",
+            stats: Stats(
+                promptTokens: 150,
+                genTokens: 30,
+                promptTPS: 40.0,
+                tokensPerSecond: 15.0,
+                peakMemoryBytes: 4096,
+                stopReason: .eos
+            )
+        )
+
+        store.append(entry)
+        await store.reloadAsync()
+
+        XCTAssertEqual(store.entries.count, 1)
+        let loaded = store.entries.first
+        XCTAssertNil(loaded?.stats?.ttftSeconds)
+        XCTAssertNil(loaded?.stats?.cachedPromptTokens)
+        XCTAssertEqual(loaded?.stats?.cacheHitRate ?? 0, 0.0)
+    }
 }
+
 
 
 private final class MockEngine: LLMEngine, @unchecked Sendable {
