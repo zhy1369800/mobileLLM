@@ -265,6 +265,8 @@ public final class AppSettings {
     public var onlineContextLength: Int { didSet { persist() } }
     /// KV-cache quantization width; 0 = unquantized (advanced).
     public var kvBits: Int { didSet { persist() } }
+    /// Speculative decoding mode (.off = standard autoregressive, .promptLookup, .mtp).
+    public var speculativeMode: SpeculativeMode { didSet { persist() } }
 
     // MARK: iOS 26 background continuation
 
@@ -388,6 +390,7 @@ public final class AppSettings {
         contextLength = snap?.contextLength ?? 8192
         onlineContextLength = snap?.onlineContextLength ?? 32_768
         kvBits = snap?.kvBits ?? 8
+        speculativeMode = snap?.speculativeMode ?? .off
         continuedProcessingEnabled = snap?.continuedProcessingEnabled ?? false
         localModelLoggingEnabled = snap?.localModelLoggingEnabled ?? false
         appearance = snap?.appearance ?? .system
@@ -445,7 +448,8 @@ public final class AppSettings {
     public func sampling(thinking: Bool, model: LLMModel? = nil) -> Sampling {
         Sampling(temperature: temperature, topP: topP, topK: topK,
                  repetitionPenalty: repetitionPenalty, maxTokens: maxTokens, thinking: thinking,
-                 contextTokenCap: effectiveContext(for: model), kvBits: kvBits)
+                 contextTokenCap: effectiveContext(for: model), kvBits: kvBits,
+                 speculativeMode: speculativeMode)
     }
 
     /// The context the engine really gets for a model — the setting, clamped by the model's native ceiling.
@@ -539,6 +543,7 @@ public final class AppSettings {
         var contextLength: Int
         var onlineContextLength: Int? = nil
         var kvBits: Int
+        var speculativeMode: SpeculativeMode? = nil
         var continuedProcessingEnabled: Bool? = nil
         var localModelLoggingEnabled: Bool? = nil
         var appearance: AppearanceMode
@@ -574,6 +579,7 @@ public final class AppSettings {
                             onlineMaxTokensAutoMigrated: true,
                             contextLength: contextLength, onlineContextLength: onlineContextLength,
                             kvBits: kvBits,
+                            speculativeMode: speculativeMode,
                             continuedProcessingEnabled: continuedProcessingEnabled,
                             localModelLoggingEnabled: localModelLoggingEnabled,
                             appearance: appearance)
@@ -619,6 +625,7 @@ public final class AppSettings {
         contextLength = 8192
         onlineContextLength = 32_768
         kvBits = 8
+        speculativeMode = .off
         continuedProcessingEnabled = false
         localModelLoggingEnabled = false
         appearance = .system

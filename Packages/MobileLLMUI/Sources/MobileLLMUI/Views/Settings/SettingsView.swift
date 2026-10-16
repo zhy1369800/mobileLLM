@@ -488,6 +488,21 @@ struct SettingsView: View {
                     Text("8-bit KV preserves high attention accuracy with low memory footprint (default). "
                          + "4-bit reduces RAM further, while Full provides unquantized precision. Takes effect from your next message.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
+                    HStack {
+                        Text("Speculative decoding").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                        Spacer()
+                        Menu {
+                            Button(SpeculativeMode.off.displayName) { settings.speculativeMode = .off }
+                            Button(SpeculativeMode.promptLookup.displayName) { settings.speculativeMode = .promptLookup }
+                            Button(SpeculativeMode.mtp.displayName) { settings.speculativeMode = .mtp }
+                        } label: {
+                            Text(settings.speculativeMode.displayName)
+                                .font(.subheadline).foregroundStyle(Theme.accent)
+                        }
+                        .fixedSize()
+                    }
+                    Text("Off generates one token at a time (standard). Prompt Lookup drafts tokens using repeated patterns. Native MTP prioritizes built-in MTP layers when available, falling back to Prompt Lookup.")
+                        .font(.caption).foregroundStyle(Theme.textTertiary)
                 }
                 .padding(.top, Theme.Space.xs)
             }

@@ -87,6 +87,8 @@ public actor LlamaEngine: LLMEngine {
     private var eosText = "<|im_end|>"
     private var promptTemplate: PromptTemplate = .chatML
     private var reasoningStyle: ReasoningStyle = .thinkTags
+    /// Whether the currently loaded model declares MTP / nextn draft prediction layers.
+    public private(set) var hasMtpSupport: Bool = false
     nonisolated private let generationLifecycle = GenerationLifecycle()
     nonisolated private let governanceFactory: GovernanceFactory
 
@@ -163,6 +165,8 @@ public actor LlamaEngine: LLMEngine {
         eosText = modelSpec.architecture.eos
         promptTemplate = modelSpec.architecture.promptTemplate
         reasoningStyle = modelSpec.architecture.reasoningStyle
+        hasMtpSupport = MtpDetector.detectMtpSupport(model: m)
+        NSLog("[LlamaEngine] Model loaded: id=%@, MTP supported=%d", modelSpec.id, hasMtpSupport ? 1 : 0)
         context = nil; contextCap = 0; contextKVBits = -1
 
         // Vision: RESOLVE the projector now, LOAD it on first use. Bringing the vision encoder up here
@@ -228,6 +232,7 @@ public actor LlamaEngine: LLMEngine {
         mtmdContext = nil
         projectorPath = nil
         context = nil; model = nil; vocab = nil; loadedID = nil; contextCap = 0; contextKVBits = -1
+        hasMtpSupport = false
         cachedSessionTurns.removeAll()
         cachedSessionTokenCount = 0
     }
@@ -515,6 +520,36 @@ public actor LlamaEngine: LLMEngine {
             let genStart = Date()
             let maxTokens = params.maxTokens
 
+            // Speculative decoding mode configuration
+            let drafter = PromptLookupDrafter(maxDraftTokens: 2, minNgram: 3, maxNgram: 5)
+            let usePromptLookup: Bool
+            switch params.speculativeMode {
+            case .off:
+                usePromptLookup = false
+            case .promptLookup:
+                usePromptLookup = true
+            case .mtp:
+                if hasMtpSupport {
+                    NSLog("[LlamaEngine] Speculative mode: Native MTP preferred (model has draft layers)")
+                    usePromptLookup = false
+                } else {
+                    usePromptLookup = true
+                }
+            }
+
+            var conversationTokens: [llama_token] = []
+            if let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true) as [llama_token]? {
+                conversationTokens.append(contentsOf: promptTokens)
+            }
+
+            var kvPos: llama_pos = Int32((incrementalSuffixTokens != nil ? cachedSessionTokenCount : 0) + promptTokenCount)
+            var supportsKvRollback = true
+            var consecutiveMisses = 0
+            var backoffCooldown = 0
+
+            var specBatch = llama_batch_init(4, 0, 1)
+            defer { llama_batch_free(specBatch) }
+
             var lastCheckpointUptime: UInt64 = DispatchTime.now().uptimeNanoseconds
             let checkpointIntervalNanos: UInt64 = 150_000_000
 
@@ -550,11 +585,10 @@ public actor LlamaEngine: LLMEngine {
 
                 if llama_vocab_is_eog(vocab, tokenID) {
                     stop = .eos
-                    // Ensure the EOG token is decoded into the KV cache so the assistant turn is cleanly closed in context
-                    var eog = [tokenID]
-                    _ = eog.withUnsafeMutableBufferPointer { buf in
-                        llama_decode(context, llama_batch_get_one(buf.baseAddress, Int32(buf.count)))
-                    }
+                    Self.setBatchItem(&specBatch, at: 0, token: tokenID, pos: kvPos, logits: false)
+                    specBatch.n_tokens = 1
+                    _ = llama_decode(context, specBatch)
+                    kvPos += 1
                     break
                 }
 
@@ -564,12 +598,105 @@ public actor LlamaEngine: LLMEngine {
                     for d in splitter.feed(text) { emit(d) }
                 }
                 genTokens += 1
+                conversationTokens.append(tokenID)
 
-                var one = [tokenID]
-                let ok = one.withUnsafeMutableBufferPointer { buf -> Bool in
-                    llama_decode(context, llama_batch_get_one(buf.baseAddress, Int32(buf.count))) == 0
+                if maxTokens > 0 && genTokens >= maxTokens {
+                    Self.setBatchItem(&specBatch, at: 0, token: tokenID, pos: kvPos, logits: false)
+                    specBatch.n_tokens = 1
+                    _ = llama_decode(context, specBatch)
+                    kvPos += 1
+                    stop = .maxTokens
+                    break
                 }
-                guard ok else { throw EngineError.decodeFailed }
+
+                let drafts: [llama_token]
+                if usePromptLookup && supportsKvRollback && backoffCooldown == 0 {
+                    drafts = drafter.propose(from: conversationTokens)
+                } else {
+                    drafts = []
+                    if backoffCooldown > 0 { backoffCooldown -= 1 }
+                }
+
+                if drafts.isEmpty {
+                    Self.setBatchItem(&specBatch, at: 0, token: tokenID, pos: kvPos, logits: true)
+                    specBatch.n_tokens = 1
+                    guard llama_decode(context, specBatch) == 0 else { throw EngineError.decodeFailed }
+                    kvPos += 1
+                } else {
+                    let draftCount = drafts.count
+                    Self.setBatchItem(&specBatch, at: 0, token: tokenID, pos: kvPos, logits: true)
+                    for dIdx in 0..<draftCount {
+                        Self.setBatchItem(&specBatch, at: dIdx + 1, token: drafts[dIdx], pos: kvPos + Int32(dIdx + 1), logits: true)
+                    }
+                    specBatch.n_tokens = Int32(1 + draftCount)
+                    guard llama_decode(context, specBatch) == 0 else { throw EngineError.decodeFailed }
+
+                    var acceptedDrafts = 0
+                    var hitEos = false
+
+                    for dIdx in 0..<draftCount {
+                        let actual = llama_sampler_sample(sampler, context, Int32(dIdx))
+                        if actual == drafts[dIdx] && !llama_vocab_is_eog(vocab, actual) {
+                            let dPiece = Self.tokenToPiece(vocab: vocab, token: actual)
+                            let dText = decoder.feed(dPiece)
+                            if !dText.isEmpty {
+                                for d in splitter.feed(dText) { emit(d) }
+                            }
+                            genTokens += 1
+                            conversationTokens.append(actual)
+                            acceptedDrafts += 1
+                            if maxTokens > 0 && genTokens >= maxTokens {
+                                if acceptedDrafts < draftCount {
+                                    let discardFromPos = kvPos + 1 + Int32(acceptedDrafts)
+                                    _ = llama_memory_seq_rm(llama_get_memory(context), 0, discardFromPos, -1)
+                                }
+                                break
+                            }
+                        } else {
+                            let actualIsEog = llama_vocab_is_eog(vocab, actual)
+                            if !actualIsEog {
+                                let aPiece = Self.tokenToPiece(vocab: vocab, token: actual)
+                                let aText = decoder.feed(aPiece)
+                                if !aText.isEmpty {
+                                    for d in splitter.feed(aText) { emit(d) }
+                                }
+                                genTokens += 1
+                                conversationTokens.append(actual)
+                            } else {
+                                hitEos = true
+                            }
+
+                            let discardFromPos = kvPos + 1 + Int32(acceptedDrafts)
+                            let rmOk = llama_memory_seq_rm(llama_get_memory(context), 0, discardFromPos, -1)
+                            if !rmOk {
+                                supportsKvRollback = false
+                            }
+
+                            Self.setBatchItem(&specBatch, at: 0, token: actual, pos: discardFromPos, logits: true)
+                            specBatch.n_tokens = 1
+                            _ = llama_decode(context, specBatch)
+
+                            kvPos = discardFromPos + 1
+                            break
+                        }
+                    }
+
+                    if acceptedDrafts == draftCount {
+                        kvPos += Int32(1 + draftCount)
+                        consecutiveMisses = 0
+                    } else {
+                        consecutiveMisses += 1
+                        if consecutiveMisses >= 2 {
+                            backoffCooldown = 16
+                            consecutiveMisses = 0
+                        }
+                    }
+
+                    if hitEos {
+                        stop = .eos
+                        break
+                    }
+                }
             }
 
             let tail = decoder.flush()
@@ -1008,5 +1135,16 @@ public actor LlamaEngine: LLMEngine {
             }
         }
         return kr == KERN_SUCCESS ? Int64(info.phys_footprint) : 0
+    }
+
+    /// Sets up a slot in a `llama_batch` with explicit position and logits flags.
+    private static func setBatchItem(_ batch: inout llama_batch, at i: Int, token: llama_token, pos: llama_pos, logits: Bool) {
+        batch.token[i] = token
+        batch.pos[i] = pos
+        batch.n_seq_id[i] = 1
+        if let seqPtr = batch.seq_id[i] {
+            seqPtr.pointee = 0
+        }
+        batch.logits[i] = logits ? 1 : 0
     }
 }

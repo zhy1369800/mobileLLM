@@ -309,4 +309,33 @@ final class SettingsPersistenceTests: XCTestCase {
         XCTAssertEqual(settings.sampling(thinking: false, model: big).contextTokenCap,
                        min(32_768, big.architecture.nativeContext))
     }
+
+    // MARK: Speculative decoding persistence
+
+    func testSpeculativeModeDefaultsToOffOnFreshInstall() {
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertEqual(settings.speculativeMode, .off)
+        XCTAssertEqual(settings.sampling(thinking: false).speculativeMode, .off)
+    }
+
+    func testSpeculativeModePersistsAndRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        settings.speculativeMode = .promptLookup
+        XCTAssertEqual(AppSettings(defaults: defaults).speculativeMode, .promptLookup)
+
+        settings.speculativeMode = .mtp
+        XCTAssertEqual(AppSettings(defaults: defaults).speculativeMode, .mtp)
+        XCTAssertEqual(AppSettings(defaults: defaults).sampling(thinking: false).speculativeMode, .mtp)
+    }
+
+    func testLegacySnapshotDecodesWithSpeculativeModeOff() {
+        write(#"""
+        {"defaultModelID":"bonsai-8b","systemPrompt":"keep me","systemPromptSeeded":true,
+         "thinkingDefault":true,"thinkingDisplay":"autoCollapse","toolsEnabled":false,
+         "temperature":0.7,"topP":0.95,"topK":20,"repetitionPenalty":1.05,"maxTokens":1024,
+         "contextLength":8192,"kvBits":4,"appearance":"system"}
+        """#)
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertEqual(settings.speculativeMode, .off)
+    }
 }

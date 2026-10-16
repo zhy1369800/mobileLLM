@@ -26,6 +26,10 @@ git -C "$WORK" fetch --depth 1 origin "$LLAMA_COMMIT"
 git -C "$WORK" checkout "$LLAMA_COMMIT"
 
 echo "Building XCFramework (this is the slow part) …"
+# Note on MTP / Speculative Decoding:
+# The standard ./build-xcframework.sh builds the C-API target `llama`. If downstream targets
+# require native MTP C++ controllers (`common_speculative_impl_draft_mtp`), compile
+# `common/speculative.cpp` with standard C bridges or compile with -DLLAMA_BUILD_COMMON=ON.
 ( cd "$WORK" && ./build-xcframework.sh )
 
 echo "Trimming to iOS + macOS slices …"
