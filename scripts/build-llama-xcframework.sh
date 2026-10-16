@@ -25,10 +25,11 @@ fi
 git -C "$WORK" fetch --depth 1 origin "$LLAMA_COMMIT"
 git -C "$WORK" checkout "$LLAMA_COMMIT"
 
-echo "Injecting native MTP bridge sources …"
-mkdir -p "$WORK/include" "$WORK/src"
-cp "$ROOT/scripts/mtp_bridge/llama_mtp_bridge.h" "$WORK/include/"
-cp "$ROOT/scripts/mtp_bridge/llama_mtp_bridge.cpp" "$WORK/src/"
+# Optional native MTP bridge injection (reserved for future native MTP tensor forward pass):
+# echo "Injecting native MTP bridge sources …"
+# mkdir -p "$WORK/include" "$WORK/src"
+# cp "$ROOT/scripts/mtp_bridge/llama_mtp_bridge.h" "$WORK/include/"
+# cp "$ROOT/scripts/mtp_bridge/llama_mtp_bridge.cpp" "$WORK/src/"
 
 echo "Building XCFramework (this is the slow part) …"
 ( cd "$WORK" && ./build-xcframework.sh )
@@ -45,15 +46,16 @@ d["AvailableLibraries"] = [l for l in d["AvailableLibraries"] if l["LibraryIdent
 with open(p, "wb") as f: plistlib.dump(d, f)
 PY
 
-echo "Publishing MTP bridge headers to framework slices …"
-for slice in "$BUILT"/*; do
-    if [ -d "$slice/Headers" ]; then
-        cp "$ROOT/scripts/mtp_bridge/llama_mtp_bridge.h" "$slice/Headers/"
-    fi
-    if [ -d "$slice/llama.framework/Headers" ]; then
-        cp "$ROOT/scripts/mtp_bridge/llama_mtp_bridge.h" "$slice/llama.framework/Headers/"
-    fi
-done
+# Optional: publishing MTP bridge headers to framework slices (reserved for future use):
+# echo "Publishing MTP bridge headers to framework slices …"
+# for slice in "$BUILT"/*; do
+#     if [ -d "$slice/Headers" ]; then
+#         cp "$ROOT/scripts/mtp_bridge/llama_mtp_bridge.h" "$slice/Headers/"
+#     fi
+#     if [ -d "$slice/llama.framework/Headers" ]; then
+#         cp "$ROOT/scripts/mtp_bridge/llama_mtp_bridge.h" "$slice/llama.framework/Headers/"
+#     fi
+# done
 
 echo "Installing to $DEST …"
 rm -rf "$DEST"
