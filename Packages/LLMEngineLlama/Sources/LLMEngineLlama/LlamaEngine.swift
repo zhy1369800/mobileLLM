@@ -717,6 +717,7 @@ public actor LlamaEngine: LLMEngine {
                     }
                 }
             }
+        }
 
             let tail = decoder.flush()
             if !tail.isEmpty { for d in splitter.feed(tail) { emit(d) } }
