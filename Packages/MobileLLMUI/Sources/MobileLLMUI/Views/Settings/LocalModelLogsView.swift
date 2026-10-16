@@ -201,9 +201,13 @@ struct LocalModelLogDetailView: View {
                 if let stats = entry.stats {
                     Divider().background(Theme.hairline)
                     metricRow("Prompt Tokens", value: "\(stats.promptTokens)")
-                    if let cached = stats.cachedPromptTokens, cached > 0 {
-                        let pct = String(format: "%.1f%%", stats.cacheHitRate * 100)
-                        metricRow("Prompt Cache Hit", value: "\(pct) (\(cached) / \(cached + stats.promptTokens) tok)")
+                    if let cached = stats.cachedPromptTokens {
+                        if cached > 0 {
+                            let pct = String(format: "%.1f%%", stats.cacheHitRate * 100)
+                            metricRow("Prompt Cache Hit", value: "\(pct) (\(cached) / \(cached + stats.promptTokens) tok)")
+                        } else {
+                            metricRow("Prompt Cache Hit", value: "0% (全量预填充)")
+                        }
                     }
                     metricRow("Gen Tokens", value: "\(stats.genTokens)")
                     metricRow("Speed", value: String(format: "%.1f tok/s", stats.tokensPerSecond))

@@ -767,6 +767,15 @@ public final class AgentRuntimeAssembly {
                         }
                         return 4
                     },
+                    currentSpeculativeMode: {
+                        if let data = UserDefaults.standard.data(forKey: "mobileLLM.settings.v1"),
+                           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                           let raw = json["speculativeMode"] as? String,
+                           let mode = SpeculativeMode(rawValue: raw) {
+                            return mode
+                        }
+                        return .off
+                    },
                     recordDiagnostic: { code, metadata in
                         await diagnosticLogger.record(code: code, metadata: metadata)
                     }

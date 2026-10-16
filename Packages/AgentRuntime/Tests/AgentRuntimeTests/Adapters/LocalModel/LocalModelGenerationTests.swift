@@ -545,6 +545,25 @@ final class LocalModelGenerationTests: XCTestCase {
         }
         XCTAssertEqual(result.interruption?.reason, .cancelled)
     }
+
+    func testLocalModelProviderPropagatesConfiguredSpeculativeMode() async throws {
+        let harness = try LocalAdapterHarness.make(
+            model: LLMCatalog.bonsai8b,
+            messages: [AgentModelMessage(role: .user, content: "hi", isUntrustedData: false)],
+            configuration: LocalModelAdapterConfiguration(
+                nowMilliseconds: { 0 },
+                currentSpeculativeMode: { .promptLookup }
+            ),
+            scripts: [LocalEngineScript([.done(localStats())])],
+            offset: 65
+        )
+        let result = try await harness.execute()
+        guard case .completed = result.outcome else {
+            return XCTFail("expected a completed attempt")
+        }
+        let captures = await harness.engine.recordedCaptures()
+        XCTAssertEqual(captures.first?.sampling.speculativeMode, .promptLookup)
+    }
 }
 
 private struct WrongBytesResolver: LocalModelArtifactBytesResolving {

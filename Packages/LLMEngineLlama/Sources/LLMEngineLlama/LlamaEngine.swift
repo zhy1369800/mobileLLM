@@ -439,6 +439,14 @@ public actor LlamaEngine: LLMEngine {
                     NSLog("[LlamaEngine] Incremental continuation skipped: KV cache headroom exceeded (used=%d, suffix=%d, reserve=%d, cap=%d). Falling back to full evaluation.",
                           Int32(cachedSessionTokenCount), Int32(tokens.count), Int32(reserve), Int32(contextCap))
                 }
+            } else if previousCount > 0 {
+                let countOk = kept.count == previousCount + 1
+                let prefixOk = countOk && Array(kept.prefix(previousCount)) == cachedSessionTurns
+                let noImg = kept.last?.images.isEmpty == true
+                NSLog("[LlamaEngine] Incremental continuation rejected: kept.count=%d (expected %d), prefixMatch=%@, lastNoImages=%@",
+                      Int32(kept.count), Int32(previousCount + 1),
+                      prefixOk ? "true" : "false",
+                      noImg ? "true" : "false")
             }
 
             if let suffixTokens = incrementalSuffixTokens {

@@ -397,7 +397,10 @@ struct AppFrozenInputBuilder: Sendable {
             )
         }.compactMap { $0 }
         let conversation = try snapshot.messages.compactMap { message -> ConversationTurnContextSource? in
-            guard message.role != .system else { return nil }
+            guard message.role != .system, message.id != snapshot.userTurnID else { return nil }
+            if message.role == .assistant && message.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return nil
+            }
             let role: ConversationContextRole = message.role == .user ? .user : .assistant
             return try ConversationTurnContextSource(
                 messageID: MessageID(rawValue: message.id),

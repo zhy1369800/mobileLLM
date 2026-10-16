@@ -15,6 +15,8 @@ public struct LocalModelAdapterConfiguration: Sendable {
     let recordDiagnostic: @Sendable (String, [String: String]) async -> Void
     /// Dynamic accessor for the user's configured KV-cache bits. Defaults to reading AppSettings snapshot if unprovided.
     public let currentKVBits: (@Sendable () -> Int)?
+    /// Dynamic accessor for the user's configured speculative decoding mode. Defaults to reading AppSettings snapshot if unprovided.
+    public let currentSpeculativeMode: (@Sendable () -> SpeculativeMode)?
 
     public init(
         maximumImageBytes: UInt64 = 32 * 1_024 * 1_024,
@@ -24,6 +26,7 @@ public struct LocalModelAdapterConfiguration: Sendable {
             DispatchTime.now().uptimeNanoseconds / 1_000_000
         },
         currentKVBits: (@Sendable () -> Int)? = nil,
+        currentSpeculativeMode: (@Sendable () -> SpeculativeMode)? = nil,
         recordDiagnostic: @escaping @Sendable (String, [String: String]) async -> Void = { _, _ in }
     ) throws {
         guard maximumImageBytes > 0,
@@ -35,6 +38,7 @@ public struct LocalModelAdapterConfiguration: Sendable {
         self.maximumBufferedActionBytes = maximumBufferedActionBytes
         self.nowMilliseconds = nowMilliseconds
         self.currentKVBits = currentKVBits
+        self.currentSpeculativeMode = currentSpeculativeMode
         self.recordDiagnostic = recordDiagnostic
     }
 }
@@ -464,6 +468,19 @@ private enum LocalModelGeneration {
         return 4
     }
 
+    private static func resolvedSpeculativeMode(configuration: LocalModelAdapterConfiguration) -> SpeculativeMode {
+        if let custom = configuration.currentSpeculativeMode {
+            return custom()
+        }
+        if let data = UserDefaults.standard.data(forKey: "mobileLLM.settings.v1"),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let raw = json["speculativeMode"] as? String,
+           let mode = SpeculativeMode(rawValue: raw) {
+            return mode
+        }
+        return .off
+    }
+
     private static func samplingParameters(
         _ parameters: AgentModelGenerationParameters,
         registration: LocalModelRegistration,
@@ -484,7 +501,8 @@ private enum LocalModelGeneration {
             contextTokenCap: Int(parameters.maximumContextTokens),
             kvBits: resolvedKVBits(configuration: configuration),
             quantizedKVStart: 256,
-            seed: parameters.seed
+            seed: parameters.seed,
+            speculativeMode: resolvedSpeculativeMode(configuration: configuration)
         )
     }
 
