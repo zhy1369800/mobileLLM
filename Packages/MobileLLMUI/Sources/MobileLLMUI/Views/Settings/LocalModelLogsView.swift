@@ -121,6 +121,11 @@ struct LocalModelLogsView: View {
                 HStack(spacing: Theme.Space.sm) {
                     Label("\(stats.genTokens) tok", systemImage: "number")
                     Label(String(format: "%.1f tok/s", stats.tokensPerSecond), systemImage: "bolt.fill")
+                    if let spec = stats.speculativeStats, spec.draftedTokens > 0 {
+                        let pct = Int(round(spec.acceptanceRate * 100))
+                        Label("\(spec.driver) \(pct)%", systemImage: "bolt.badge.checkmark")
+                            .foregroundStyle(Theme.accent)
+                    }
                     Label(stats.stopReason.rawValue, systemImage: "flag")
                 }
                 .font(.caption2)
@@ -183,6 +188,7 @@ struct LocalModelLogDetailView: View {
                 metricRow("Temperature", value: String(format: "%.2f", entry.sampling.temperature))
                 metricRow("Top P / Top K", value: "\(entry.sampling.topP) / \(entry.sampling.topK)")
                 metricRow("Max Tokens", value: "\(entry.sampling.maxTokens)")
+                metricRow("Speculative Mode", value: entry.sampling.speculativeMode.displayName)
                 if let stats = entry.stats {
                     Divider().background(Theme.hairline)
                     metricRow("Prompt Tokens", value: "\(stats.promptTokens)")
@@ -190,6 +196,11 @@ struct LocalModelLogDetailView: View {
                     metricRow("Speed", value: String(format: "%.1f tok/s", stats.tokensPerSecond))
                     if stats.promptTPS > 0 {
                         metricRow("Prefill Speed", value: String(format: "%.1f tok/s", stats.promptTPS))
+                    }
+                    if let spec = stats.speculativeStats {
+                        Divider().background(Theme.hairline)
+                        metricRow("Speculative Driver", value: spec.driver)
+                        metricRow("Speculative Acceptance", value: "\(spec.acceptedTokens) / \(spec.draftedTokens) (\(String(format: "%.1f%%", spec.acceptanceRate * 100)))")
                     }
                     metricRow("Stop Reason", value: stats.stopReason.rawValue)
                 }

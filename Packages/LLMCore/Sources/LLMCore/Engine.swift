@@ -47,6 +47,26 @@ public enum StopReason: String, Sendable, Equatable, Codable {
     case cancelled      // the caller cancelled (partial answer is still committed)
 }
 
+/// Speculative decoding runtime statistics for performance tracking and logging.
+public struct SpeculativeStats: Sendable, Equatable, Codable {
+    /// The name of the speculative driver that proposed the drafts (e.g. "Native MTP", "Prompt Lookup", "Prompt Lookup (Fallback)").
+    public var driver: String
+    /// Total candidate tokens drafted across all speculation steps.
+    public var draftedTokens: Int
+    /// Total drafted tokens verified and accepted by the target model.
+    public var acceptedTokens: Int
+    /// Overall acceptance rate (0.0 ... 1.0).
+    public var acceptanceRate: Double {
+        draftedTokens > 0 ? Double(acceptedTokens) / Double(draftedTokens) : 0.0
+    }
+
+    public init(driver: String, draftedTokens: Int, acceptedTokens: Int) {
+        self.driver = driver
+        self.draftedTokens = draftedTokens
+        self.acceptedTokens = acceptedTokens
+    }
+}
+
 /// End-of-generation statistics (DESIGN §2.2).
 public struct Stats: Sendable, Equatable, Codable {
     public var promptTokens: Int
@@ -55,15 +75,44 @@ public struct Stats: Sendable, Equatable, Codable {
     public var tokensPerSecond: Double
     public var peakMemoryBytes: Int64
     public var stopReason: StopReason
+    public var speculativeStats: SpeculativeStats?
 
     public init(promptTokens: Int, genTokens: Int, promptTPS: Double, tokensPerSecond: Double,
-                peakMemoryBytes: Int64, stopReason: StopReason) {
+                peakMemoryBytes: Int64, stopReason: StopReason,
+                speculativeStats: SpeculativeStats? = nil) {
         self.promptTokens = promptTokens
         self.genTokens = genTokens
         self.promptTPS = promptTPS
         self.tokensPerSecond = tokensPerSecond
         self.peakMemoryBytes = peakMemoryBytes
         self.stopReason = stopReason
+        self.speculativeStats = speculativeStats
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case promptTokens, genTokens, promptTPS, tokensPerSecond, peakMemoryBytes, stopReason, speculativeStats
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        promptTokens = try container.decode(Int.self, forKey: .promptTokens)
+        genTokens = try container.decode(Int.self, forKey: .genTokens)
+        promptTPS = try container.decode(Double.self, forKey: .promptTPS)
+        tokensPerSecond = try container.decode(Double.self, forKey: .tokensPerSecond)
+        peakMemoryBytes = try container.decode(Int64.self, forKey: .peakMemoryBytes)
+        stopReason = try container.decode(StopReason.self, forKey: .stopReason)
+        speculativeStats = try container.decodeIfPresent(SpeculativeStats.self, forKey: .speculativeStats)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(promptTokens, forKey: .promptTokens)
+        try container.encode(genTokens, forKey: .genTokens)
+        try container.encode(promptTPS, forKey: .promptTPS)
+        try container.encode(tokensPerSecond, forKey: .tokensPerSecond)
+        try container.encode(peakMemoryBytes, forKey: .peakMemoryBytes)
+        try container.encode(stopReason, forKey: .stopReason)
+        try container.encodeIfPresent(speculativeStats, forKey: .speculativeStats)
     }
 }
 

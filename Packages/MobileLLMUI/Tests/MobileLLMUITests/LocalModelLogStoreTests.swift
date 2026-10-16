@@ -179,7 +179,41 @@ final class LocalModelLogStoreTests: XCTestCase {
         let reloaded = AppSettings(defaults: defaults)
         XCTAssertTrue(reloaded.localModelLoggingEnabled)
     }
+
+    func testSpeculativeStatsSavedAndReloadedInLogEntry() async throws {
+        let store = LocalModelLogStore(directory: tempDir, autoReload: false)
+        let spec = SpeculativeStats(driver: "Native MTP", draftedTokens: 30, acceptedTokens: 21)
+        let entry = LocalModelLogEntry(
+            id: UUID(),
+            timestamp: Date(),
+            modelID: "qwen3.5-4b",
+            sampling: Sampling(speculativeMode: .mtp),
+            messages: [ChatTurn(role: .user, content: "Test prompt")],
+            response: "Test answer",
+            stats: Stats(
+                promptTokens: 10,
+                genTokens: 25,
+                promptTPS: 50.0,
+                tokensPerSecond: 16.5,
+                peakMemoryBytes: 4096,
+                stopReason: .eos,
+                speculativeStats: spec
+            )
+        )
+
+        store.append(entry)
+        await store.reloadAsync()
+
+        XCTAssertEqual(store.entries.count, 1)
+        let loaded = store.entries.first
+        XCTAssertEqual(loaded?.sampling.speculativeMode, .mtp)
+        XCTAssertEqual(loaded?.stats?.speculativeStats?.driver, "Native MTP")
+        XCTAssertEqual(loaded?.stats?.speculativeStats?.draftedTokens, 30)
+        XCTAssertEqual(loaded?.stats?.speculativeStats?.acceptedTokens, 21)
+        XCTAssertEqual(loaded?.stats?.speculativeStats?.acceptanceRate ?? 0, 0.7, accuracy: 0.001)
+    }
 }
+
 
 private final class MockEngine: LLMEngine, @unchecked Sendable {
     let chunks: [EngineDelta]
