@@ -506,6 +506,11 @@ public actor LlamaEngine: LLMEngine {
                 let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true)
                 prefilledPromptTokens = promptTokens
 
+                // Self-healing: if cachedSessionTokens was empty from previous turns, reconstruct from resident cachedSessionTurns
+                if cachedSessionTokens.isEmpty && !cachedSessionTurns.isEmpty {
+                    cachedSessionTokens = Self.tokenize(vocab: vocab, text: renderPrompt(cachedSessionTurns), addSpecial: true)
+                }
+
                 // Calculate Longest Common Prefix (LCP) between resident KV tokens and new prompt tokens
                 var commonCount = 0
                 let maxLcp = min(cachedSessionTokens.count, promptTokens.count)
@@ -517,6 +522,9 @@ public actor LlamaEngine: LLMEngine {
                 let canRollback = commonCount >= 16 &&
                                   commonCount < promptTokens.count &&
                                   (promptTokens.count + incrementalReserve <= contextCap)
+
+                NSLog("[LlamaEngine] Prefix rollback evaluation: resident=%d, prompt=%d, common=%d (canRollback=%@)",
+                      Int32(cachedSessionTokens.count), Int32(promptTokens.count), Int32(commonCount), canRollback ? "true" : "false")
 
                 var rollbackSucceeded = false
                 if canRollback {
@@ -966,6 +974,8 @@ public actor LlamaEngine: LLMEngine {
                 if let suffixTokens = incrementalSuffixTokens {
                     if !cachedSessionTokens.isEmpty {
                         cachedSessionTokens.append(contentsOf: suffixTokens + generatedTokens)
+                    } else {
+                        cachedSessionTokens = Self.tokenize(vocab: vocab, text: renderPrompt(cachedSessionTurns), addSpecial: true)
                     }
                     cachedSessionTokenCount += suffixTokens.count + generatedTokens.count
                 } else if let promptTokens = prefilledPromptTokens {
