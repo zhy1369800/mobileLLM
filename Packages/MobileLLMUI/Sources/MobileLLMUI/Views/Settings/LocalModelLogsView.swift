@@ -118,27 +118,48 @@ struct LocalModelLogsView: View {
             }
 
             if let stats = entry.stats {
-                HStack(spacing: Theme.Space.sm) {
-                    Label("\(stats.genTokens) tok", systemImage: "number")
-                    Label(String(format: "%.1f tok/s", stats.tokensPerSecond), systemImage: "bolt.fill")
-                    if let ttft = stats.ttftSeconds, ttft > 0 {
-                        let ms = Int(round(ttft * 1000))
-                        Label("\(ms)ms", systemImage: "stopwatch")
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: Theme.Space.sm) {
+                        Label("\(stats.genTokens) tok", systemImage: "number")
+                        Label(String(format: "%.1f tok/s", stats.tokensPerSecond), systemImage: "bolt.fill")
+                        if let ttft = stats.ttftSeconds, ttft > 0 {
+                            let ms = Int(round(ttft * 1000))
+                            Label("\(ms)ms", systemImage: "stopwatch")
+                        }
+                        Label(stats.stopReason.rawValue, systemImage: "flag")
                     }
-                    if let cached = stats.cachedPromptTokens, cached > 0 {
-                        let pct = Int(round(stats.cacheHitRate * 100))
-                        Label("Hit \(pct)%", systemImage: "sparkles")
-                            .foregroundStyle(Theme.accent)
+                    .font(.caption2)
+                    .foregroundStyle(Theme.textSecondary)
+                    .lineLimit(1)
+
+                    let hasCache = (stats.cachedPromptTokens ?? 0) > 0
+                    let hasSpec = (stats.speculativeStats?.draftedTokens ?? 0) > 0
+                    if hasCache || hasSpec {
+                        HStack(spacing: Theme.Space.xs) {
+                            if let cached = stats.cachedPromptTokens, cached > 0 {
+                                let pct = Int(round(stats.cacheHitRate * 100))
+                                Label("Hit \(pct)%", systemImage: "sparkles")
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Theme.accent.opacity(0.12))
+                                    .foregroundStyle(Theme.accent)
+                                    .clipShape(Capsule())
+                            }
+                            if let spec = stats.speculativeStats, spec.draftedTokens > 0 {
+                                let pct = Int(round(spec.acceptanceRate * 100))
+                                let shortDriver = Self.abbreviateDriver(spec.driver)
+                                Label("\(shortDriver) \(pct)%", systemImage: "bolt.badge.checkmark")
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Theme.accent.opacity(0.12))
+                                    .foregroundStyle(Theme.accent)
+                                    .clipShape(Capsule())
+                            }
+                        }
+                        .font(.system(size: 10, weight: .medium))
+                        .lineLimit(1)
                     }
-                    if let spec = stats.speculativeStats, spec.draftedTokens > 0 {
-                        let pct = Int(round(spec.acceptanceRate * 100))
-                        Label("\(spec.driver) \(pct)%", systemImage: "bolt.badge.checkmark")
-                            .foregroundStyle(Theme.accent)
-                    }
-                    Label(stats.stopReason.rawValue, systemImage: "flag")
                 }
-                .font(.caption2)
-                .foregroundStyle(Theme.textSecondary)
             }
 
             if let err = entry.error {
@@ -155,6 +176,16 @@ struct LocalModelLogsView: View {
         }
         .padding(.vertical, 2)
         .listRowBackground(Theme.surface)
+    }
+
+    private static func abbreviateDriver(_ driver: String) -> String {
+        if driver.contains("Prompt Lookup") {
+            return "Lookup"
+        }
+        if driver.contains("MTP") {
+            return "MTP"
+        }
+        return driver
     }
 }
 
