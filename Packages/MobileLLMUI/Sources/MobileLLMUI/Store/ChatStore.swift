@@ -500,13 +500,14 @@ public final class ChatStore {
         params.maxTokens = conversationMaxTokens
         params.temperature = conversationTemperature
         params.topP = conversationTopP
+        let requestedCap = isOnlineActive ? onlineContextRequest : localContextRequest
         if let model {
             params.contextTokenCap = ContextPolicy.effective(
-                requested: localContextRequest,
+                requested: requestedCap,
                 model: model
             )
         } else {
-            params.contextTokenCap = localContextRequest
+            params.contextTokenCap = requestedCap
         }
         return params
     }

@@ -600,6 +600,8 @@ public actor LlamaEngine: LLMEngine {
             }
 
             var kvPos: llama_pos = Int32((incrementalSuffixTokens != nil ? cachedSessionTokenCount : 0) + promptTokenCount)
+            let physicalHeadroom = max(0, contextCap - Int(kvPos))
+            let effectiveMaxTokens = (maxTokens > 0) ? min(maxTokens, physicalHeadroom) : physicalHeadroom
             var supportsKvRollback = true
             var consecutiveMisses = 0
             var backoffCooldown = 0
@@ -638,15 +640,17 @@ public actor LlamaEngine: LLMEngine {
                     guard self.context == context else { throw CancellationError() }
                 }
 
-                if maxTokens > 0 && genTokens >= maxTokens { stop = .maxTokens; break }
+                if genTokens >= effectiveMaxTokens { stop = .maxTokens; break }
                 let tokenID = llama_sampler_sample(sampler, context, -1)
 
                 if llama_vocab_is_eog(vocab, tokenID) {
                     stop = .eos
-                    Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: tokenID, pos: kvPos, logits: false)
-                    specBatch.n_tokens = 1
-                    _ = llama_decode(context, specBatch)
-                    kvPos += 1
+                    if kvPos < contextCap {
+                        Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: tokenID, pos: kvPos, logits: false)
+                        specBatch.n_tokens = 1
+                        _ = llama_decode(context, specBatch)
+                        kvPos += 1
+                    }
                     break
                 }
 
@@ -658,11 +662,13 @@ public actor LlamaEngine: LLMEngine {
                 genTokens += 1
                 if useSpeculative { conversationTokens.append(tokenID) }
 
-                if maxTokens > 0 && genTokens >= maxTokens {
-                    Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: tokenID, pos: kvPos, logits: false)
-                    specBatch.n_tokens = 1
-                    _ = llama_decode(context, specBatch)
-                    kvPos += 1
+                if genTokens >= effectiveMaxTokens {
+                    if kvPos < contextCap {
+                        Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: tokenID, pos: kvPos, logits: false)
+                        specBatch.n_tokens = 1
+                        _ = llama_decode(context, specBatch)
+                        kvPos += 1
+                    }
                     stop = .maxTokens
                     break
                 }
@@ -676,9 +682,11 @@ public actor LlamaEngine: LLMEngine {
                 } else {
                     let drafts: [llama_token]
                     let stepDriver: String
-                    if supportsKvRollback && backoffCooldown == 0 {
+                    let remainingKvForDrafts = max(0, contextCap - Int(kvPos) - 1)
+                    if supportsKvRollback && backoffCooldown == 0 && remainingKvForDrafts > 0 {
+                        let draftCap = min(effectiveMaxDrafts, remainingKvForDrafts)
                         if let mtpDriver {
-                            let mtpDrafts = mtpDriver.predict(lastToken: tokenID, maxDrafts: effectiveMaxDrafts)
+                            let mtpDrafts = mtpDriver.predict(lastToken: tokenID, maxDrafts: draftCap)
                             if !mtpDrafts.isEmpty {
                                 drafts = mtpDrafts
                                 stepDriver = "Native MTP"
@@ -702,7 +710,7 @@ public actor LlamaEngine: LLMEngine {
                         guard llama_decode(context, specBatch) == 0 else { throw EngineError.decodeFailed }
                         kvPos += 1
                     } else {
-                        let draftCount = min(drafts.count, Int(batchCapacity - 1))
+                        let draftCount = min(drafts.count, Int(batchCapacity - 1), remainingKvForDrafts)
                         totalDraftedTokens += draftCount
                         if activeSpeculativeDriver == nil || stepDriver == "Native MTP" {
                             activeSpeculativeDriver = stepDriver
@@ -729,7 +737,7 @@ public actor LlamaEngine: LLMEngine {
                                 genTokens += 1
                                 conversationTokens.append(actual)
                                 acceptedDrafts += 1
-                                if maxTokens > 0 && genTokens >= maxTokens {
+                                if genTokens >= effectiveMaxTokens {
                                     let discardFromPos = kvPos + 1 + Int32(acceptedDrafts)
                                     if acceptedDrafts < draftCount {
                                         _ = llama_memory_seq_rm(llama_get_memory(context), 0, discardFromPos, -1)
@@ -758,11 +766,14 @@ public actor LlamaEngine: LLMEngine {
                                     supportsKvRollback = false
                                 }
 
-                                Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: actual, pos: discardFromPos, logits: !actualIsEog)
-                                specBatch.n_tokens = 1
-                                _ = llama_decode(context, specBatch)
-
-                                kvPos = discardFromPos + 1
+                                if discardFromPos < contextCap {
+                                    Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: actual, pos: discardFromPos, logits: !actualIsEog)
+                                    specBatch.n_tokens = 1
+                                    _ = llama_decode(context, specBatch)
+                                    kvPos = discardFromPos + 1
+                                } else {
+                                    kvPos = discardFromPos
+                                }
                                 break
                             }
                         }
