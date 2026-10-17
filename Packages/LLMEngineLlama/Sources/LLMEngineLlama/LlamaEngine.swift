@@ -547,6 +547,7 @@ public actor LlamaEngine: LLMEngine {
             let effectiveMaxDrafts: Int = (params.temperature <= 0.2) ? 2 : 1
             let missThresholdForBackoff: Int = (params.temperature > 0.6) ? 1 : 2
             let drafter = PromptLookupDrafter(maxDraftTokens: effectiveMaxDrafts, minNgram: 3, maxNgram: 5, maxLookbackWindow: 512)
+            var toolGate = ToolCallSpeculationGate()
             var mtpDriver: NativeMtpDriver? = nil
             let useSpeculative: Bool
 
@@ -655,6 +656,7 @@ public actor LlamaEngine: LLMEngine {
                 let piece = Self.tokenToPiece(vocab: vocab, token: tokenID)
                 let text = decoder.feed(piece)
                 if !text.isEmpty {
+                    toolGate.feed(text)
                     for d in splitter.feed(text) { emit(d) }
                 }
                 genTokens += 1
@@ -681,7 +683,7 @@ public actor LlamaEngine: LLMEngine {
                     let drafts: [llama_token]
                     let stepDriver: String
                     let remainingKvForDrafts = max(0, contextCap - Int(kvPos) - 1)
-                    if supportsKvRollback && backoffCooldown == 0 && remainingKvForDrafts > 0 {
+                    if supportsKvRollback && backoffCooldown == 0 && remainingKvForDrafts > 0 && !toolGate.isInsideToolCall {
                         let draftCap = min(effectiveMaxDrafts, remainingKvForDrafts)
                         if let mtpDriver {
                             let mtpDrafts = mtpDriver.predict(lastToken: tokenID, maxDrafts: draftCap)
@@ -730,6 +732,7 @@ public actor LlamaEngine: LLMEngine {
                                 let dPiece = Self.tokenToPiece(vocab: vocab, token: actual)
                                 let dText = decoder.feed(dPiece)
                                 if !dText.isEmpty {
+                                    toolGate.feed(dText)
                                     for d in splitter.feed(dText) { emit(d) }
                                 }
                                 genTokens += 1
@@ -750,6 +753,7 @@ public actor LlamaEngine: LLMEngine {
                                     let aPiece = Self.tokenToPiece(vocab: vocab, token: actual)
                                     let aText = decoder.feed(aPiece)
                                     if !aText.isEmpty {
+                                        toolGate.feed(aText)
                                         for d in splitter.feed(aText) { emit(d) }
                                     }
                                     genTokens += 1
@@ -1285,5 +1289,37 @@ public actor LlamaEngine: LLMEngine {
             seqPtr.pointee = 0
         }
         batch.logits[i] = logits ? 1 : 0
+    }
+
+    /// Lightweight spec gate to detect tool-call blocks and suppress draft speculation during structured output.
+    private struct ToolCallSpeculationGate {
+        private(set) var isInsideToolCall: Bool = false
+        private var tailBuffer: String = ""
+
+        mutating func feed(_ chunk: String) {
+            guard !chunk.isEmpty else { return }
+            tailBuffer += chunk
+            if tailBuffer.count > 256 {
+                tailBuffer = String(tailBuffer.suffix(256))
+            }
+
+            if !isInsideToolCall {
+                if tailBuffer.contains("<tool_call>") ||
+                   tailBuffer.contains("<tool_call") ||
+                   tailBuffer.contains("<|tool_call") ||
+                   tailBuffer.contains("<｜tool") ||
+                   tailBuffer.contains("{\"name\":") ||
+                   tailBuffer.contains("{\\\"name\\\":") {
+                    isInsideToolCall = true
+                }
+            } else {
+                if tailBuffer.contains("</tool_call>") ||
+                   tailBuffer.contains("<tool_call|>") ||
+                   tailBuffer.contains("call▁end｜>") ||
+                   tailBuffer.contains("}</tool_call>") {
+                    isInsideToolCall = false
+                }
+            }
+        }
     }
 }
