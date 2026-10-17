@@ -43,13 +43,17 @@ public struct MtpDetector: Sendable {
                 llama_model_meta_key_by_index(model, i, buf.baseAddress, buf.count)
             }
             guard keyLen > 0 else { continue }
-            let key = String(cString: keyBuffer)
+            let key = keyBuffer.withUnsafeBufferPointer { buf in
+                buf.baseAddress.map { String(cString: $0) } ?? ""
+            }
 
             let valLen = valBuffer.withUnsafeMutableBufferPointer { buf in
                 llama_model_meta_val_str_by_index(model, i, buf.baseAddress, buf.count)
             }
             guard valLen > 0 else { continue }
-            let val = String(cString: valBuffer)
+            let val = valBuffer.withUnsafeBufferPointer { buf in
+                buf.baseAddress.map { String(cString: $0) } ?? ""
+            }
 
             if declaresDraftLayers(key: key, value: val) {
                 return true

@@ -586,15 +586,13 @@ public actor LlamaEngine: LLMEngine {
                         // Prompt Lookup (or MTP falling back to Prompt Lookup): build n-gram window from
                         // cached history + current suffix. The lookup window is capped at 512 tokens in
                         // PromptLookupDrafter so this is bounded even for long conversations.
-                        if let cachedTokens = Self.tokenize(vocab: vocab, text: renderPrompt(Array(cachedSessionTurns)), addSpecial: true) {
-                            conversationTokens = cachedTokens + suffixTokens
-                        } else {
-                            conversationTokens = suffixTokens
-                        }
+                        let cachedTokens = Self.tokenize(vocab: vocab, text: renderPrompt(Array(cachedSessionTurns)), addSpecial: true)
+                        conversationTokens = cachedTokens + suffixTokens
                     }
                     // MTP with actual driver: conversationTokens stays empty — not needed.
-                } else if let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true) as [llama_token]? {
+                } else {
                     // Multimodal full-eval path: tokenize once here for the n-gram lookup window.
+                    let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true)
                     conversationTokens.append(contentsOf: promptTokens)
                 }
             }
