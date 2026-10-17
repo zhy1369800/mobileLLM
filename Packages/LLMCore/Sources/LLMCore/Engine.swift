@@ -80,6 +80,10 @@ public struct Stats: Sendable, Equatable, Codable {
     public var ttftSeconds: Double?
     /// Tokens matched and reused from the KV cache without recomputation.
     public var cachedPromptTokens: Int?
+    /// Number of transformer layers offloaded to GPU accelerator (nil when unmeasured).
+    public var gpuLayers: Int?
+    /// Execution backend/device name (e.g. "Metal GPU", "CPU").
+    public var backend: String?
 
     /// Cache hit rate (0.0 ... 1.0) of prompt tokens.
     public var cacheHitRate: Double {
@@ -92,7 +96,9 @@ public struct Stats: Sendable, Equatable, Codable {
                 peakMemoryBytes: Int64, stopReason: StopReason,
                 speculativeStats: SpeculativeStats? = nil,
                 ttftSeconds: Double? = nil,
-                cachedPromptTokens: Int? = nil) {
+                cachedPromptTokens: Int? = nil,
+                gpuLayers: Int? = nil,
+                backend: String? = nil) {
         self.promptTokens = promptTokens
         self.genTokens = genTokens
         self.promptTPS = promptTPS
@@ -102,11 +108,13 @@ public struct Stats: Sendable, Equatable, Codable {
         self.speculativeStats = speculativeStats
         self.ttftSeconds = ttftSeconds
         self.cachedPromptTokens = cachedPromptTokens
+        self.gpuLayers = gpuLayers
+        self.backend = backend
     }
 
     enum CodingKeys: String, CodingKey {
         case promptTokens, genTokens, promptTPS, tokensPerSecond, peakMemoryBytes, stopReason, speculativeStats
-        case ttftSeconds, cachedPromptTokens
+        case ttftSeconds, cachedPromptTokens, gpuLayers, backend
     }
 
     public init(from decoder: Decoder) throws {
@@ -120,6 +128,8 @@ public struct Stats: Sendable, Equatable, Codable {
         speculativeStats = try container.decodeIfPresent(SpeculativeStats.self, forKey: .speculativeStats)
         ttftSeconds = try container.decodeIfPresent(Double.self, forKey: .ttftSeconds)
         cachedPromptTokens = try container.decodeIfPresent(Int.self, forKey: .cachedPromptTokens)
+        gpuLayers = try container.decodeIfPresent(Int.self, forKey: .gpuLayers)
+        backend = try container.decodeIfPresent(String.self, forKey: .backend)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -133,6 +143,8 @@ public struct Stats: Sendable, Equatable, Codable {
         try container.encodeIfPresent(speculativeStats, forKey: .speculativeStats)
         try container.encodeIfPresent(ttftSeconds, forKey: .ttftSeconds)
         try container.encodeIfPresent(cachedPromptTokens, forKey: .cachedPromptTokens)
+        try container.encodeIfPresent(gpuLayers, forKey: .gpuLayers)
+        try container.encodeIfPresent(backend, forKey: .backend)
     }
 }
 

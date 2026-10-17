@@ -89,6 +89,7 @@ public actor LlamaEngine: LLMEngine {
     private var reasoningStyle: ReasoningStyle = .thinkTags
     /// Whether the currently loaded model declares MTP / nextn draft prediction layers.
     public private(set) var hasMtpSupport: Bool = false
+    private var loadedGpuLayers: Int32 = 0
     nonisolated private let generationLifecycle = GenerationLifecycle()
     nonisolated private let governanceFactory: GovernanceFactory
 
@@ -161,12 +162,14 @@ public actor LlamaEngine: LLMEngine {
         model = m
         vocab = llama_model_get_vocab(m)
         loadedID = modelSpec.id
+        loadedGpuLayers = mp.n_gpu_layers
         thinkingCapable = modelSpec.architecture.thinkingCapable
         eosText = modelSpec.architecture.eos
         promptTemplate = modelSpec.architecture.promptTemplate
         reasoningStyle = modelSpec.architecture.reasoningStyle
         hasMtpSupport = MtpDetector.detectMtpSupport(model: m)
-        NSLog("[LlamaEngine] Model loaded: id=%@, MTP supported=%d", modelSpec.id, hasMtpSupport ? 1 : 0)
+        NSLog("[LlamaEngine] Model loaded: id=%@, MTP supported=%d, gpu_layers=%d",
+              modelSpec.id, hasMtpSupport ? 1 : 0, loadedGpuLayers)
         context = nil; contextCap = 0; contextKVBits = -1
 
         // Vision: RESOLVE the projector now, LOAD it on first use. Bringing the vision encoder up here
@@ -232,6 +235,7 @@ public actor LlamaEngine: LLMEngine {
         mtmdContext = nil
         projectorPath = nil
         context = nil; model = nil; vocab = nil; loadedID = nil; contextCap = 0; contextKVBits = -1
+        loadedGpuLayers = 0
         hasMtpSupport = false
         cachedSessionTurns.removeAll()
         cachedSessionTokenCount = 0
@@ -855,7 +859,9 @@ public actor LlamaEngine: LLMEngine {
                 stopReason: stop,
                 speculativeStats: speculativeStatsResult,
                 ttftSeconds: ttftSeconds,
-                cachedPromptTokens: cachedPromptTokensCount)))
+                cachedPromptTokens: cachedPromptTokensCount,
+                gpuLayers: Int(loadedGpuLayers),
+                backend: loadedGpuLayers > 0 ? "Metal GPU" : "CPU")))
 
             // Multi-turn and multimodal reuse: record valid conversational turn on natural EOS completion
             if stop == .eos && answerStripper.isNoop && !fullGeneratedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

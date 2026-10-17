@@ -144,39 +144,51 @@ struct LocalModelLogsView: View {
                     .foregroundStyle(Theme.textSecondary)
                     .lineLimit(1)
 
-                    let hasCache = (stats.cachedPromptTokens ?? 0) > 0
-                    let hasSpec = (stats.speculativeStats?.draftedTokens ?? 0) > 0
-                    if hasCache || hasSpec {
-                        HStack(spacing: Theme.Space.xs) {
-                            if let cached = stats.cachedPromptTokens, cached > 0 {
-                                let pct = Int(round(stats.cacheHitRate * 100))
-                                HStack(spacing: 2) {
-                                    Image(systemName: "sparkles")
-                                    Text("Hit \(pct)%")
-                                }
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Theme.accent.opacity(0.12))
-                                .foregroundStyle(Theme.accent)
-                                .clipShape(Capsule())
-                            }
-                            if let spec = stats.speculativeStats, spec.draftedTokens > 0 {
-                                let pct = Int(round(spec.acceptanceRate * 100))
-                                let shortDriver = Self.abbreviateDriver(spec.driver)
-                                HStack(spacing: 2) {
-                                    Image(systemName: "bolt.badge.checkmark")
-                                    Text("\(shortDriver) \(pct)%")
-                                }
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Theme.accent.opacity(0.12))
-                                .foregroundStyle(Theme.accent)
-                                .clipShape(Capsule())
-                            }
+                    let backendName = stats.backend ?? (entry.modelID.lowercased().contains("mlx") ? "MLX GPU" : (stats.promptTPS > 150 ? "Metal GPU" : "CPU"))
+                    let layers = stats.gpuLayers ?? (backendName.contains("GPU") ? 999 : 0)
+                    let isGPU = backendName.contains("GPU") || layers > 0
+                    let layerText = layers >= 999 ? "All layers" : (layers == 0 ? "0 layers" : "\(layers) layers")
+
+                    HStack(spacing: 4) {
+                        HStack(spacing: 2) {
+                            Image(systemName: isGPU ? "memorychip" : "cpu")
+                            Text("\(backendName) · \(layerText)")
                         }
-                        .font(.system(size: 10, weight: .medium))
-                        .lineLimit(1)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(isGPU ? Theme.accent.opacity(0.12) : Theme.warning.opacity(0.12))
+                        .foregroundStyle(isGPU ? Theme.accent : Theme.warning)
+                        .clipShape(Capsule())
+
+                        if let cached = stats.cachedPromptTokens, cached > 0 {
+                            let pct = Int(round(stats.cacheHitRate * 100))
+                            HStack(spacing: 2) {
+                                Image(systemName: "sparkles")
+                                Text("Hit \(pct)%")
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Theme.accent.opacity(0.12))
+                            .foregroundStyle(Theme.accent)
+                            .clipShape(Capsule())
+                        }
+
+                        if let spec = stats.speculativeStats, spec.draftedTokens > 0 {
+                            let pct = Int(round(spec.acceptanceRate * 100))
+                            let shortDriver = Self.abbreviateDriver(spec.driver)
+                            HStack(spacing: 2) {
+                                Image(systemName: "bolt.badge.checkmark")
+                                Text("\(shortDriver) \(pct)%")
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Theme.accent.opacity(0.12))
+                            .foregroundStyle(Theme.accent)
+                            .clipShape(Capsule())
+                        }
                     }
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
                 }
             }
 
@@ -310,6 +322,11 @@ struct LocalModelLogDetailView: View {
                 metricRow("Speculative Mode", value: entry.sampling.speculativeMode.displayName)
                 if let stats = entry.stats {
                     Divider().background(Theme.hairline)
+                    let backendName = stats.backend ?? (entry.modelID.lowercased().contains("mlx") ? "MLX GPU" : (stats.promptTPS > 150 ? "Metal GPU" : "CPU"))
+                    let layers = stats.gpuLayers ?? (backendName.contains("GPU") ? 999 : 0)
+                    let layersValue = layers >= 999 ? "All layers (Full Offload)" : (layers == 0 ? "0 layers (CPU only)" : "\(layers) layers")
+                    metricRow("Execution Backend", value: backendName)
+                    metricRow("GPU Offload Layers", value: layersValue)
                     metricRow("Prompt Tokens", value: "\(stats.promptTokens)")
                     if let cached = stats.cachedPromptTokens {
                         if cached > 0 {
