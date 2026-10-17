@@ -288,7 +288,7 @@ public final class AppSettings {
 
     public static let storageKey = AppConfigurationKeys.settingsStorageKey
     private let defaults: UserDefaults
-    private let key = Self.storageKey
+    private let key = AppSettings.storageKey
     private let fallbackDefaultModelID: String
     /// Suppresses `persist()` during the initial load so `didSet` doesn't re-write while decoding.
     private var loading = true
