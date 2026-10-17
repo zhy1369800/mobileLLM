@@ -81,6 +81,7 @@ public actor LlamaEngine: LLMEngine {
     private var contextCap: Int = 0          // the n_ctx the live context was built with
     private var contextKVBits: Int = -1      // the Sampling.kvBits the live context's KV cache was built for
     private var cachedSessionTurns: [ChatTurn] = []
+    private var cachedSessionTokens: [llama_token] = []
     private var cachedSessionTokenCount: Int = 0
     private var loadedID: String?
     private var thinkingCapable = true
@@ -238,6 +239,7 @@ public actor LlamaEngine: LLMEngine {
         loadedGpuLayers = 0
         hasMtpSupport = false
         cachedSessionTurns.removeAll()
+        cachedSessionTokens.removeAll()
         cachedSessionTokenCount = 0
     }
 
@@ -252,6 +254,7 @@ public actor LlamaEngine: LLMEngine {
             return
         }
         cachedSessionTurns.removeAll()
+        cachedSessionTokens.removeAll()
         cachedSessionTokenCount = 0
         if let context { llama_free(context) }
         // Reset BEFORE the fallible init below: if llama_init_from_model throws out of this function,
@@ -417,6 +420,7 @@ public actor LlamaEngine: LLMEngine {
             let prefillStart = Date()
             let nBatch = 512
             let promptTokenCount: Int
+            var cachedRollbackTokensCount: Int = 0
             let hasImages = kept.contains { !$0.images.isEmpty }
 
             // Check if this turn is an incremental continuation of the cached session:
@@ -438,10 +442,10 @@ public actor LlamaEngine: LLMEngine {
                 let suffixText = newTurnPrompt.hasPrefix("\n") ? newTurnPrompt : ("\n" + newTurnPrompt)
                 let tokens = Self.tokenize(vocab: vocab, text: suffixText, addSpecial: false)
                 let incrementalReserve = min(reserve, 256)
-                if cachedSessionTokenCount + tokens.count + incrementalReserve <= contextCap {
+                if !tokens.isEmpty && cachedSessionTokenCount + tokens.count + incrementalReserve <= contextCap {
                     incrementalSuffixTokens = tokens
                 } else {
-                    NSLog("[LlamaEngine] Incremental continuation skipped: KV cache headroom exceeded (used=%d, suffix=%d, reserve=%d, cap=%d). Falling back to full evaluation.",
+                    NSLog("[LlamaEngine] Incremental continuation skipped: KV cache headroom exceeded or empty tokens (used=%d, suffix=%d, reserve=%d, cap=%d). Falling back to full evaluation.",
                           Int32(cachedSessionTokenCount), Int32(tokens.count), Int32(incrementalReserve), Int32(contextCap))
                 }
             } else if previousCount > 0 {
@@ -463,16 +467,24 @@ public actor LlamaEngine: LLMEngine {
                 // of image ViT compute!
                 NSLog("[LlamaEngine] Incremental continuation matched! Suffix tokens: %d (skipped image/history recompute)",
                       Int32(suffixTokens.count))
+                let batchCap = Int32(max(1, min(nBatch, suffixTokens.count)))
+                var batch = llama_batch_init(batchCap, 0, 1)
+                defer { llama_batch_free(batch) }
+
                 var i = 0
                 while i < suffixTokens.count {
                     try await governance.checkpoint()
                     guard self.context == context else { throw CancellationError() }
                     let end = min(i + nBatch, suffixTokens.count)
-                    var chunk = Array(suffixTokens[i..<end])
-                    let ok = chunk.withUnsafeMutableBufferPointer { buf -> Bool in
-                        llama_decode(context, llama_batch_get_one(buf.baseAddress, Int32(buf.count))) == 0
+                    let chunkCount = end - i
+                    for offset in 0..<chunkCount {
+                        let tok = suffixTokens[i + offset]
+                        let isLast = (i + offset == suffixTokens.count - 1)
+                        Self.setBatchItem(&batch, at: offset, maxCapacity: batchCap,
+                                          token: tok, pos: Int32(cachedSessionTokenCount + i + offset), logits: isLast)
                     }
-                    guard ok else { throw EngineError.decodeFailed }
+                    batch.n_tokens = Int32(chunkCount)
+                    guard llama_decode(context, batch) == 0 else { throw EngineError.decodeFailed }
                     i = end
                     await Task.yield()
                     guard self.context == context else { throw CancellationError() }
@@ -484,35 +496,113 @@ public actor LlamaEngine: LLMEngine {
                 // Multimodal full evaluation: new image introduced or conversation diverged
                 llama_memory_clear(llama_get_memory(context), true)
                 cachedSessionTurns.removeAll()
+                cachedSessionTokens.removeAll()
                 cachedSessionTokenCount = 0
                 promptTokenCount = try await mtmdPrefill(kept: kept, context: context,
                                                          renderPrompt: renderPrompt, nBatch: nBatch,
                                                          governance: governance)
             } else {
-                // Pure text full evaluation: clean slate to ensure 100% position alignment
-                llama_memory_clear(llama_get_memory(context), true)
-                cachedSessionTurns.removeAll()
-                cachedSessionTokenCount = 0
+                // Pure text evaluation: Prefix Rollback optimization with clean slate fallback
                 let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true)
                 prefilledPromptTokens = promptTokens
-                var i = 0
-                while i < promptTokens.count {
-                    try await governance.checkpoint()
-                    guard self.context == context else { throw CancellationError() }
-                    let end = min(i + nBatch, promptTokens.count)
-                    var chunk = Array(promptTokens[i..<end])
-                    let ok = chunk.withUnsafeMutableBufferPointer { buf -> Bool in
-                        llama_decode(context, llama_batch_get_one(buf.baseAddress, Int32(buf.count))) == 0
-                    }
-                    guard ok else { throw EngineError.decodeFailed }
-                    i = end
-                    await Task.yield()
-                    guard self.context == context else { throw CancellationError() }
+
+                // Calculate Longest Common Prefix (LCP) between resident KV tokens and new prompt tokens
+                var commonCount = 0
+                let maxLcp = min(cachedSessionTokens.count, promptTokens.count)
+                while commonCount < maxLcp && cachedSessionTokens[commonCount] == promptTokens[commonCount] {
+                    commonCount += 1
                 }
-                promptTokenCount = promptTokens.count
+
+                let incrementalReserve = min(reserve, 256)
+                let canRollback = commonCount >= 16 &&
+                                  commonCount < promptTokens.count &&
+                                  (promptTokens.count + incrementalReserve <= contextCap)
+
+                var rollbackSucceeded = false
+                if canRollback {
+                    var rmSuccess = true
+                    if cachedSessionTokens.count > commonCount {
+                        rmSuccess = llama_memory_seq_rm(llama_get_memory(context), 0, Int32(commonCount), -1)
+                    }
+                    if rmSuccess {
+                        let suffixTokens = Array(promptTokens[commonCount...])
+                        let hitRatePct = (Double(commonCount) / Double(promptTokens.count)) * 100.0
+                        NSLog("[LlamaEngine] Prefix rollback matched! Common prefix: %d tokens (hit %.1f%%), suffix: %d tokens",
+                              Int32(commonCount), hitRatePct, Int32(suffixTokens.count))
+
+                        let batchCap = Int32(max(1, min(nBatch, suffixTokens.count)))
+                        var batch = llama_batch_init(batchCap, 0, 1)
+                        defer { llama_batch_free(batch) }
+
+                        var i = 0
+                        var decodeError: Error? = nil
+                        while i < suffixTokens.count {
+                            try await governance.checkpoint()
+                            guard self.context == context else { throw CancellationError() }
+                            let end = min(i + nBatch, suffixTokens.count)
+                            let chunkCount = end - i
+                            for offset in 0..<chunkCount {
+                                let tok = suffixTokens[i + offset]
+                                let isLast = (i + offset == suffixTokens.count - 1)
+                                Self.setBatchItem(&batch, at: offset, maxCapacity: batchCap,
+                                                  token: tok, pos: Int32(commonCount + i + offset), logits: isLast)
+                            }
+                            batch.n_tokens = Int32(chunkCount)
+                            let decodeRes = llama_decode(context, batch)
+                            if decodeRes != 0 {
+                                decodeError = EngineError.decodeFailed
+                                break
+                            }
+                            i = end
+                            await Task.yield()
+                            guard self.context == context else { throw CancellationError() }
+                        }
+                        if decodeError == nil {
+                            promptTokenCount = suffixTokens.count
+                            cachedRollbackTokensCount = commonCount
+                            rollbackSucceeded = true
+                        } else {
+                            NSLog("[LlamaEngine] Prefix rollback decode failed, falling back to clean slate")
+                        }
+                    } else {
+                        NSLog("[LlamaEngine] Prefix rollback llama_memory_seq_rm failed, falling back to clean slate")
+                    }
+                }
+
+                if !rollbackSucceeded {
+                    // Clean slate fallback: clean slate to ensure 100% position alignment
+                    llama_memory_clear(llama_get_memory(context), true)
+                    cachedSessionTurns.removeAll()
+                    cachedSessionTokens.removeAll()
+                    cachedSessionTokenCount = 0
+
+                    let batchCap = Int32(max(1, min(nBatch, promptTokens.count)))
+                    var batch = llama_batch_init(batchCap, 0, 1)
+                    defer { llama_batch_free(batch) }
+
+                    var i = 0
+                    while i < promptTokens.count {
+                        try await governance.checkpoint()
+                        guard self.context == context else { throw CancellationError() }
+                        let end = min(i + nBatch, promptTokens.count)
+                        let chunkCount = end - i
+                        for offset in 0..<chunkCount {
+                            let tok = promptTokens[i + offset]
+                            let isLast = (i + offset == promptTokens.count - 1)
+                            Self.setBatchItem(&batch, at: offset, maxCapacity: batchCap,
+                                              token: tok, pos: Int32(i + offset), logits: isLast)
+                        }
+                        batch.n_tokens = Int32(chunkCount)
+                        guard llama_decode(context, batch) == 0 else { throw EngineError.decodeFailed }
+                        i = end
+                        await Task.yield()
+                        guard self.context == context else { throw CancellationError() }
+                    }
+                    promptTokenCount = promptTokens.count
+                }
             }
             let promptSecs = max(Date().timeIntervalSince(prefillStart), 0.0001)
-            let cachedPromptTokensCount: Int = incrementalSuffixTokens != nil ? cachedSessionTokenCount : 0
+            let cachedPromptTokensCount: Int = incrementalSuffixTokens != nil ? cachedSessionTokenCount : cachedRollbackTokensCount
 
             // Decode loop. Implicit-open reasoning (Qwen3.5) begins inside the think block. The answer
             // stripper removes a model's answer-wrapper tags (Hunyuan's <answer>…</answer>) so they never
@@ -602,7 +692,8 @@ public actor LlamaEngine: LLMEngine {
                 }
             }
 
-            var kvPos: llama_pos = Int32((incrementalSuffixTokens != nil ? cachedSessionTokenCount : 0) + promptTokenCount)
+            let baseKvPos = incrementalSuffixTokens != nil ? cachedSessionTokenCount : cachedRollbackTokensCount
+            var kvPos: llama_pos = Int32(baseKvPos + promptTokenCount)
             let physicalHeadroom = max(0, contextCap - Int(kvPos))
             let effectiveMaxTokens = (maxTokens > 0) ? min(maxTokens, physicalHeadroom) : physicalHeadroom
             var supportsKvRollback = true
@@ -615,6 +706,7 @@ public actor LlamaEngine: LLMEngine {
 
             var lastCheckpointUptime: UInt64 = DispatchTime.now().uptimeNanoseconds
             let checkpointIntervalNanos: UInt64 = 150_000_000
+            var generatedTokens: [llama_token] = []
 
             while true {
                 // Cooperative fast-path: check Task and governance cancellation synchronously with zero allocation
@@ -654,6 +746,7 @@ public actor LlamaEngine: LLMEngine {
                         _ = llama_decode(context, specBatch)
                         kvPos += 1
                     }
+                    generatedTokens.append(tokenID)
                     break
                 }
 
@@ -664,6 +757,7 @@ public actor LlamaEngine: LLMEngine {
                     for d in splitter.feed(text) { emit(d) }
                 }
                 genTokens += 1
+                generatedTokens.append(tokenID)
                 if useSpeculative { conversationTokens.append(tokenID) }
 
                 if genTokens >= effectiveMaxTokens {
@@ -740,6 +834,7 @@ public actor LlamaEngine: LLMEngine {
                                     for d in splitter.feed(dText) { emit(d) }
                                 }
                                 genTokens += 1
+                                generatedTokens.append(actual)
                                 conversationTokens.append(actual)
                                 acceptedDrafts += 1
                                 if genTokens >= effectiveMaxTokens {
@@ -761,9 +856,11 @@ public actor LlamaEngine: LLMEngine {
                                         for d in splitter.feed(aText) { emit(d) }
                                     }
                                     genTokens += 1
+                                    generatedTokens.append(actual)
                                     conversationTokens.append(actual)
                                 } else {
                                     hitEos = true
+                                    generatedTokens.append(actual)
                                 }
 
                                 let discardFromPos = kvPos + 1 + Int32(acceptedDrafts)
@@ -866,15 +963,31 @@ public actor LlamaEngine: LLMEngine {
             // Multi-turn and multimodal reuse: record valid conversational turn on natural EOS completion
             if stop == .eos && answerStripper.isNoop && !fullGeneratedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 cachedSessionTurns = kept + [ChatTurn(role: .assistant, content: fullGeneratedAnswer)]
-                cachedSessionTokenCount = (incrementalSuffixTokens != nil ? cachedSessionTokenCount : 0) + promptTokenCount + genTokens + 1
+                if let suffixTokens = incrementalSuffixTokens {
+                    if !cachedSessionTokens.isEmpty {
+                        cachedSessionTokens.append(contentsOf: suffixTokens + generatedTokens)
+                    }
+                    cachedSessionTokenCount += suffixTokens.count + generatedTokens.count
+                } else if let promptTokens = prefilledPromptTokens {
+                    cachedSessionTokens = promptTokens + generatedTokens
+                    cachedSessionTokenCount = cachedSessionTokens.count
+                } else {
+                    // Multimodal full evaluation (hasImages):
+                    // No purely textual tokens to match for Prefix Rollback, but the total physical
+                    // KV cache occupancy must be preserved so subsequent text turns can incrementally continue.
+                    cachedSessionTokens.removeAll()
+                    cachedSessionTokenCount = promptTokenCount + generatedTokens.count
+                }
             } else {
                 cachedSessionTurns.removeAll()
+                cachedSessionTokens.removeAll()
                 cachedSessionTokenCount = 0
             }
             cont.finish()
         } catch is CancellationError {
             if let context { llama_memory_clear(llama_get_memory(context), true) }
             cachedSessionTurns.removeAll()
+            cachedSessionTokens.removeAll()
             cachedSessionTokenCount = 0
             cont.yield(.done(Stats(promptTokens: 0, genTokens: 0, promptTPS: 0, tokensPerSecond: 0,
                                    peakMemoryBytes: Self.footprintBytes(), stopReason: .cancelled)))
@@ -882,6 +995,7 @@ public actor LlamaEngine: LLMEngine {
         } catch {
             if let context { llama_memory_clear(llama_get_memory(context), true) }
             cachedSessionTurns.removeAll()
+            cachedSessionTokens.removeAll()
             cachedSessionTokenCount = 0
             cont.finish(throwing: error)
         }
