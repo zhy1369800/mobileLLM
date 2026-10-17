@@ -104,5 +104,9 @@ final class SpeculativeModeTests: XCTestCase {
         XCTAssertEqual(decoded.speculativeStats?.acceptedTokens, 25)
         XCTAssertEqual(decoded.speculativeStats?.acceptanceRate ?? 0, 0.625, accuracy: 0.001)
     }
+
+    func testAppConfigurationKeysSettingsStorageKey() {
+        XCTAssertEqual(AppConfigurationKeys.settingsStorageKey, "mobileLLM.settings.v1")
+    }
 }
 

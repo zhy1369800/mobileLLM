@@ -10,7 +10,7 @@ import LLMCore
 final class SettingsPersistenceTests: XCTestCase {
 
     private var defaults: UserDefaults!
-    private let key = "mobileLLM.settings.v1"
+    private let key = AppSettings.storageKey
     private let suite = "SettingsPersistenceTests"
 
     override func setUp() {

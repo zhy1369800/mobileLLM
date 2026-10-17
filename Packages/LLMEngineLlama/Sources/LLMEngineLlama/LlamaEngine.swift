@@ -449,6 +449,7 @@ public actor LlamaEngine: LLMEngine {
                       noImg ? "true" : "false")
             }
 
+            var prefilledPromptTokens: [llama_token]? = nil
             if let suffixTokens = incrementalSuffixTokens {
                 // MULTI-TURN CONTINUATION (text or multimodal):
                 // All prior turns (including visual ViT embeddings and previous answers) already reside
@@ -472,6 +473,8 @@ public actor LlamaEngine: LLMEngine {
                     guard self.context == context else { throw CancellationError() }
                 }
                 promptTokenCount = suffixTokens.count
+                // Note: conversationTokens for speculative n-gram lookup is built lazily below,
+                // only when speculative mode is active and prompt lookup is actually in use.
             } else if hasImages {
                 // Multimodal full evaluation: new image introduced or conversation diverged
                 llama_memory_clear(llama_get_memory(context), true)
@@ -486,6 +489,7 @@ public actor LlamaEngine: LLMEngine {
                 cachedSessionTurns.removeAll()
                 cachedSessionTokenCount = 0
                 let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true)
+                prefilledPromptTokens = promptTokens
                 var i = 0
                 while i < promptTokens.count {
                     try await governance.checkpoint()
@@ -536,7 +540,12 @@ public actor LlamaEngine: LLMEngine {
             let maxTokens = params.maxTokens
 
             // Speculative decoding mode configuration
-            let drafter = PromptLookupDrafter(maxDraftTokens: 2, minNgram: 3, maxNgram: 5, maxLookbackWindow: 512)
+            // Adaptive draft token cap based on sampling temperature:
+            // - Low temperature (<= 0.2) or greedy: high prediction confidence, draft up to 2 tokens.
+            // - Moderate / high temperature (> 0.2): higher entropy, draft 1 token to bound rollback penalty.
+            let effectiveMaxDrafts: Int = (params.temperature <= 0.2) ? 2 : 1
+            let missThresholdForBackoff: Int = (params.temperature > 0.6) ? 1 : 2
+            let drafter = PromptLookupDrafter(maxDraftTokens: effectiveMaxDrafts, minNgram: 3, maxNgram: 5, maxLookbackWindow: 512)
             var mtpDriver: NativeMtpDriver? = nil
             let useSpeculative: Bool
 
@@ -548,8 +557,8 @@ public actor LlamaEngine: LLMEngine {
             case .mtp:
                 if hasMtpSupport {
                     if NativeMtpDriver.isCompiledIn {
-                        mtpDriver = NativeMtpDriver(context: context, model: model, nDraft: 2)
-                        NSLog("[LlamaEngine] Speculative mode: Native MTP driver initialized successfully")
+                        mtpDriver = NativeMtpDriver(context: context, model: model, nDraft: effectiveMaxDrafts)
+                        NSLog("[LlamaEngine] Speculative mode: Native MTP driver initialized successfully (nDraft=%d)", Int32(effectiveMaxDrafts))
                     } else {
                         NSLog("[LlamaEngine] Speculative mode: Native MTP symbols not linked in framework, fallback to Prompt Lookup")
                     }
@@ -565,8 +574,28 @@ public actor LlamaEngine: LLMEngine {
             var totalAcceptedTokens = 0
 
             var conversationTokens: [llama_token] = []
-            if useSpeculative, let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true) as [llama_token]? {
-                conversationTokens.append(contentsOf: promptTokens)
+            if useSpeculative {
+                if let prefilled = prefilledPromptTokens {
+                    // Pure-text full-eval path: prompt was already tokenized during prefill, reuse directly.
+                    conversationTokens = prefilled
+                } else if let suffixTokens = incrementalSuffixTokens {
+                    // Multi-turn incremental path: only Prompt Lookup needs a token history for n-gram matching.
+                    // MTP driver only requires lastToken per step, so skip expensive history tokenize for MTP.
+                    if mtpDriver == nil {
+                        // Prompt Lookup (or MTP falling back to Prompt Lookup): build n-gram window from
+                        // cached history + current suffix. The lookup window is capped at 512 tokens in
+                        // PromptLookupDrafter so this is bounded even for long conversations.
+                        if let cachedTokens = Self.tokenize(vocab: vocab, text: renderPrompt(Array(cachedSessionTurns)), addSpecial: true) {
+                            conversationTokens = cachedTokens + suffixTokens
+                        } else {
+                            conversationTokens = suffixTokens
+                        }
+                    }
+                    // MTP with actual driver: conversationTokens stays empty — not needed.
+                } else if let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true) as [llama_token]? {
+                    // Multimodal full-eval path: tokenize once here for the n-gram lookup window.
+                    conversationTokens.append(contentsOf: promptTokens)
+                }
             }
 
             var kvPos: llama_pos = Int32((incrementalSuffixTokens != nil ? cachedSessionTokenCount : 0) + promptTokenCount)
@@ -574,7 +603,8 @@ public actor LlamaEngine: LLMEngine {
             var consecutiveMisses = 0
             var backoffCooldown = 0
 
-            var specBatch = llama_batch_init(4, 0, 1)
+            let batchCapacity = Int32(1 + effectiveMaxDrafts + 2) // tokenID (1) + max drafts + safety margin
+            var specBatch = llama_batch_init(batchCapacity, 0, 1)
             defer { llama_batch_free(specBatch) }
 
             var lastCheckpointUptime: UInt64 = DispatchTime.now().uptimeNanoseconds
@@ -612,7 +642,7 @@ public actor LlamaEngine: LLMEngine {
 
                 if llama_vocab_is_eog(vocab, tokenID) {
                     stop = .eos
-                    Self.setBatchItem(&specBatch, at: 0, token: tokenID, pos: kvPos, logits: false)
+                    Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: tokenID, pos: kvPos, logits: false)
                     specBatch.n_tokens = 1
                     _ = llama_decode(context, specBatch)
                     kvPos += 1
@@ -628,7 +658,7 @@ public actor LlamaEngine: LLMEngine {
                 if useSpeculative { conversationTokens.append(tokenID) }
 
                 if maxTokens > 0 && genTokens >= maxTokens {
-                    Self.setBatchItem(&specBatch, at: 0, token: tokenID, pos: kvPos, logits: false)
+                    Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: tokenID, pos: kvPos, logits: false)
                     specBatch.n_tokens = 1
                     _ = llama_decode(context, specBatch)
                     kvPos += 1
@@ -638,7 +668,7 @@ public actor LlamaEngine: LLMEngine {
 
                 if !useSpeculative {
                     // Standard autoregressive fast-path: zero draft matching, zero token caching overhead
-                    Self.setBatchItem(&specBatch, at: 0, token: tokenID, pos: kvPos, logits: true)
+                    Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: tokenID, pos: kvPos, logits: true)
                     specBatch.n_tokens = 1
                     guard llama_decode(context, specBatch) == 0 else { throw EngineError.decodeFailed }
                     kvPos += 1
@@ -647,7 +677,7 @@ public actor LlamaEngine: LLMEngine {
                     let stepDriver: String
                     if supportsKvRollback && backoffCooldown == 0 {
                         if let mtpDriver {
-                            let mtpDrafts = mtpDriver.predict(lastToken: tokenID, maxDrafts: 2)
+                            let mtpDrafts = mtpDriver.predict(lastToken: tokenID, maxDrafts: effectiveMaxDrafts)
                             if !mtpDrafts.isEmpty {
                                 drafts = mtpDrafts
                                 stepDriver = "Native MTP"
@@ -666,19 +696,19 @@ public actor LlamaEngine: LLMEngine {
                     }
 
                     if drafts.isEmpty {
-                        Self.setBatchItem(&specBatch, at: 0, token: tokenID, pos: kvPos, logits: true)
+                        Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: tokenID, pos: kvPos, logits: true)
                         specBatch.n_tokens = 1
                         guard llama_decode(context, specBatch) == 0 else { throw EngineError.decodeFailed }
                         kvPos += 1
                     } else {
-                        let draftCount = drafts.count
+                        let draftCount = min(drafts.count, Int(batchCapacity - 1))
                         totalDraftedTokens += draftCount
                         if activeSpeculativeDriver == nil || stepDriver == "Native MTP" {
                             activeSpeculativeDriver = stepDriver
                         }
-                        Self.setBatchItem(&specBatch, at: 0, token: tokenID, pos: kvPos, logits: true)
+                        Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: tokenID, pos: kvPos, logits: true)
                         for dIdx in 0..<draftCount {
-                            Self.setBatchItem(&specBatch, at: dIdx + 1, token: drafts[dIdx], pos: kvPos + Int32(dIdx + 1), logits: true)
+                            Self.setBatchItem(&specBatch, at: dIdx + 1, maxCapacity: batchCapacity, token: drafts[dIdx], pos: kvPos + Int32(dIdx + 1), logits: true)
                         }
                         specBatch.n_tokens = Int32(1 + draftCount)
                         guard llama_decode(context, specBatch) == 0 else { throw EngineError.decodeFailed }
@@ -727,7 +757,7 @@ public actor LlamaEngine: LLMEngine {
                                     supportsKvRollback = false
                                 }
 
-                                Self.setBatchItem(&specBatch, at: 0, token: actual, pos: discardFromPos, logits: !actualIsEog)
+                                Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: actual, pos: discardFromPos, logits: !actualIsEog)
                                 specBatch.n_tokens = 1
                                 _ = llama_decode(context, specBatch)
 
@@ -748,7 +778,7 @@ public actor LlamaEngine: LLMEngine {
                             consecutiveMisses = 0
                         } else {
                             consecutiveMisses += 1
-                            if consecutiveMisses >= 2 {
+                            if consecutiveMisses >= missThresholdForBackoff {
                                 backoffCooldown = 16
                                 consecutiveMisses = 0
                             }
@@ -1233,7 +1263,11 @@ public actor LlamaEngine: LLMEngine {
     }
 
     /// Sets up a slot in a `llama_batch` with explicit position and logits flags.
-    private static func setBatchItem(_ batch: inout llama_batch, at i: Int, token: llama_token, pos: llama_pos, logits: Bool) {
+    private static func setBatchItem(_ batch: inout llama_batch, at i: Int, maxCapacity: Int32 = 8, token: llama_token, pos: llama_pos, logits: Bool) {
+        guard i >= 0 && i < Int(maxCapacity) else {
+            assertionFailure("[LlamaEngine] Batch slot index \(i) exceeds allocated capacity \(maxCapacity)")
+            return
+        }
         batch.token[i] = token
         batch.pos[i] = pos
         batch.n_seq_id[i] = 1

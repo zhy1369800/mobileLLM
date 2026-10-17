@@ -759,7 +759,7 @@ public final class AgentRuntimeAssembly {
                 artifactResolver: attachmentResolver,
                 configuration: try LocalModelAdapterConfiguration(
                     currentKVBits: {
-                        if let data = UserDefaults.standard.data(forKey: "mobileLLM.settings.v1"),
+                        if let data = UserDefaults.standard.data(forKey: AppConfigurationKeys.settingsStorageKey),
                            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                            let bits = json["kvBits"] as? Int,
                            (bits == 0 || bits == 4 || bits == 8) {
@@ -768,7 +768,7 @@ public final class AgentRuntimeAssembly {
                         return 4
                     },
                     currentSpeculativeMode: {
-                        if let data = UserDefaults.standard.data(forKey: "mobileLLM.settings.v1"),
+                        if let data = UserDefaults.standard.data(forKey: AppConfigurationKeys.settingsStorageKey),
                            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                            let raw = json["speculativeMode"] as? String,
                            let mode = SpeculativeMode(rawValue: raw) {

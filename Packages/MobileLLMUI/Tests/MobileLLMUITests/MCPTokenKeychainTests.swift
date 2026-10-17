@@ -12,7 +12,7 @@ import LLMCore
 @MainActor
 final class MCPTokenKeychainTests: XCTestCase {
 
-    private let key = "mobileLLM.settings.v1"
+    private let key = AppSettings.storageKey
     private var suite: String!
     private var defaults: UserDefaults!
     private var service: String!

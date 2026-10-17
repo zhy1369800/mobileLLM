@@ -2,6 +2,12 @@
 
 import Foundation
 
+/// Global configuration keys shared across AppRuntime, AgentRuntime, LLMCore and MobileLLMUI.
+public enum AppConfigurationKeys {
+    /// Canonical storage key for mobileLLM app settings snapshot in UserDefaults.
+    public static let settingsStorageKey = "mobileLLM.settings.v1"
+}
+
 /// Speculative decoding mode for generation.
 public enum SpeculativeMode: String, Sendable, Equatable, Codable, CaseIterable {
     /// Disabled (default): standard autoregressive decoding.
