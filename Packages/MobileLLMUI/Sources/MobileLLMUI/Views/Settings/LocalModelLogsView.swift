@@ -156,8 +156,8 @@ struct LocalModelLogsView: View {
                         }
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(isGPU ? Theme.accent.opacity(0.12) : Theme.warning.opacity(0.12))
-                        .foregroundStyle(isGPU ? Theme.accent : Theme.warning)
+                        .background(isGPU ? Theme.accent.opacity(0.12) : Theme.fitAmber.opacity(0.12))
+                        .foregroundStyle(isGPU ? Theme.accent : Theme.fitAmber)
                         .clipShape(Capsule())
 
                         if let cached = stats.cachedPromptTokens, cached > 0 {

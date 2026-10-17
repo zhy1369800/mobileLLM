@@ -102,6 +102,8 @@ public enum Theme {
 
     /// Failed-state / destructive text — a brighter pure red, kept distinct from the brick-red accent.
     public static let danger = dynamic(dark: 0xF06A5A, light: 0xC02617)
+    /// Warning / advisory text or background tint — mirrors fitAmber (赭 ochre).
+    public static let warning = fitAmber
 
     // MARK: Scale tokens
 
