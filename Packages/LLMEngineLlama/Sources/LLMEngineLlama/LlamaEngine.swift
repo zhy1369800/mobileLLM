@@ -419,7 +419,7 @@ public actor LlamaEngine: LLMEngine {
             // which leaves the KV populated so the decode loop below continues from where the prefill ended.
             let prefillStart = Date()
             let nBatch = 512
-            let promptTokenCount: Int
+            var promptTokenCount: Int = 0
             var cachedRollbackTokensCount: Int = 0
             let hasImages = kept.contains { !$0.images.isEmpty }
 
