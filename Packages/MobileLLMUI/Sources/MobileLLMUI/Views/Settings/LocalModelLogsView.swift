@@ -108,25 +108,37 @@ struct LocalModelLogsView: View {
     private func logEntryRow(_ entry: LocalModelLogEntry) -> some View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             HStack {
-                Text(entry.modelID)
+                Text(Self.formattedModelTitle(for: entry.modelID))
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(Theme.textPrimary)
                 Spacer()
-                Text(entry.timestamp.formatted(date: .abbreviated, time: .standard))
+                Text(Self.logDateFormatter.string(from: entry.timestamp))
                     .font(.caption2)
                     .foregroundStyle(Theme.textTertiary)
             }
 
             if let stats = entry.stats {
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: Theme.Space.sm) {
-                        Label("\(stats.genTokens) tok", systemImage: "number")
-                        Label(String(format: "%.1f tok/s", stats.tokensPerSecond), systemImage: "bolt.fill")
+                    HStack(spacing: 8) {
+                        HStack(spacing: 2) {
+                            Image(systemName: "number")
+                            Text("\(stats.genTokens) tok")
+                        }
+                        HStack(spacing: 2) {
+                            Image(systemName: "bolt.fill")
+                            Text(String(format: "%.1f tok/s", stats.tokensPerSecond))
+                        }
                         if let ttft = stats.ttftSeconds, ttft > 0 {
                             let ms = Int(round(ttft * 1000))
-                            Label("\(ms)ms", systemImage: "stopwatch")
+                            HStack(spacing: 2) {
+                                Image(systemName: "stopwatch")
+                                Text("\(ms)ms")
+                            }
                         }
-                        Label(stats.stopReason.rawValue, systemImage: "flag")
+                        HStack(spacing: 2) {
+                            Image(systemName: "flag")
+                            Text(stats.stopReason.rawValue)
+                        }
                     }
                     .font(.caption2)
                     .foregroundStyle(Theme.textSecondary)
@@ -138,22 +150,28 @@ struct LocalModelLogsView: View {
                         HStack(spacing: Theme.Space.xs) {
                             if let cached = stats.cachedPromptTokens, cached > 0 {
                                 let pct = Int(round(stats.cacheHitRate * 100))
-                                Label("Hit \(pct)%", systemImage: "sparkles")
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Theme.accent.opacity(0.12))
-                                    .foregroundStyle(Theme.accent)
-                                    .clipShape(Capsule())
+                                HStack(spacing: 2) {
+                                    Image(systemName: "sparkles")
+                                    Text("Hit \(pct)%")
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Theme.accent.opacity(0.12))
+                                .foregroundStyle(Theme.accent)
+                                .clipShape(Capsule())
                             }
                             if let spec = stats.speculativeStats, spec.draftedTokens > 0 {
                                 let pct = Int(round(spec.acceptanceRate * 100))
                                 let shortDriver = Self.abbreviateDriver(spec.driver)
-                                Label("\(shortDriver) \(pct)%", systemImage: "bolt.badge.checkmark")
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Theme.accent.opacity(0.12))
-                                    .foregroundStyle(Theme.accent)
-                                    .clipShape(Capsule())
+                                HStack(spacing: 2) {
+                                    Image(systemName: "bolt.badge.checkmark")
+                                    Text("\(shortDriver) \(pct)%")
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Theme.accent.opacity(0.12))
+                                .foregroundStyle(Theme.accent)
+                                .clipShape(Capsule())
                             }
                         }
                         .font(.system(size: 10, weight: .medium))
@@ -168,7 +186,8 @@ struct LocalModelLogsView: View {
                     .foregroundStyle(Theme.danger)
                     .lineLimit(1)
             } else {
-                Text(entry.response.isEmpty ? "(Empty response)" : entry.response)
+                let preview = entry.response.trimmingCharacters(in: .whitespacesAndNewlines)
+                Text(preview.isEmpty ? "(Empty response)" : preview)
                     .font(.caption)
                     .foregroundStyle(Theme.textTertiary)
                     .lineLimit(2)
@@ -176,6 +195,66 @@ struct LocalModelLogsView: View {
         }
         .padding(.vertical, 2)
         .listRowBackground(Theme.surface)
+    }
+
+    static let logDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return formatter
+    }()
+
+    static func formattedModelTitle(for modelID: String) -> String {
+        let rawModelPart: String
+        if let dotIndex = modelID.firstIndex(of: "·") {
+            rawModelPart = String(modelID[..<dotIndex]).trimmingCharacters(in: .whitespaces)
+        } else if let slashIndex = modelID.lastIndex(of: "/") {
+            rawModelPart = String(modelID[modelID.index(after: slashIndex)...]).trimmingCharacters(in: .whitespaces)
+        } else {
+            rawModelPart = modelID.trimmingCharacters(in: .whitespaces)
+        }
+
+        let lower = modelID.lowercased()
+        let engine: String
+        if lower.contains("llama") || lower.contains("gguf") {
+            engine = "llama"
+        } else if lower.contains("mlx") {
+            engine = "mlx"
+        } else if lower.contains("apple") {
+            engine = "apple"
+        } else if lower.contains("onnx") {
+            engine = "onnx"
+        } else {
+            engine = ""
+        }
+
+        var name = rawModelPart
+        let replacements: [(String, String)] = [
+            ("qwen", "Qwen"),
+            ("llama", "Llama"),
+            ("deepseek", "DeepSeek"),
+            ("mistral", "Mistral"),
+            ("gemma", "Gemma"),
+            ("phi", "Phi"),
+            ("coder", "Coder"),
+            ("instruct", "Instruct")
+        ]
+        for (target, rep) in replacements {
+            if let range = name.range(of: target, options: .caseInsensitive) {
+                name.replaceSubrange(range, with: rep)
+            }
+        }
+
+        if let match = name.range(of: #"[-_ ]([0-9]+(?:\.[0-9]+)?)[bB]$"#, options: .regularExpression) {
+            let matchedStr = String(name[match])
+            let numStr = matchedStr.filter { $0.isNumber || $0 == "." }
+            name.replaceSubrange(match, with: " \(numStr)B")
+        }
+
+        if !engine.isEmpty {
+            return "\(name) · \(engine)"
+        } else {
+            return name
+        }
     }
 
     private static func abbreviateDriver(_ driver: String) -> String {
@@ -223,7 +302,7 @@ struct LocalModelLogDetailView: View {
                 .foregroundStyle(Theme.textTertiary)
 
             VStack(alignment: .leading, spacing: Theme.Space.xs) {
-                metricRow("Timestamp", value: entry.timestamp.formatted(date: .complete, time: .complete))
+                metricRow("Timestamp", value: LocalModelLogsView.logDateFormatter.string(from: entry.timestamp))
                 metricRow("Model", value: entry.modelID)
                 metricRow("Temperature", value: String(format: "%.2f", entry.sampling.temperature))
                 metricRow("Top P / Top K", value: "\(entry.sampling.topP) / \(entry.sampling.topK)")
