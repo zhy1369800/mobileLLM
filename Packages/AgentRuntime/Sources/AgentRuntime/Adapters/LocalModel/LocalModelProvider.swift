@@ -392,7 +392,14 @@ private enum LocalModelGeneration {
     ) async throws -> [ChatTurn] {
         var turns: [ChatTurn] = []
         var totalImageBytes: UInt64 = 0
+        var policyBlocks: [String] = []
         for message in request.messages {
+            if isInternalRunStateMessage(message) {
+                if let repair = extractRepairInstruction(from: message.content) {
+                    policyBlocks.append(repair)
+                }
+                continue
+            }
             var images: [Data] = []
             for reference in message.artifacts where reference.mimeType.hasPrefix("image/") {
                 guard reference.integrityStatus == .verified,
@@ -422,7 +429,6 @@ private enum LocalModelGeneration {
             ))
         }
 
-        var policyBlocks: [String] = []
         let bindings = LocalModelPromptRenderer.bindings(for: request.advertisedTools)
         let toolBlock = try LocalModelPromptRenderer.toolBlock(
             bindings: bindings,
@@ -445,6 +451,23 @@ private enum LocalModelGeneration {
             turns.insert(ChatTurn(role: .system, content: policy), at: 0)
         }
         return turns
+    }
+
+    private static func isInternalRunStateMessage(_ message: AgentModelMessage) -> Bool {
+        guard message.role == .system else { return false }
+        return message.content.contains("\"state\":") && message.content.contains("\"modelAttempt\":")
+    }
+
+    private static func extractRepairInstruction(from content: String) -> String? {
+        guard content.contains("\"repairInstruction\""),
+              let data = content.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let instruction = json["repairInstruction"] as? String,
+              !instruction.isEmpty
+        else {
+            return nil
+        }
+        return instruction
     }
 
     private static func engineRole(_ role: AgentModelMessageRole) -> ChatTurn.Role {

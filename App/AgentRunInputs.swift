@@ -321,8 +321,7 @@ struct AppFrozenInputBuilder: Sendable {
     ) -> (mode: AgentOutputBudgetMode, maximumOutputTokens: UInt64) {
         guard Self.isOnline(snapshot: snapshot) else {
             let requested = UInt64(snapshot.maxTokens > 0 ? snapshot.maxTokens : 2_048)
-            let effective = snapshot.thinkingEnabled ? max(requested * 2, 8_192) : max(requested, 4_096)
-            return (.explicit, effective)
+            return (.explicit, requested)
         }
         let context = UInt64(snapshot.onlineContextLength)
         let serviceCap = snapshot.onlineMaximumOutputTokens
