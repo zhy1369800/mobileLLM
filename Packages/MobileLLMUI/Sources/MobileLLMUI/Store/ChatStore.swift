@@ -491,6 +491,26 @@ public final class ChatStore {
         isOnlineActive && isOnlineOutputBudgetAuto ? "Auto" : "\(conversationMaxTokens)"
     }
 
+    /// Effective sampling configuration for this thread, combining global settings with per-thread overrides.
+    public func effectiveSampling(for model: LLMModel?) -> Sampling {
+        var params = settings.sampling(
+            thinking: thinkingEnabled && settings.thinkingDisplay != .hidden,
+            model: model
+        )
+        params.maxTokens = conversationMaxTokens
+        params.temperature = conversationTemperature
+        params.topP = conversationTopP
+        if let model {
+            params.contextTokenCap = ContextPolicy.effective(
+                requested: localContextRequest,
+                model: model
+            )
+        } else {
+            params.contextTokenCap = localContextRequest
+        }
+        return params
+    }
+
     /// Set one per-conversation sampling field; nil restores "follow the global setting".
     public func setConversationTemperature(_ value: Double?) {
         mutateConversationSampling { $0.temperature = value }
@@ -1707,7 +1727,7 @@ public final class ChatStore {
                 self?.streaming?.generatedBy = GenerationModel(readyModel)
                 // Read model-dependent state only AFTER readiness: a concurrent explicit switch may have
                 // completed while this turn waited for the one engine-mutation lane.
-                let params = turnSettings.sampling(
+                let params = self?.effectiveSampling(for: readyModel.model) ?? turnSettings.sampling(
                     thinking: (self?.thinkingEnabled ?? false) && turnSettings.thinkingDisplay != .hidden,
                     model: readyModel.model
                 )

@@ -433,11 +433,12 @@ public actor LlamaEngine: LLMEngine {
                                                      reasoning: reasoningStyle, thinking: wantThinking)
                 let suffixText = newTurnPrompt.hasPrefix("\n") ? newTurnPrompt : ("\n" + newTurnPrompt)
                 let tokens = Self.tokenize(vocab: vocab, text: suffixText, addSpecial: false)
-                if cachedSessionTokenCount + tokens.count + reserve <= contextCap {
+                let incrementalReserve = min(reserve, 256)
+                if cachedSessionTokenCount + tokens.count + incrementalReserve <= contextCap {
                     incrementalSuffixTokens = tokens
                 } else {
                     NSLog("[LlamaEngine] Incremental continuation skipped: KV cache headroom exceeded (used=%d, suffix=%d, reserve=%d, cap=%d). Falling back to full evaluation.",
-                          Int32(cachedSessionTokenCount), Int32(tokens.count), Int32(reserve), Int32(contextCap))
+                          Int32(cachedSessionTokenCount), Int32(tokens.count), Int32(incrementalReserve), Int32(contextCap))
                 }
             } else if previousCount > 0 {
                 let countOk = kept.count == previousCount + 1
