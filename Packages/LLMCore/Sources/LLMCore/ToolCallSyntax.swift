@@ -64,15 +64,50 @@ enum ToolCallSyntax {
         return qwenJSON(t) ?? gemmaCall(t) ?? deepSeekCall(t) ?? nameThenArgs(t)
     }
 
-    /// Qwen: `{"name": "x", "arguments": {…}}` — the whole body is one JSON object naming the tool.
+    /// Qwen / OpenAI JSON tool call body:
+    /// - `{"name": "x", "arguments": {…}}`
+    /// - `{"function": "x", "arguments": {…}}`
+    /// - `{"type": "function", "function": {"name": "x", "arguments": {…}}}`
     private static func qwenJSON(_ body: String) -> ToolCall? {
         guard body.hasPrefix("{"), let data = body.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let name = obj["name"] as? String, !name.isEmpty else { return nil }
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+
+        let resolvedName: String?
+        let rawArguments: Any?
+
+        if let fnObj = obj["function"] as? [String: Any] {
+            resolvedName = (fnObj["name"] as? String) ?? (obj["name"] as? String)
+            rawArguments = fnObj["arguments"] ?? fnObj["parameters"] ?? obj["arguments"] ?? obj["parameters"]
+        } else if let fnName = obj["function"] as? String, !fnName.isEmpty {
+            resolvedName = fnName
+            rawArguments = obj["arguments"] ?? obj["parameters"]
+        } else if let name = obj["name"] as? String, !name.isEmpty {
+            resolvedName = name
+            rawArguments = obj["arguments"] ?? obj["parameters"]
+        } else {
+            return nil
+        }
+
+        guard let name = resolvedName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
+            return nil
+        }
+
         var argsJSON = "{}"
-        if let args = obj["arguments"],
-           let d = try? JSONSerialization.data(withJSONObject: args),
-           let s = String(data: d, encoding: .utf8) { argsJSON = s }
+        if let strArgs = rawArguments as? String {
+            let trimmed = strArgs.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("{") && trimmed.hasSuffix("}") {
+                argsJSON = trimmed
+            } else if let d = try? JSONSerialization.data(withJSONObject: strArgs),
+                      let s = String(data: d, encoding: .utf8) {
+                argsJSON = s
+            }
+        } else if let args = rawArguments,
+                  let d = try? JSONSerialization.data(withJSONObject: args),
+                  let s = String(data: d, encoding: .utf8) {
+            argsJSON = s
+        }
+
         return ToolCall(name: name, argumentsJSON: argsJSON)
     }
 

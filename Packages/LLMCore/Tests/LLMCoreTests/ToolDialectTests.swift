@@ -189,6 +189,18 @@ final class ToolCallSyntaxTests: XCTestCase {
         XCTAssertEqual(args(raw)?["expression"] as? String, "1+1")
     }
 
+    func testQwenFunctionCallingJSONCall() {
+        let raw = #"<tool_call>{"function":"shortcut_automation_tool","arguments":{"action":"list"}}</tool_call>"#
+        XCTAssertEqual(call(raw)?.name, "shortcut_automation_tool")
+        XCTAssertEqual(args(raw)?["action"] as? String, "list")
+    }
+
+    func testOpenAINestedFunctionJSONCall() {
+        let raw = #"<tool_call>{"type":"function","function":{"name":"shortcut_automation_tool","arguments":{"action":"list"}}}</tool_call>"#
+        XCTAssertEqual(call(raw)?.name, "shortcut_automation_tool")
+        XCTAssertEqual(args(raw)?["action"] as? String, "list")
+    }
+
     /// Hunyuan: our tags, name on its own line, arguments in a fence.
     func testHunyuanFencedCall() {
         let raw = "<tool_call>remember\n```\n{\"text\": \"用户叫Tom\"}\n```</tool_call>"
