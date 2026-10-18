@@ -423,6 +423,7 @@ public actor LlamaEngine: LLMEngine {
             let nBatch = 512
             var promptTokenCount: Int = 0
             var cachedRollbackTokensCount: Int = 0
+            var rollbackDiagnosticMessage: String? = nil
             let hasImages = kept.contains { !$0.images.isEmpty }
 
             // Check if this turn is an incremental continuation of the cached session:
@@ -527,6 +528,20 @@ public actor LlamaEngine: LLMEngine {
                                   commonCount < promptTokens.count &&
                                   (promptTokens.count + incrementalReserve <= contextCap)
 
+                if !canRollback {
+                    if residentHadImages {
+                        rollbackDiagnosticMessage = "跳过回滚: 包含多模态图片"
+                    } else if cachedSessionTokens.isEmpty {
+                        rollbackDiagnosticMessage = "跳过回滚: 显存中无历史会话Token"
+                    } else if commonCount < 16 {
+                        rollbackDiagnosticMessage = "回滚失败: 最长公共前缀过短 (仅匹配 \(commonCount) tok, 需要>=16, resident=\(cachedSessionTokens.count), prompt=\(promptTokens.count))"
+                    } else if commonCount >= promptTokens.count {
+                        rollbackDiagnosticMessage = "跳过回滚: 前缀完全包含新Prompt"
+                    } else {
+                        rollbackDiagnosticMessage = "跳过回滚: 上下文超限 (prompt=\(promptTokens.count), cap=\(contextCap))"
+                    }
+                }
+
                 NSLog("[LlamaEngine] Prefix rollback evaluation: resident=%d, prompt=%d, common=%d (canRollback=%@, residentHadImages=%@)",
                       Int32(cachedSessionTokens.count), Int32(promptTokens.count), Int32(commonCount),
                       canRollback ? "true" : "false", residentHadImages ? "true" : "false")
@@ -574,10 +589,13 @@ public actor LlamaEngine: LLMEngine {
                             promptTokenCount = suffixTokens.count
                             cachedRollbackTokensCount = commonCount
                             rollbackSucceeded = true
+                            rollbackDiagnosticMessage = "前缀回滚命中: 复用 \(commonCount) tok (\(String(format: "%.1f%%", hitRatePct))), 解码后缀 \(suffixTokens.count) tok"
                         } else {
+                            rollbackDiagnosticMessage = "回滚失败: 后缀Token解码失败 (llama_decode error)"
                             NSLog("[LlamaEngine] Prefix rollback decode failed, falling back to clean slate")
                         }
                     } else {
+                        rollbackDiagnosticMessage = "回滚失败: llama_memory_seq_rm 裁剪失败 (从pos \(commonCount) 裁剪)"
                         NSLog("[LlamaEngine] Prefix rollback llama_memory_seq_rm failed, falling back to clean slate")
                     }
                 }
@@ -971,7 +989,8 @@ public actor LlamaEngine: LLMEngine {
                 ttftSeconds: ttftSeconds,
                 cachedPromptTokens: cachedPromptTokensCount,
                 gpuLayers: Int(loadedGpuLayers),
-                backend: loadedGpuLayers > 0 ? "Metal GPU" : "CPU")))
+                backend: loadedGpuLayers > 0 ? "Metal GPU" : "CPU",
+                rollbackDiagnostic: rollbackDiagnosticMessage)))
 
             // Multi-turn and multimodal reuse: record valid conversational turn on natural EOS completion.
             // If KV rollback failed during speculative decoding, the physical KV cache is dirty and must not be reused.

@@ -84,6 +84,8 @@ public struct Stats: Sendable, Equatable, Codable {
     public var gpuLayers: Int?
     /// Execution backend/device name (e.g. "Metal GPU", "CPU").
     public var backend: String?
+    /// Diagnostic summary of KV cache prefix rollback evaluation and execution.
+    public var rollbackDiagnostic: String?
 
     /// Cache hit rate (0.0 ... 1.0) of prompt tokens.
     public var cacheHitRate: Double {
@@ -98,7 +100,8 @@ public struct Stats: Sendable, Equatable, Codable {
                 ttftSeconds: Double? = nil,
                 cachedPromptTokens: Int? = nil,
                 gpuLayers: Int? = nil,
-                backend: String? = nil) {
+                backend: String? = nil,
+                rollbackDiagnostic: String? = nil) {
         self.promptTokens = promptTokens
         self.genTokens = genTokens
         self.promptTPS = promptTPS
@@ -110,11 +113,12 @@ public struct Stats: Sendable, Equatable, Codable {
         self.cachedPromptTokens = cachedPromptTokens
         self.gpuLayers = gpuLayers
         self.backend = backend
+        self.rollbackDiagnostic = rollbackDiagnostic
     }
 
     enum CodingKeys: String, CodingKey {
         case promptTokens, genTokens, promptTPS, tokensPerSecond, peakMemoryBytes, stopReason, speculativeStats
-        case ttftSeconds, cachedPromptTokens, gpuLayers, backend
+        case ttftSeconds, cachedPromptTokens, gpuLayers, backend, rollbackDiagnostic
     }
 
     public init(from decoder: Decoder) throws {
@@ -130,6 +134,7 @@ public struct Stats: Sendable, Equatable, Codable {
         cachedPromptTokens = try container.decodeIfPresent(Int.self, forKey: .cachedPromptTokens)
         gpuLayers = try container.decodeIfPresent(Int.self, forKey: .gpuLayers)
         backend = try container.decodeIfPresent(String.self, forKey: .backend)
+        rollbackDiagnostic = try container.decodeIfPresent(String.self, forKey: .rollbackDiagnostic)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -145,6 +150,7 @@ public struct Stats: Sendable, Equatable, Codable {
         try container.encodeIfPresent(cachedPromptTokens, forKey: .cachedPromptTokens)
         try container.encodeIfPresent(gpuLayers, forKey: .gpuLayers)
         try container.encodeIfPresent(backend, forKey: .backend)
+        try container.encodeIfPresent(rollbackDiagnostic, forKey: .rollbackDiagnostic)
     }
 }
 

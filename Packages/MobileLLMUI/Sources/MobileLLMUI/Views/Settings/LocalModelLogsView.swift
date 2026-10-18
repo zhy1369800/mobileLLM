@@ -336,6 +336,9 @@ struct LocalModelLogDetailView: View {
                             metricRow("Prompt Cache Hit", value: "0% (全量预填充)")
                         }
                     }
+                    if let diag = stats.rollbackDiagnostic {
+                        metricRow("Rollback Diagnostic", value: diag, isError: diag.contains("失败"))
+                    }
                     metricRow("Gen Tokens", value: "\(stats.genTokens)")
                     metricRow("Speed", value: String(format: "%.1f tok/s", stats.tokensPerSecond))
                     if let ttft = stats.ttftSeconds {
