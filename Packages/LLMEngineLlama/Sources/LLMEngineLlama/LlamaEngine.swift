@@ -351,6 +351,8 @@ public actor LlamaEngine: LLMEngine {
                      governance: GenerationGovernance, lease: GenerationLifecycle.Lease,
                      into cont: AsyncThrowingStream<EngineDelta, Error>.Continuation) async {
         defer { generationLifecycle.end(lease) }
+        let initialCachedSessionTokensCount = cachedSessionTokens.count
+        let initialCachedSessionTokenCount = cachedSessionTokenCount
         do {
             // Handles cancellation that won the race before this actor task started.
             try await governance.cooperativeCheckpoint()
@@ -422,8 +424,6 @@ public actor LlamaEngine: LLMEngine {
             var promptTokenCount: Int = 0
             var cachedRollbackTokensCount: Int = 0
             let hasImages = kept.contains { !$0.images.isEmpty }
-            let initialCachedSessionTokensCount = cachedSessionTokens.count
-            let initialCachedSessionTokenCount = cachedSessionTokenCount
 
             // Check if this turn is an incremental continuation of the cached session:
             // Condition:
