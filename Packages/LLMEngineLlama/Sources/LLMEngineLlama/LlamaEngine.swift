@@ -595,8 +595,8 @@ public actor LlamaEngine: LLMEngine {
                             NSLog("[LlamaEngine] Prefix rollback decode failed, falling back to clean slate")
                         }
                     } else {
-                        rollbackDiagnosticMessage = "回滚失败: llama_memory_seq_rm 裁剪失败 (从pos \(commonCount) 裁剪)"
-                        NSLog("[LlamaEngine] Prefix rollback llama_memory_seq_rm failed, falling back to clean slate")
+                        rollbackDiagnosticMessage = "回滚跳过: 显存不支持局部截断 (如Qwen3.5等混合SSM/Recurrent架构隐状态在数学上不可逆)，已安全全量重新预填充"
+                        NSLog("[LlamaEngine] Prefix rollback llama_memory_seq_rm rejected partial sequence trim (likely hybrid/recurrent architecture like Qwen 3.5), safely falling back to clean slate")
                     }
                 }
 
@@ -1021,12 +1021,22 @@ public actor LlamaEngine: LLMEngine {
             if let context {
                 if initialCachedSessionTokenCount > 0 && initialCachedSessionTokensCount > 0 {
                     // Retain previously verified conversational prefix: prune only uncommitted tokens added during this cancelled turn.
-                    _ = llama_memory_seq_rm(llama_get_memory(context), 0, Int32(initialCachedSessionTokenCount), -1)
-                    if cachedSessionTokens.count > initialCachedSessionTokensCount {
-                        cachedSessionTokens = Array(cachedSessionTokens.prefix(initialCachedSessionTokensCount))
+                    let rmOk = llama_memory_seq_rm(llama_get_memory(context), 0, Int32(initialCachedSessionTokenCount), -1)
+                    if rmOk {
+                        if cachedSessionTokens.count > initialCachedSessionTokensCount {
+                            cachedSessionTokens = Array(cachedSessionTokens.prefix(initialCachedSessionTokensCount))
+                        }
+                        cachedSessionTokenCount = initialCachedSessionTokenCount
+                        NSLog("[LlamaEngine] Cancellation: retained %d prefix tokens (pruned uncommitted turn)", Int32(initialCachedSessionTokenCount))
+                    } else {
+                        // Hybrid/recurrent architectures (e.g. Qwen 3.5 Gated DeltaNet) reject partial state rollbacks.
+                        // Must wipe clean to avoid hidden state corruption or out-of-sync sequence positions.
+                        llama_memory_clear(llama_get_memory(context), true)
+                        cachedSessionTurns.removeAll()
+                        cachedSessionTokens.removeAll()
+                        cachedSessionTokenCount = 0
+                        NSLog("[LlamaEngine] Cancellation: backend rejected partial sequence trim (hybrid/recurrent state), safely cleared entire session")
                     }
-                    cachedSessionTokenCount = initialCachedSessionTokenCount
-                    NSLog("[LlamaEngine] Cancellation: retained %d prefix tokens (pruned uncommitted turn)", Int32(initialCachedSessionTokenCount))
                 } else {
                     llama_memory_clear(llama_get_memory(context), true)
                     cachedSessionTurns.removeAll()
