@@ -221,6 +221,16 @@ struct SettingsView: View {
                     .foregroundStyle(continuedProcessingHasError ? Theme.danger : Theme.textTertiary)
             }
             #endif
+            Divider().background(Theme.hairline)
+            Toggle(isOn: $settings.useHuggingFaceMirror) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Use domestic mirror for models")
+                        .font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    Text("Routes Hugging Face downloads and model exploration through hf-mirror.com for faster speed in China.")
+                        .font(.caption).foregroundStyle(Theme.textTertiary)
+                }
+            }
+            .tint(Theme.accent)
         }
     }
 

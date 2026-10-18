@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import Foundation
+import AppRuntime
 
 /// A model discovered live on the Hugging Face Hub (the **Explore** tier). Unlike the curated `LLMModel`
 /// catalog, these carry no hand-verified adapter — they load generically from the model's own chat
@@ -167,7 +168,7 @@ public enum RemoteCatalog {
         let enc = query?.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)
         switch source {
         case .mlx:
-            var url = "https://huggingface.co/api/models?author=\(mlxOrg)&pipeline_tag=text-generation"
+            var url = "https://\(HuggingFaceEndpoint.currentHost)/api/models?author=\(mlxOrg)&pipeline_tag=text-generation"
                     + "&sort=downloads&direction=-1&limit=\(min(limit * 3, 300))&full=true"
             if let enc { url += "&search=\(enc)" }
             return group(try await fetch(url, session: session), publisher: mlxOrg, engine: .mlx)
@@ -176,7 +177,7 @@ public enum RemoteCatalog {
             // One repo == one model; quants are files inside it, fetched on demand.
             var models: [RemoteModel] = []
             for org in ggufOrgs {
-                var url = "https://huggingface.co/api/models?author=\(org)&search=\(enc.map { "\($0)%20GGUF" } ?? "GGUF")"
+                var url = "https://\(HuggingFaceEndpoint.currentHost)/api/models?author=\(org)&search=\(enc.map { "\($0)%20GGUF" } ?? "GGUF")"
                         + "&sort=downloads&direction=-1&limit=\(max(8, limit / 2))&full=true"
                 if enc == nil { url += "&pipeline_tag=text-generation" }
                 guard let raw = try? await fetch(url, session: session) else { continue }
@@ -317,7 +318,7 @@ public enum RemoteCatalog {
         guard !encoded.contains(where: \.isEmpty) else { return nil }
         var components = URLComponents()
         components.scheme = "https"
-        components.host = "huggingface.co"
+        components.host = HuggingFaceEndpoint.currentHost
         components.percentEncodedPath = "/" + encoded.joined(separator: "/")
         if !queryItems.isEmpty { components.queryItems = queryItems }
         return components.url

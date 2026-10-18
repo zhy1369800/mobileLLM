@@ -366,7 +366,7 @@ public struct ModelDownloader: Sendable {
 
         var components = URLComponents()
         components.scheme = "https"
-        components.host = "huggingface.co"
+        components.host = HuggingFaceEndpoint.currentHost
         components.percentEncodedPath = "/" + encoded.joined(separator: "/")
         if !queryItems.isEmpty { components.queryItems = queryItems }
         return components.url

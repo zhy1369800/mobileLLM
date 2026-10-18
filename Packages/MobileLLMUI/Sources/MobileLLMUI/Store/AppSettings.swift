@@ -91,6 +91,15 @@ public final class AppSettings {
     /// one is kept while `web_search` is on (the UI enforces it); an empty list falls back to both.
     public var searchEngines: [SearchEngine] { didSet { persist() } }
 
+    // MARK: Download & Mirror
+    /// Whether to use domestic mirror (hf-mirror.com) for Hugging Face downloads and community queries.
+    public var useHuggingFaceMirror: Bool {
+        didSet {
+            UserDefaults.standard.set(useHuggingFaceMirror, forKey: HuggingFaceEndpoint.userDefaultsKey)
+            persist()
+        }
+    }
+
     // MARK: Online models
     /// Configured OpenAI-compatible services. Each keeps its own base URL / model id / Keychain key,
     /// and at most one is enabled at a time (the active online model).
@@ -395,6 +404,9 @@ public final class AppSettings {
         continuedProcessingEnabled = snap?.continuedProcessingEnabled ?? false
         localModelLoggingEnabled = snap?.localModelLoggingEnabled ?? false
         appearance = snap?.appearance ?? .system
+        let initialMirror = snap?.useHuggingFaceMirror ?? (UserDefaults.standard.object(forKey: HuggingFaceEndpoint.userDefaultsKey) as? Bool ?? true)
+        useHuggingFaceMirror = initialMirror
+        UserDefaults.standard.set(initialMirror, forKey: HuggingFaceEndpoint.userDefaultsKey)
         loading = false
         // First launch after an update: any plaintext token was just moved into the Keychain — re-persist
         // now so the scrubbed snapshot (no plaintext) replaces the one still on disk. The same pass
@@ -548,6 +560,7 @@ public final class AppSettings {
         var continuedProcessingEnabled: Bool? = nil
         var localModelLoggingEnabled: Bool? = nil
         var appearance: AppearanceMode
+        var useHuggingFaceMirror: Bool? = nil
     }
 
     private func persist() {
@@ -583,7 +596,8 @@ public final class AppSettings {
                             speculativeMode: speculativeMode,
                             continuedProcessingEnabled: continuedProcessingEnabled,
                             localModelLoggingEnabled: localModelLoggingEnabled,
-                            appearance: appearance)
+                            appearance: appearance,
+                            useHuggingFaceMirror: useHuggingFaceMirror)
         if let data = try? JSONEncoder().encode(snap) { defaults.set(data, forKey: key) }
     }
 
@@ -630,6 +644,8 @@ public final class AppSettings {
         continuedProcessingEnabled = false
         localModelLoggingEnabled = false
         appearance = .system
+        useHuggingFaceMirror = true
+        UserDefaults.standard.set(true, forKey: HuggingFaceEndpoint.userDefaultsKey)
         loading = false
         defaults.removeObject(forKey: key)
 

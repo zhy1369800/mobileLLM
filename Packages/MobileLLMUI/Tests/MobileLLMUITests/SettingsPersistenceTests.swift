@@ -338,4 +338,31 @@ final class SettingsPersistenceTests: XCTestCase {
         let settings = AppSettings(defaults: defaults)
         XCTAssertEqual(settings.speculativeMode, .off)
     }
+
+    // MARK: Hugging Face mirror persistence
+
+    func testHuggingFaceMirrorDefaultsToTrueOnFreshInstall() {
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertTrue(settings.useHuggingFaceMirror)
+    }
+
+    func testHuggingFaceMirrorPersistsAndRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        settings.useHuggingFaceMirror = false
+        XCTAssertFalse(AppSettings(defaults: defaults).useHuggingFaceMirror)
+
+        settings.useHuggingFaceMirror = true
+        XCTAssertTrue(AppSettings(defaults: defaults).useHuggingFaceMirror)
+    }
+
+    func testLegacySnapshotDecodesWithHuggingFaceMirrorDefaultTrue() {
+        write(#"""
+        {"defaultModelID":"bonsai-8b","systemPrompt":"keep me","systemPromptSeeded":true,
+         "thinkingDefault":true,"thinkingDisplay":"autoCollapse","toolsEnabled":false,
+         "temperature":0.7,"topP":0.95,"topK":20,"repetitionPenalty":1.05,"maxTokens":1024,
+         "contextLength":8192,"kvBits":4,"appearance":"system"}
+        """#)
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertTrue(settings.useHuggingFaceMirror)
+    }
 }
