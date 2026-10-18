@@ -506,25 +506,28 @@ public actor LlamaEngine: LLMEngine {
                 let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true)
                 prefilledPromptTokens = promptTokens
 
-                // Self-healing: if cachedSessionTokens was empty from previous turns, reconstruct from resident cachedSessionTurns
-                if cachedSessionTokens.isEmpty && !cachedSessionTurns.isEmpty {
-                    cachedSessionTokens = Self.tokenize(vocab: vocab, text: renderPrompt(cachedSessionTurns), addSpecial: true)
-                }
+                let residentHadImages = cachedSessionTurns.contains { !$0.images.isEmpty }
 
-                // Calculate Longest Common Prefix (LCP) between resident KV tokens and new prompt tokens
+                // Calculate Longest Common Prefix (LCP) between resident KV tokens and new prompt tokens.
+                // Only valid if resident session was pure text and has authoritative physical tokens cached.
                 var commonCount = 0
-                let maxLcp = min(cachedSessionTokens.count, promptTokens.count)
-                while commonCount < maxLcp && cachedSessionTokens[commonCount] == promptTokens[commonCount] {
-                    commonCount += 1
+                if !residentHadImages && !cachedSessionTokens.isEmpty {
+                    let maxLcp = min(cachedSessionTokens.count, promptTokens.count)
+                    while commonCount < maxLcp && cachedSessionTokens[commonCount] == promptTokens[commonCount] {
+                        commonCount += 1
+                    }
                 }
 
                 let incrementalReserve = min(reserve, 256)
-                let canRollback = commonCount >= 16 &&
+                let canRollback = !residentHadImages &&
+                                  !cachedSessionTokens.isEmpty &&
+                                  commonCount >= 16 &&
                                   commonCount < promptTokens.count &&
                                   (promptTokens.count + incrementalReserve <= contextCap)
 
-                NSLog("[LlamaEngine] Prefix rollback evaluation: resident=%d, prompt=%d, common=%d (canRollback=%@)",
-                      Int32(cachedSessionTokens.count), Int32(promptTokens.count), Int32(commonCount), canRollback ? "true" : "false")
+                NSLog("[LlamaEngine] Prefix rollback evaluation: resident=%d, prompt=%d, common=%d (canRollback=%@, residentHadImages=%@)",
+                      Int32(cachedSessionTokens.count), Int32(promptTokens.count), Int32(commonCount),
+                      canRollback ? "true" : "false", residentHadImages ? "true" : "false")
 
                 var rollbackSucceeded = false
                 if canRollback {
@@ -968,14 +971,13 @@ public actor LlamaEngine: LLMEngine {
                 gpuLayers: Int(loadedGpuLayers),
                 backend: loadedGpuLayers > 0 ? "Metal GPU" : "CPU")))
 
-            // Multi-turn and multimodal reuse: record valid conversational turn on natural EOS completion
-            if stop == .eos && answerStripper.isNoop && !fullGeneratedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // Multi-turn and multimodal reuse: record valid conversational turn on natural EOS completion.
+            // If KV rollback failed during speculative decoding, the physical KV cache is dirty and must not be reused.
+            if stop == .eos && supportsKvRollback && answerStripper.isNoop && !fullGeneratedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 cachedSessionTurns = kept + [ChatTurn(role: .assistant, content: fullGeneratedAnswer)]
                 if let suffixTokens = incrementalSuffixTokens {
                     if !cachedSessionTokens.isEmpty {
                         cachedSessionTokens.append(contentsOf: suffixTokens + generatedTokens)
-                    } else {
-                        cachedSessionTokens = Self.tokenize(vocab: vocab, text: renderPrompt(cachedSessionTurns), addSpecial: true)
                     }
                     cachedSessionTokenCount += suffixTokens.count + generatedTokens.count
                 } else if let promptTokens = prefilledPromptTokens {
