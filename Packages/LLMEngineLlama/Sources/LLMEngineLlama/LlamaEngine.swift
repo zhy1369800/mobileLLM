@@ -422,6 +422,8 @@ public actor LlamaEngine: LLMEngine {
             var promptTokenCount: Int = 0
             var cachedRollbackTokensCount: Int = 0
             let hasImages = kept.contains { !$0.images.isEmpty }
+            let initialCachedSessionTokensCount = cachedSessionTokens.count
+            let initialCachedSessionTokenCount = cachedSessionTokenCount
 
             // Check if this turn is an incremental continuation of the cached session:
             // Condition:
@@ -997,10 +999,26 @@ public actor LlamaEngine: LLMEngine {
             }
             cont.finish()
         } catch is CancellationError {
-            if let context { llama_memory_clear(llama_get_memory(context), true) }
-            cachedSessionTurns.removeAll()
-            cachedSessionTokens.removeAll()
-            cachedSessionTokenCount = 0
+            if let context {
+                if initialCachedSessionTokenCount > 0 && initialCachedSessionTokensCount > 0 {
+                    // Retain previously verified conversational prefix: prune only uncommitted tokens added during this cancelled turn.
+                    _ = llama_memory_seq_rm(llama_get_memory(context), 0, Int32(initialCachedSessionTokenCount), -1)
+                    if cachedSessionTokens.count > initialCachedSessionTokensCount {
+                        cachedSessionTokens = Array(cachedSessionTokens.prefix(initialCachedSessionTokensCount))
+                    }
+                    cachedSessionTokenCount = initialCachedSessionTokenCount
+                    NSLog("[LlamaEngine] Cancellation: retained %d prefix tokens (pruned uncommitted turn)", Int32(initialCachedSessionTokenCount))
+                } else {
+                    llama_memory_clear(llama_get_memory(context), true)
+                    cachedSessionTurns.removeAll()
+                    cachedSessionTokens.removeAll()
+                    cachedSessionTokenCount = 0
+                }
+            } else {
+                cachedSessionTurns.removeAll()
+                cachedSessionTokens.removeAll()
+                cachedSessionTokenCount = 0
+            }
             cont.yield(.done(Stats(promptTokens: 0, genTokens: 0, promptTPS: 0, tokensPerSecond: 0,
                                    peakMemoryBytes: Self.footprintBytes(), stopReason: .cancelled)))
             cont.finish()
