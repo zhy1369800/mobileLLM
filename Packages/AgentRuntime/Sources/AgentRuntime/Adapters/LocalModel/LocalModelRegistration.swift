@@ -236,4 +236,18 @@ public actor LLMCoreModelResidencyDriver: ModelResidencyDriver {
 
     /// Test/diagnostic projection; it never changes residency.
     public var currentResidentSelection: AgentModelSelection? { residentSelection }
+
+    private var pendingToolCallResponses: [AgentRunID: [String]] = [:]
+
+    public func appendPendingToolCallResponse(_ response: String, for runID: AgentRunID) {
+        pendingToolCallResponses[runID, default: []].append(response)
+    }
+
+    public func pendingToolCallResponses(for runID: AgentRunID) -> [String] {
+        pendingToolCallResponses[runID] ?? []
+    }
+
+    public func clearPendingToolCallResponses(for runID: AgentRunID) {
+        pendingToolCallResponses.removeValue(forKey: runID)
+    }
 }

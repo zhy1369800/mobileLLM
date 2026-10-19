@@ -101,10 +101,11 @@ public struct LocalModelProvider: AgentModelProvider, Sendable {
     ) async throws -> AgentModelBoundaryCompletion {
         let registration = try await residencyDriver.registration(for: request.selection)
         let resolver = artifactResolver
-        let configuration = configuration
+        let driver = residencyDriver
         return try await residencyDriver.runGeneration(selection: request.selection) { engine in
             try await LocalModelGeneration.run(
                 engine: engine,
+                residencyDriver: driver,
                 registration: registration,
                 request: request,
                 artifactResolver: resolver,
@@ -125,6 +126,7 @@ private enum LocalModelGeneration {
 
     static func run(
         engine: any LLMEngine,
+        residencyDriver: LLMCoreModelResidencyDriver? = nil,
         registration: LocalModelRegistration,
         request: AgentModelRequest,
         artifactResolver: any LocalModelArtifactBytesResolving,
@@ -135,6 +137,7 @@ private enum LocalModelGeneration {
         do {
             messages = try await compileMessages(
                 request: request,
+                residencyDriver: residencyDriver,
                 registration: registration,
                 artifactResolver: artifactResolver,
                 configuration: configuration
@@ -160,11 +163,20 @@ private enum LocalModelGeneration {
         var processor = ToolCallProcessor(acceptsBareJSON: registration.toolDialect == .deepSeek)
         var parsedCalls: [ToolCall] = []
         var answer = ""
+        var rawResponse = ""
         var stats: Stats?
         var silentActionBytes: UInt64 = 0
         var responseTail = ""
         let startedAt = configuration.nowMilliseconds()
+        var shouldRetainToolResponses = false
         defer {
+            if !shouldRetainToolResponses {
+                let driver = residencyDriver
+                let runID = request.runID
+                Task {
+                    await driver?.clearPendingToolCallResponses(for: runID)
+                }
+            }
             let snapshot = ResponseDiagnosticSnapshot(
                 tail: responseTail,
                 calls: parsedCalls.count,
@@ -214,6 +226,7 @@ private enum LocalModelGeneration {
                             emitter: emitter
                         )
                     }
+                    rawResponse += value
                     responseTail = Self.boundedTail(responseTail, appending: value)
                     let byteCount = UInt64(value.utf8.count)
                     let events = processor.feed(value)
@@ -340,6 +353,8 @@ private enum LocalModelGeneration {
                 )
             }
             if case .callTools(let calls) = action {
+                await residencyDriver?.appendPendingToolCallResponse(rawResponse, for: request.runID)
+                shouldRetainToolResponses = true
                 try await emitter.emit(.toolCalls(calls), responseBytes: 0)
             }
             return try await complete(action, usage: usage, emitter: emitter)
@@ -386,6 +401,7 @@ private enum LocalModelGeneration {
 
     private static func compileMessages(
         request: AgentModelRequest,
+        residencyDriver: LLMCoreModelResidencyDriver? = nil,
         registration: LocalModelRegistration,
         artifactResolver: any LocalModelArtifactBytesResolving,
         configuration: LocalModelAdapterConfiguration
@@ -393,6 +409,9 @@ private enum LocalModelGeneration {
         var turns: [ChatTurn] = []
         var totalImageBytes: UInt64 = 0
         var policyBlocks: [String] = []
+        let priorResponses = await residencyDriver?.pendingToolCallResponses(for: request.runID) ?? []
+        var toolResponseIndex = 0
+        var previousRole: AgentMessageRole? = nil
         for message in request.messages {
             if isInternalRunStateMessage(message) {
                 if let repair = extractRepairInstruction(from: message.content) {
@@ -416,6 +435,18 @@ private enum LocalModelGeneration {
                 totalImageBytes = nextTotal
                 images.append(bytes)
             }
+            let isToolMessage = (message.role == .tool && message.isUntrustedData)
+            let isFirstOfToolGroup = isToolMessage && (previousRole != .tool)
+            if isFirstOfToolGroup {
+                if toolResponseIndex < priorResponses.count {
+                    turns.append(ChatTurn(
+                        role: .assistant,
+                        content: priorResponses[toolResponseIndex]
+                    ))
+                    toolResponseIndex += 1
+                }
+            }
+            previousRole = message.role
             let content = message.isUntrustedData
                 ? LocalModelPromptRenderer.frameUntrusted(
                     message.content,

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import Foundation
+import CryptoKit
 import AgentContracts
 import AgentRuntime
 import AppRuntime
@@ -395,19 +396,60 @@ struct AppFrozenInputBuilder: Sendable {
                 canonicalEnglishContent: $0.text
             )
         }.compactMap { $0 }
-        let conversation = try snapshot.messages.compactMap { message -> ConversationTurnContextSource? in
-            guard message.role != .system, message.id != snapshot.userTurnID else { return nil }
-            if message.role == .assistant && message.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return nil
+        let conversation = try snapshot.messages.flatMap { message -> [ConversationTurnContextSource] in
+            guard message.role != .system, message.id != snapshot.userTurnID else { return [] }
+            let hasToolRuns = message.toolRuns?.isEmpty == false
+            let hasAnswer = !message.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if message.role == .assistant && !hasAnswer && !hasToolRuns {
+                return []
             }
-            let role: ConversationContextRole = message.role == .user ? .user : .assistant
-            return try ConversationTurnContextSource(
-                messageID: MessageID(rawValue: message.id),
-                revision: "message.v1",
-                role: role,
-                content: message.answer,
-                attachments: historyArtifacts[message.id] ?? []
-            )
+            if message.role == .assistant, let runs = message.toolRuns, !runs.isEmpty {
+                var expanded: [ConversationTurnContextSource] = []
+                for (idx, run) in runs.enumerated() {
+                    let args = run.arguments.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "{}" : run.arguments
+                    let callContent = run.rawCallText ?? "<tool_call>{\"name\":\"\(run.name)\",\"arguments\":\(args)}</tool_call>"
+                    let callID = Self.deterministicUUID(from: message.id, tag: "call-\(idx)")
+                    expanded.append(try ConversationTurnContextSource(
+                        messageID: MessageID(rawValue: callID),
+                        revision: "tool-call-\(idx)",
+                        role: .assistant,
+                        content: callContent
+                    ))
+                    if let result = run.result {
+                        let resultID = Self.deterministicUUID(from: message.id, tag: "result-\(idx)")
+                        let safeResult = """
+                        <tool_response>
+                        \(result)
+                        </tool_response>
+                        """
+                        expanded.append(try ConversationTurnContextSource(
+                            messageID: MessageID(rawValue: resultID),
+                            revision: "tool-result-\(idx)",
+                            role: .user,
+                            content: safeResult
+                        ))
+                    }
+                }
+                if hasAnswer {
+                    expanded.append(try ConversationTurnContextSource(
+                        messageID: MessageID(rawValue: message.id),
+                        revision: "message.v1",
+                        role: .assistant,
+                        content: message.answer,
+                        attachments: historyArtifacts[message.id] ?? []
+                    ))
+                }
+                return expanded
+            } else {
+                let role: ConversationContextRole = message.role == .user ? .user : .assistant
+                return [try ConversationTurnContextSource(
+                    messageID: MessageID(rawValue: message.id),
+                    revision: "message.v1",
+                    role: role,
+                    content: message.answer,
+                    attachments: historyArtifacts[message.id] ?? []
+                )]
+            }
         }
         let currentUser = try CurrentUserContextSource(
             userTurnID: UserTurnID(rawValue: snapshot.userTurnID),
@@ -610,6 +652,19 @@ struct AppFrozenInputBuilder: Sendable {
             ),
             approvalMode: snapshot.approvalMode
         )
+    }
+
+    private static func deterministicUUID(from base: UUID, tag: String) -> UUID {
+        var hasher = SHA256()
+        hasher.update(data: Data(base.uuidString.utf8))
+        hasher.update(data: Data(tag.utf8))
+        let digest = Array(hasher.finalize().prefix(16))
+        return UUID(uuid: (
+            digest[0], digest[1], digest[2], digest[3],
+            digest[4], digest[5], digest[6], digest[7],
+            digest[8], digest[9], digest[10], digest[11],
+            digest[12], digest[13], digest[14], digest[15]
+        ))
     }
 }
 

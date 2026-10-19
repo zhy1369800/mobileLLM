@@ -65,7 +65,26 @@ extension ChatStore {
             if !kept.isEmpty && tokens > budget { break }
             let role: ChatTurn.Role = message.role == .assistant ? .assistant : .user
             let turnImages = role == .user ? images(message) : []
-            kept.append(ChatTurn(role: role, content: message.answer, images: turnImages))
+            if message.role == .assistant, let runs = message.toolRuns, !runs.isEmpty {
+                if !message.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    kept.append(ChatTurn(role: .assistant, content: message.answer))
+                }
+                for run in runs.reversed() {
+                    if let result = run.result {
+                        let safeResult = """
+                        <tool_response>
+                        \(result)
+                        </tool_response>
+                        """
+                        kept.append(ChatTurn(role: .user, content: safeResult))
+                    }
+                    let args = run.arguments.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "{}" : run.arguments
+                    let callContent = run.rawCallText ?? "<tool_call>{\"name\":\"\(run.name)\",\"arguments\":\(args)}</tool_call>"
+                    kept.append(ChatTurn(role: .assistant, content: callContent))
+                }
+            } else {
+                kept.append(ChatTurn(role: role, content: message.answer, images: turnImages))
+            }
             budget -= tokens
             if budget <= 0 { break }
         }

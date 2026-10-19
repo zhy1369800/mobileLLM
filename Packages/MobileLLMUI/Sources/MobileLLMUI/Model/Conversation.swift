@@ -15,8 +15,9 @@ public struct ToolRun: Identifiable, Codable, Sendable, Equatable {
     public var name: String
     public var arguments: String
     public var result: String?
-    public init(id: UUID = UUID(), name: String, arguments: String, result: String? = nil) {
-        self.id = id; self.name = name; self.arguments = arguments; self.result = result
+    public var rawCallText: String?
+    public init(id: UUID = UUID(), name: String, arguments: String, result: String? = nil, rawCallText: String? = nil) {
+        self.id = id; self.name = name; self.arguments = arguments; self.result = result; self.rawCallText = rawCallText
     }
 }
 
@@ -125,13 +126,22 @@ public struct Message: Identifiable, Codable, Sendable, Equatable {
         self.workflowResultID = workflowResultID
     }
 
-    /// A CJK-aware token estimate (`LLMCore.TokenEstimate`) used for context-window trimming — the old
-    /// `count / 4` under-counted Chinese/Japanese/Korean ~3× and let the window silently overrun.
-    var approximateTokens: Int { TokenEstimate.tokens(in: answer) }
+    var approximateTokens: Int {
+        var count = TokenEstimate.tokens(in: answer)
+        if let runs = toolRuns {
+            for run in runs {
+                let callText = run.rawCallText ?? "\(run.name) \(run.arguments)"
+                count += TokenEstimate.tokens(in: callText)
+                if let res = run.result {
+                    count += TokenEstimate.tokens(in: res)
+                }
+            }
+        }
+        return count
+    }
 
-    /// Whether this turn carries anything the engine should see — visible text OR image attachments. A
-    /// user turn with only an image (no text) still counts; an empty assistant placeholder does not.
-    var hasVisibleContent: Bool { !answer.isEmpty || !(attachments?.isEmpty ?? true) }
+    /// Whether this turn carries anything the engine should see — visible text, image attachments, or tool runs.
+    var hasVisibleContent: Bool { !answer.isEmpty || !(attachments?.isEmpty ?? true) || !(toolRuns?.isEmpty ?? true) }
 }
 
 /// A chat thread (DESIGN §2.4). Persisted one-record-per-file by `ConversationStore`; a lightweight

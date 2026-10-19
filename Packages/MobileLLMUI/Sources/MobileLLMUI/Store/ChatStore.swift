@@ -1409,10 +1409,13 @@ public final class ChatStore {
         }
         let toolRuns = steps.compactMap { step -> ToolRun? in
             guard step.kind == .toolCall else { return nil }
+            let args = step.detail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "{}" : step.detail
+            let callContent = "<tool_call>{\"name\":\"\(step.title)\",\"arguments\":\(args)}</tool_call>"
             return ToolRun(
                 name: step.title,
                 arguments: step.detail,
-                result: step.resultText ?? step.statusText
+                result: step.resultText ?? step.statusText,
+                rawCallText: callContent
             )
         }
         if !toolRuns.isEmpty { message.toolRuns = toolRuns }
@@ -1952,7 +1955,9 @@ public final class ChatStore {
                 let hasReasoning = streaming?.reasoning.isEmpty == false
                 streaming?.phase = hasReasoning ? .thinking : .warming
             }
-            streaming?.toolActivity.append(ToolRun(name: call.name, arguments: call.argumentsJSON))
+            let args = call.argumentsJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "{}" : call.argumentsJSON
+            let callContent = "<tool_call>{\"name\":\"\(call.name)\",\"arguments\":\(args)}</tool_call>"
+            streaming?.toolActivity.append(ToolRun(name: call.name, arguments: call.argumentsJSON, rawCallText: callContent))
         case .toolResult(_, let result):
             if let n = streaming?.toolActivity.count, n > 0 { streaming?.toolActivity[n - 1].result = result }
         case .done(let stats): apply(.done(stats))
