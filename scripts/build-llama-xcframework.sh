@@ -10,9 +10,12 @@
 # Requirements: Xcode + CMake. Takes ~15–25 min (a full multi-platform llama.cpp build).
 set -euo pipefail
 
-# Mainline ggml-org/llama.cpp — this commit has Q1_0 (1-bit) + the qwen3_5 hybrid (Gated-DeltaNet)
-# kernels on Metal, so ONE framework serves every Bonsai size incl. the 27B.
-LLAMA_COMMIT="956973c76466b6c791d7bdbe6eed3aa3235b2dc1"
+# Mainline ggml-org/llama.cpp — v0.6.0 (2026-10-05) adds up to ~3x faster few-row matrix
+# multiplication on Apple GPUs (the batch-1 decode bottleneck), which is the main reason
+# mobileLLM decodes slower than llama.rn on the same model. Also includes Q1_0 (1-bit) +
+# qwen3_5 hybrid (Gated-DeltaNet) Metal kernels, so one framework serves every Bonsai size.
+# SHA below = refs/tags/v0.6.0 target commit.
+LLAMA_COMMIT="d81235049384534c167caea52b85a694f6103d14"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST="$ROOT/Packages/LLMEngineLlama/Vendor/llama.xcframework"
@@ -25,7 +28,11 @@ fi
 git -C "$WORK" fetch --depth 1 origin "$LLAMA_COMMIT"
 git -C "$WORK" checkout "$LLAMA_COMMIT"
 
-# Optional native MTP bridge injection (reserved for future native MTP tensor forward pass):
+# Native MTP bridge injection — KEEP COMMENTED: llama_mtp_bridge.cpp is still an empty stub
+# (predict() always returns 0 drafts, see scripts/mtp_bridge/llama_mtp_bridge.cpp). Injecting it
+# only makes NativeMtpDriver.isCompiledIn true while every step still falls back to Prompt Lookup,
+# and the "initialized successfully" log becomes misleading. Real MTP requires llama.cpp's own
+# speculative/MTP API (PR #22673, draft-head GGUF) wired in LlamaEngine — a feature, not this stub.
 # echo "Injecting native MTP bridge sources …"
 # mkdir -p "$WORK/include" "$WORK/src"
 # cp "$ROOT/scripts/mtp_bridge/llama_mtp_bridge.h" "$WORK/include/"
@@ -46,7 +53,7 @@ d["AvailableLibraries"] = [l for l in d["AvailableLibraries"] if l["LibraryIdent
 with open(p, "wb") as f: plistlib.dump(d, f)
 PY
 
-# Optional: publishing MTP bridge headers to framework slices (reserved for future use):
+# Publishing MTP bridge headers — keep commented for the same reason as the injection above (stub).
 # echo "Publishing MTP bridge headers to framework slices …"
 # for slice in "$BUILT"/*; do
 #     if [ -d "$slice/Headers" ]; then
