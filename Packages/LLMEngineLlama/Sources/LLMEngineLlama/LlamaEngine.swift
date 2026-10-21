@@ -147,8 +147,7 @@ public actor LlamaEngine: LLMEngine {
         let path = try Self.resolveGGUF(in: weightsDir, preferred: variant.source.fileName)
 
         var mp = llama_model_default_params()
-        mp.use_mmap = true      // the whole memory thesis: weights stay file-backed & reclaimable
-        mp.use_mlock = false
+        mp.load_mode = LLAMA_LOAD_MODE_MMAP      // the whole memory thesis: weights stay file-backed & reclaimable
         #if targetEnvironment(simulator)
         mp.n_gpu_layers = 0     // no Metal in the simulator
         #else
@@ -1116,7 +1115,7 @@ public actor LlamaEngine: LLMEngine {
                 let preparedImage = Self.downsampleImageDataIfNeeded(image)
                 let wrapper: mtmd_helper_bitmap_wrapper = preparedImage.withUnsafeBytes { raw in
                     mtmd_helper_bitmap_init_from_buf(mtmdCtx, raw.bindMemory(to: UInt8.self).baseAddress,
-                                                     preparedImage.count, false)
+                                                     preparedImage.count, false, mtmd_helper_init_opt_default())
                 }
                 guard let bmp = wrapper.bitmap else { throw EngineError.imageDecodeFailed }
                 bitmaps.append(bmp)
@@ -1392,7 +1391,8 @@ public actor LlamaEngine: LLMEngine {
     static func makeSampler(vocab: OpaquePointer, params: Sampling) -> UnsafeMutablePointer<llama_sampler> {
         let chain = llama_sampler_chain_init(llama_sampler_chain_default_params())!
         if params.repetitionPenalty > 1.0 {
-            llama_sampler_chain_add(chain, llama_sampler_init_penalties(64, Float(params.repetitionPenalty), 0, 0))
+            let nVocab = llama_vocab_n_tokens(vocab)
+            llama_sampler_chain_add(chain, llama_sampler_init_penalties(nVocab, 64, Float(params.repetitionPenalty), 0, 0))
         }
         if params.temperature <= 0 {
             llama_sampler_chain_add(chain, llama_sampler_init_greedy())
