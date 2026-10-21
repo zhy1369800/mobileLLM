@@ -346,6 +346,7 @@ public actor LlamaEngine: LLMEngine {
         defer { generationLifecycle.end(lease) }
         let initialCachedSessionTokensCount = sessionCache.tokens.count
         let initialCachedSessionTokenCount = sessionCache.tokenCount
+        var isIncrementalContinuation = false
         do {
             // Handles cancellation that won the race before this actor task started.
             try await governance.cooperativeCheckpoint()
@@ -456,6 +457,7 @@ public actor LlamaEngine: LLMEngine {
 
             var prefilledPromptTokens: [llama_token]? = nil
             if let suffixTokens = incrementalSuffixTokens {
+                isIncrementalContinuation = true
                 // MULTI-TURN CONTINUATION (text or multimodal):
                 // All prior turns (including visual ViT embeddings and previous answers) already reside
                 // in the KV cache with the assistant turn cleanly closed by EOG. Decode ONLY the suffix
@@ -1006,7 +1008,10 @@ public actor LlamaEngine: LLMEngine {
             }
             cont.finish()
         } catch is CancellationError {
-            if let context, initialCachedSessionTokenCount > 0 && initialCachedSessionTokensCount > 0 {
+            // Only purely incremental continuations (where the verified session prefix was never modified or rolled back)
+            // can safely prune back to `initialCachedSessionTokenCount`. Any prefix-rollback or full-recompute path
+            // altered the physical KV positions, so pruning to the old length would retain alien tokens and corrupt KV cache.
+            if isIncrementalContinuation, let context, initialCachedSessionTokenCount > 0 && initialCachedSessionTokensCount > 0 {
                 // Retain previously verified conversational prefix: prune only uncommitted tokens added during this cancelled turn.
                 if sessionCache.prune(to: initialCachedSessionTokenCount, context: context) {
                     NSLog("[LlamaEngine] Cancellation: retained %d prefix tokens (pruned uncommitted turn)", Int32(initialCachedSessionTokenCount))
