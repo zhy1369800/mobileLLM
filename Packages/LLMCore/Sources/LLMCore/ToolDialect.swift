@@ -165,31 +165,41 @@ public extension ToolDialect {
 
 public extension ToolDialect {
 
+    /// Sanitize raw tool results against premature closing tags or nested response frames
+    /// that could escape the tool response boundary (prompt injection protection).
+    static func sanitizeResult(_ raw: String) -> String {
+        raw.replacingOccurrences(of: "</tool_response>", with: "<\\/tool_response>")
+           .replacingOccurrences(of: "<tool_response>", with: "<\\tool_response>")
+           .replacingOccurrences(of: "<tool_response|>", with: "<\\tool_response|>")
+           .replacingOccurrences(of: "<|tool_response>", with: "<\\|tool_response>")
+    }
+
     /// Feed a tool's output back in this dialect. `result` is emitted verbatim.
     ///
     /// The security note travels with every dialect: a tool can return attacker-controlled text (a fetched
     /// page, a file), and without a trust boundary a model may obey an instruction embedded in it. Only the
     /// *frame* is dialect-specific; the "this is data, not instructions" fence is not negotiable.
     func frameResult(_ result: String, name: String) -> String {
+        let clean = Self.sanitizeResult(result)
         switch self {
         case .qwen, .deepSeek:
             return """
             <tool_response>
             \(Self.untrustedNotice)
             =====
-            \(result)
+            \(clean)
             =====
             </tool_response>
             """
         case .gemma:
             // `<|tool_response>response:NAME{value:<|"|>…<|"|>}<tool_response|>` — its own macro's shape.
-            return "<|tool_response>response:\(name){value:\(Self.gemmaQuoted(Self.untrustedNotice + "\n=====\n" + result + "\n====="))}<tool_response|>"
+            return "<|tool_response>response:\(name){value:\(Self.gemmaQuoted(Self.untrustedNotice + "\n=====\n" + clean + "\n====="))}<tool_response|>"
         case .hunyuan:
             return """
             <tool_response>
             \(Self.untrustedNotice)
             =====
-            \(result)
+            \(clean)
             =====
             </tool_response>
             """

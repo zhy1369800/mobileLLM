@@ -416,9 +416,9 @@ struct AppFrozenInputBuilder: Sendable {
                     ))
                     if let result = run.result {
                         let resultID = Self.deterministicUUID(from: message.id, tag: "result-\(idx)")
-                        let safeResult = """
+                        let safeResult = run.rawResponseText ?? """
                         <tool_response>
-                        \(result)
+                        \(ToolDialect.sanitizeResult(result))
                         </tool_response>
                         """
                         expanded.append(try ConversationTurnContextSource(

@@ -71,9 +71,9 @@ extension ChatStore {
                 }
                 for run in runs.reversed() {
                     if let result = run.result {
-                        let safeResult = """
+                        let safeResult = run.rawResponseText ?? """
                         <tool_response>
-                        \(result)
+                        \(ToolDialect.sanitizeResult(result))
                         </tool_response>
                         """
                         kept.append(ChatTurn(role: .user, content: safeResult))

@@ -594,6 +594,11 @@ public final class ChatStore {
         return activeModel.map(GenerationModel.init)
     }
 
+    private func currentToolDialect() -> ToolDialect {
+        guard let model = activeModel else { return .qwen }
+        return ToolDialect(model.model.architecture.promptTemplate)
+    }
+
     // MARK: - Composer attachments
 
     /// Room for another staged image (the photo affordance disables at the cap).
@@ -1407,14 +1412,18 @@ public final class ChatStore {
         if let duration = streaming?.thinkingDuration, duration > 0 {
             message.thinkingSeconds = duration
         }
+        let dialect = currentToolDialect()
         let toolRuns = steps.compactMap { step -> ToolRun? in
             guard step.kind == .toolCall else { return nil }
             let rawContent = step.detail.isEmpty ? step.title : step.detail
+            let result = step.resultText ?? step.statusText
+            let rawResponse = result.map { ToolPrompt.frameToolResult($0, name: step.title, dialect: dialect) }
             return ToolRun(
                 name: step.title,
                 arguments: step.detail,
-                result: step.resultText ?? step.statusText,
-                rawCallText: rawContent
+                result: result,
+                rawCallText: rawContent,
+                rawResponseText: rawResponse
             )
         }
         if !toolRuns.isEmpty { message.toolRuns = toolRuns }
@@ -1956,8 +1965,12 @@ public final class ChatStore {
             }
             let rawContent = call.rawText ?? (call.argumentsJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "{}" : call.argumentsJSON)
             streaming?.toolActivity.append(ToolRun(name: call.name, arguments: call.argumentsJSON, rawCallText: rawContent))
-        case .toolResult(_, let result):
-            if let n = streaming?.toolActivity.count, n > 0 { streaming?.toolActivity[n - 1].result = result }
+        case .toolResult(let call, let result):
+            if let n = streaming?.toolActivity.count, n > 0 {
+                streaming?.toolActivity[n - 1].result = result
+                let dialect = currentToolDialect()
+                streaming?.toolActivity[n - 1].rawResponseText = ToolPrompt.frameToolResult(result, name: call.name, dialect: dialect)
+            }
         case .done(let stats): apply(.done(stats))
         }
     }

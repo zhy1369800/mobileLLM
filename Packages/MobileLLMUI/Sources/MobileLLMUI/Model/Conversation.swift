@@ -16,8 +16,9 @@ public struct ToolRun: Identifiable, Codable, Sendable, Equatable {
     public var arguments: String
     public var result: String?
     public var rawCallText: String?
-    public init(id: UUID = UUID(), name: String, arguments: String, result: String? = nil, rawCallText: String? = nil) {
-        self.id = id; self.name = name; self.arguments = arguments; self.result = result; self.rawCallText = rawCallText
+    public var rawResponseText: String?
+    public init(id: UUID = UUID(), name: String, arguments: String, result: String? = nil, rawCallText: String? = nil, rawResponseText: String? = nil) {
+        self.id = id; self.name = name; self.arguments = arguments; self.result = result; self.rawCallText = rawCallText; self.rawResponseText = rawResponseText
     }
 }
 
@@ -133,7 +134,8 @@ public struct Message: Identifiable, Codable, Sendable, Equatable {
                 let callText = run.rawCallText ?? "\(run.name) \(run.arguments)"
                 count += TokenEstimate.tokens(in: callText)
                 if let res = run.result {
-                    count += TokenEstimate.tokens(in: res)
+                    let respText = run.rawResponseText ?? res
+                    count += TokenEstimate.tokens(in: respText)
                 }
             }
         }
