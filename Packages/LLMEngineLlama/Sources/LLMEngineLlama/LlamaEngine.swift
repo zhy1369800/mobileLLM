@@ -80,9 +80,7 @@ public actor LlamaEngine: LLMEngine {
     private var projectorPath: String?
     private var contextCap: Int = 0          // the n_ctx the live context was built with
     private var contextKVBits: Int = -1      // the Sampling.kvBits the live context's KV cache was built for
-    private var cachedSessionTurns: [ChatTurn] = []
-    private var cachedSessionTokens: [llama_token] = []
-    private var cachedSessionTokenCount: Int = 0
+    private var sessionCache = SessionCacheState()
     private var loadedID: String?
     private var thinkingCapable = true
     private var eosText = "<|im_end|>"
@@ -237,9 +235,7 @@ public actor LlamaEngine: LLMEngine {
         context = nil; model = nil; vocab = nil; loadedID = nil; contextCap = 0; contextKVBits = -1
         loadedGpuLayers = 0
         hasMtpSupport = false
-        cachedSessionTurns.removeAll()
-        cachedSessionTokens.removeAll()
-        cachedSessionTokenCount = 0
+        sessionCache.reset()
     }
 
     /// (Re)create the decode context sized to `cap` tokens with the requested KV-cache width. Kept separate
@@ -252,9 +248,7 @@ public actor LlamaEngine: LLMEngine {
             // Keep KV cache resident for prefix reuse; prefill will clear if history diverges
             return
         }
-        cachedSessionTurns.removeAll()
-        cachedSessionTokens.removeAll()
-        cachedSessionTokenCount = 0
+        sessionCache.reset()
         if let context { llama_free(context) }
         // Reset BEFORE the fallible init below: if llama_init_from_model throws out of this function,
         // `context` must not keep pointing at the freed allocation (a retry would double-free, and the
@@ -350,8 +344,8 @@ public actor LlamaEngine: LLMEngine {
                      governance: GenerationGovernance, lease: GenerationLifecycle.Lease,
                      into cont: AsyncThrowingStream<EngineDelta, Error>.Continuation) async {
         defer { generationLifecycle.end(lease) }
-        let initialCachedSessionTokensCount = cachedSessionTokens.count
-        let initialCachedSessionTokenCount = cachedSessionTokenCount
+        let initialCachedSessionTokensCount = sessionCache.tokens.count
+        let initialCachedSessionTokenCount = sessionCache.tokenCount
         do {
             // Handles cancellation that won the race before this actor task started.
             try await governance.cooperativeCheckpoint()
@@ -431,10 +425,10 @@ public actor LlamaEngine: LLMEngine {
             // 2. Exactly 1 new turn added (the new user query)
             // 3. The new query carries no images
             // 4. Physical KV cache has sufficient headroom for suffix + answer reserve
-            let previousCount = cachedSessionTurns.count
+            let previousCount = sessionCache.turns.count
             let canAttemptIncremental = previousCount > 0 &&
                 kept.count == previousCount + 1 &&
-                Array(kept.prefix(previousCount)) == cachedSessionTurns &&
+                Array(kept.prefix(previousCount)) == sessionCache.turns &&
                 kept.last?.images.isEmpty == true
 
             var incrementalSuffixTokens: [llama_token]? = nil
@@ -444,15 +438,15 @@ public actor LlamaEngine: LLMEngine {
                 let suffixText = newTurnPrompt.hasPrefix("\n") ? newTurnPrompt : ("\n" + newTurnPrompt)
                 let tokens = Self.tokenize(vocab: vocab, text: suffixText, addSpecial: false)
                 let incrementalReserve = min(reserve, 256)
-                if !tokens.isEmpty && cachedSessionTokenCount + tokens.count + incrementalReserve <= contextCap {
+                if !tokens.isEmpty && sessionCache.tokenCount + tokens.count + incrementalReserve <= contextCap {
                     incrementalSuffixTokens = tokens
                 } else {
                     NSLog("[LlamaEngine] Incremental continuation skipped: KV cache headroom exceeded or empty tokens (used=%d, suffix=%d, reserve=%d, cap=%d). Falling back to full evaluation.",
-                          Int32(cachedSessionTokenCount), Int32(tokens.count), Int32(incrementalReserve), Int32(contextCap))
+                          Int32(sessionCache.tokenCount), Int32(tokens.count), Int32(incrementalReserve), Int32(contextCap))
                 }
             } else if previousCount > 0 {
                 let countOk = kept.count == previousCount + 1
-                let prefixOk = countOk && Array(kept.prefix(previousCount)) == cachedSessionTurns
+                let prefixOk = countOk && Array(kept.prefix(previousCount)) == sessionCache.turns
                 let noImg = kept.last?.images.isEmpty == true
                 NSLog("[LlamaEngine] Incremental continuation rejected: kept.count=%d (expected %d), prefixMatch=%@, lastNoImages=%@",
                       Int32(kept.count), Int32(previousCount + 1),
@@ -483,7 +477,7 @@ public actor LlamaEngine: LLMEngine {
                         let tok = suffixTokens[i + offset]
                         let isLast = (i + offset == suffixTokens.count - 1)
                         Self.setBatchItem(&batch, at: offset, maxCapacity: batchCap,
-                                          token: tok, pos: Int32(cachedSessionTokenCount + i + offset), logits: isLast)
+                                          token: tok, pos: Int32(sessionCache.tokenCount + i + offset), logits: isLast)
                     }
                     batch.n_tokens = Int32(chunkCount)
                     guard llama_decode(context, batch) == 0 else { throw EngineError.decodeFailed }
@@ -496,10 +490,7 @@ public actor LlamaEngine: LLMEngine {
                 // only when speculative mode is active and prompt lookup is actually in use.
             } else if hasImages {
                 // Multimodal full evaluation: new image introduced or conversation diverged
-                llama_memory_clear(llama_get_memory(context), true)
-                cachedSessionTurns.removeAll()
-                cachedSessionTokens.removeAll()
-                cachedSessionTokenCount = 0
+                sessionCache.reset(context: context)
                 promptTokenCount = try await mtmdPrefill(kept: kept, context: context,
                                                          renderPrompt: renderPrompt, nBatch: nBatch,
                                                          governance: governance)
@@ -508,21 +499,21 @@ public actor LlamaEngine: LLMEngine {
                 let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true)
                 prefilledPromptTokens = promptTokens
 
-                let residentHadImages = cachedSessionTurns.contains { !$0.images.isEmpty }
+                let residentHadImages = sessionCache.hasImages
 
                 // Calculate Longest Common Prefix (LCP) between resident KV tokens and new prompt tokens.
                 // Only valid if resident session was pure text and has authoritative physical tokens cached.
                 var commonCount = 0
-                if !residentHadImages && !cachedSessionTokens.isEmpty {
-                    let maxLcp = min(cachedSessionTokens.count, promptTokens.count)
-                    while commonCount < maxLcp && cachedSessionTokens[commonCount] == promptTokens[commonCount] {
+                if !residentHadImages && !sessionCache.tokens.isEmpty {
+                    let maxLcp = min(sessionCache.tokens.count, promptTokens.count)
+                    while commonCount < maxLcp && sessionCache.tokens[commonCount] == promptTokens[commonCount] {
                         commonCount += 1
                     }
                 }
 
                 let incrementalReserve = min(reserve, 256)
                 let canRollback = !residentHadImages &&
-                                  !cachedSessionTokens.isEmpty &&
+                                  !sessionCache.tokens.isEmpty &&
                                   commonCount >= 16 &&
                                   commonCount < promptTokens.count &&
                                   (promptTokens.count + incrementalReserve <= contextCap)
@@ -530,10 +521,10 @@ public actor LlamaEngine: LLMEngine {
                 if !canRollback {
                     if residentHadImages {
                         rollbackDiagnosticMessage = "跳过回滚: 包含多模态图片"
-                    } else if cachedSessionTokens.isEmpty {
+                    } else if sessionCache.tokens.isEmpty {
                         rollbackDiagnosticMessage = "跳过回滚: 显存中无历史会话Token"
                     } else if commonCount < 16 {
-                        rollbackDiagnosticMessage = "回滚失败: 最长公共前缀过短 (仅匹配 \(commonCount) tok, 需要>=16, resident=\(cachedSessionTokens.count), prompt=\(promptTokens.count))"
+                        rollbackDiagnosticMessage = "回滚失败: 最长公共前缀过短 (仅匹配 \(commonCount) tok, 需要>=16, resident=\(sessionCache.tokens.count), prompt=\(promptTokens.count))"
                     } else if commonCount >= promptTokens.count {
                         rollbackDiagnosticMessage = "跳过回滚: 前缀完全包含新Prompt"
                     } else {
@@ -542,13 +533,13 @@ public actor LlamaEngine: LLMEngine {
                 }
 
                 NSLog("[LlamaEngine] Prefix rollback evaluation: resident=%d, prompt=%d, common=%d (canRollback=%@, residentHadImages=%@)",
-                      Int32(cachedSessionTokens.count), Int32(promptTokens.count), Int32(commonCount),
+                      Int32(sessionCache.tokens.count), Int32(promptTokens.count), Int32(commonCount),
                       canRollback ? "true" : "false", residentHadImages ? "true" : "false")
 
                 var rollbackSucceeded = false
                 if canRollback {
                     var rmSuccess = true
-                    if cachedSessionTokens.count > commonCount {
+                    if sessionCache.tokens.count > commonCount {
                         rmSuccess = llama_memory_seq_rm(llama_get_memory(context), 0, Int32(commonCount), -1)
                     }
                     if rmSuccess {
@@ -601,10 +592,7 @@ public actor LlamaEngine: LLMEngine {
 
                 if !rollbackSucceeded {
                     // Clean slate fallback: clean slate to ensure 100% position alignment
-                    llama_memory_clear(llama_get_memory(context), true)
-                    cachedSessionTurns.removeAll()
-                    cachedSessionTokens.removeAll()
-                    cachedSessionTokenCount = 0
+                    sessionCache.reset(context: context)
 
                     let batchCap = Int32(max(1, min(nBatch, promptTokens.count)))
                     var batch = llama_batch_init(batchCap, 0, 1)
@@ -632,7 +620,7 @@ public actor LlamaEngine: LLMEngine {
                 }
             }
             let promptSecs = max(Date().timeIntervalSince(prefillStart), 0.0001)
-            let cachedPromptTokensCount: Int = incrementalSuffixTokens != nil ? cachedSessionTokenCount : cachedRollbackTokensCount
+            let cachedPromptTokensCount: Int = incrementalSuffixTokens != nil ? sessionCache.tokenCount : cachedRollbackTokensCount
 
             // Decode loop. Implicit-open reasoning (Qwen3.5) begins inside the think block. The answer
             // stripper removes a model's answer-wrapper tags (Hunyuan's <answer>…</answer>) so they never
@@ -711,7 +699,7 @@ public actor LlamaEngine: LLMEngine {
                         // Prompt Lookup (or MTP falling back to Prompt Lookup): build n-gram window from
                         // cached history + current suffix. The lookup window is capped at 512 tokens in
                         // PromptLookupDrafter so this is bounded even for long conversations.
-                        let cachedTokens = Self.tokenize(vocab: vocab, text: renderPrompt(Array(cachedSessionTurns)), addSpecial: true)
+                        let cachedTokens = Self.tokenize(vocab: vocab, text: renderPrompt(Array(sessionCache.turns)), addSpecial: true)
                         conversationTokens = cachedTokens + suffixTokens
                     }
                     // MTP with actual driver: conversationTokens stays empty — not needed.
@@ -722,7 +710,7 @@ public actor LlamaEngine: LLMEngine {
                 }
             }
 
-            let baseKvPos = incrementalSuffixTokens != nil ? cachedSessionTokenCount : cachedRollbackTokensCount
+            let baseKvPos = incrementalSuffixTokens != nil ? sessionCache.tokenCount : cachedRollbackTokensCount
             var kvPos: llama_pos = Int32(baseKvPos + promptTokenCount)
             let physicalHeadroom = max(0, contextCap - Int(kvPos))
             let effectiveMaxTokens = (maxTokens > 0) ? min(maxTokens, physicalHeadroom) : physicalHeadroom
@@ -870,7 +858,10 @@ public actor LlamaEngine: LLMEngine {
                                 if genTokens >= effectiveMaxTokens {
                                     let discardFromPos = kvPos + 1 + Int32(acceptedDrafts)
                                     if acceptedDrafts < draftCount {
-                                        _ = llama_memory_seq_rm(llama_get_memory(context), 0, discardFromPos, -1)
+                                        let rmOk = llama_memory_seq_rm(llama_get_memory(context), 0, discardFromPos, -1)
+                                        if !rmOk {
+                                            supportsKvRollback = false
+                                        }
                                     }
                                     kvPos = discardFromPos
                                     hitMaxTokensInDrafts = true
@@ -994,67 +985,42 @@ public actor LlamaEngine: LLMEngine {
             // Multi-turn and multimodal reuse: record valid conversational turn on natural EOS completion.
             // If KV rollback failed during speculative decoding, the physical KV cache is dirty and must not be reused.
             if stop == .eos && supportsKvRollback && answerStripper.isNoop && !fullGeneratedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                cachedSessionTurns = kept + [ChatTurn(role: .assistant, content: fullGeneratedAnswer)]
+                let updatedTurns = kept + [ChatTurn(role: .assistant, content: fullGeneratedAnswer)]
                 if let suffixTokens = incrementalSuffixTokens {
-                    if !cachedSessionTokens.isEmpty {
-                        cachedSessionTokens.append(contentsOf: suffixTokens + generatedTokens)
-                    }
-                    cachedSessionTokenCount += suffixTokens.count + generatedTokens.count
+                    sessionCache.append(turns: updatedTurns,
+                                        additionalTokens: suffixTokens + generatedTokens,
+                                        additionalCount: suffixTokens.count + generatedTokens.count)
                 } else if let promptTokens = prefilledPromptTokens {
-                    cachedSessionTokens = promptTokens + generatedTokens
-                    cachedSessionTokenCount = cachedSessionTokens.count
+                    sessionCache.commit(turns: updatedTurns,
+                                        tokens: promptTokens + generatedTokens,
+                                        count: promptTokens.count + generatedTokens.count)
                 } else {
                     // Multimodal full evaluation (hasImages):
                     // No purely textual tokens to match for Prefix Rollback, but the total physical
                     // KV cache occupancy must be preserved so subsequent text turns can incrementally continue.
-                    cachedSessionTokens.removeAll()
-                    cachedSessionTokenCount = promptTokenCount + generatedTokens.count
+                    sessionCache.commitMultimodal(turns: updatedTurns,
+                                                  count: promptTokenCount + generatedTokens.count)
                 }
             } else {
-                cachedSessionTurns.removeAll()
-                cachedSessionTokens.removeAll()
-                cachedSessionTokenCount = 0
+                sessionCache.reset(context: context)
             }
             cont.finish()
         } catch is CancellationError {
-            if let context {
-                if initialCachedSessionTokenCount > 0 && initialCachedSessionTokensCount > 0 {
-                    // Retain previously verified conversational prefix: prune only uncommitted tokens added during this cancelled turn.
-                    let rmOk = llama_memory_seq_rm(llama_get_memory(context), 0, Int32(initialCachedSessionTokenCount), -1)
-                    if rmOk {
-                        if cachedSessionTokens.count > initialCachedSessionTokensCount {
-                            cachedSessionTokens = Array(cachedSessionTokens.prefix(initialCachedSessionTokensCount))
-                        }
-                        cachedSessionTokenCount = initialCachedSessionTokenCount
-                        NSLog("[LlamaEngine] Cancellation: retained %d prefix tokens (pruned uncommitted turn)", Int32(initialCachedSessionTokenCount))
-                    } else {
-                        // Hybrid/recurrent architectures (e.g. Qwen 3.5 Gated DeltaNet) reject partial state rollbacks.
-                        // Must wipe clean to avoid hidden state corruption or out-of-sync sequence positions.
-                        llama_memory_clear(llama_get_memory(context), true)
-                        cachedSessionTurns.removeAll()
-                        cachedSessionTokens.removeAll()
-                        cachedSessionTokenCount = 0
-                        NSLog("[LlamaEngine] Cancellation: backend rejected partial sequence trim (hybrid/recurrent state), safely cleared entire session")
-                    }
+            if let context, initialCachedSessionTokenCount > 0 && initialCachedSessionTokensCount > 0 {
+                // Retain previously verified conversational prefix: prune only uncommitted tokens added during this cancelled turn.
+                if sessionCache.prune(to: initialCachedSessionTokenCount, context: context) {
+                    NSLog("[LlamaEngine] Cancellation: retained %d prefix tokens (pruned uncommitted turn)", Int32(initialCachedSessionTokenCount))
                 } else {
-                    llama_memory_clear(llama_get_memory(context), true)
-                    cachedSessionTurns.removeAll()
-                    cachedSessionTokens.removeAll()
-                    cachedSessionTokenCount = 0
+                    NSLog("[LlamaEngine] Cancellation: backend rejected partial sequence trim (hybrid/recurrent state), safely cleared entire session")
                 }
             } else {
-                cachedSessionTurns.removeAll()
-                cachedSessionTokens.removeAll()
-                cachedSessionTokenCount = 0
+                sessionCache.reset(context: context)
             }
             cont.yield(.done(Stats(promptTokens: 0, genTokens: 0, promptTPS: 0, tokensPerSecond: 0,
                                    peakMemoryBytes: Self.footprintBytes(), stopReason: .cancelled)))
             cont.finish()
         } catch {
-            if let context { llama_memory_clear(llama_get_memory(context), true) }
-            cachedSessionTurns.removeAll()
-            cachedSessionTokens.removeAll()
-            cachedSessionTokenCount = 0
+            sessionCache.reset(context: context)
             cont.finish(throwing: error)
         }
     }
@@ -1468,6 +1434,73 @@ public actor LlamaEngine: LLMEngine {
             seqPtr.pointee = 0
         }
         batch.logits[i] = logits ? 1 : 0
+    }
+
+    /// Encapsulates conversational session cache state (physical KV context & logical tokens/turns).
+    /// Enforces the invariant that partial prune failure automatically resets the entire session.
+    private struct SessionCacheState {
+        private(set) var turns: [ChatTurn] = []
+        private(set) var tokens: [llama_token] = []
+        private(set) var tokenCount: Int = 0
+
+        var isEmpty: Bool { turns.isEmpty && tokens.isEmpty && tokenCount == 0 }
+        var hasImages: Bool { turns.contains { !$0.images.isEmpty } }
+
+        /// Reset physical KV memory (if context is non-nil) and clear all Swift state.
+        mutating func reset(context: OpaquePointer? = nil) {
+            if let context {
+                llama_memory_clear(llama_get_memory(context), true)
+            }
+            turns.removeAll()
+            tokens.removeAll()
+            tokenCount = 0
+        }
+
+        /// Prune the session cache to `count` tokens.
+        /// If llama_memory_seq_rm succeeds, trims `tokens` and updates `tokenCount`.
+        /// If it fails (e.g. hybrid SSM / recurrent state rejection on Qwen 3.5),
+        /// it automatically performs a full `reset(context:)` to enforce consistency.
+        @discardableResult
+        mutating func prune(to count: Int, context: OpaquePointer?) -> Bool {
+            guard let context else {
+                reset()
+                return false
+            }
+            let rmOk = llama_memory_seq_rm(llama_get_memory(context), 0, Int32(count), -1)
+            if rmOk {
+                if tokens.count > count {
+                    tokens = Array(tokens.prefix(count))
+                }
+                tokenCount = count
+                return true
+            } else {
+                reset(context: context)
+                return false
+            }
+        }
+
+        /// Commit full turns, tokens, and count on natural completion.
+        mutating func commit(turns: [ChatTurn], tokens: [llama_token], count: Int) {
+            self.turns = turns
+            self.tokens = tokens
+            self.tokenCount = count
+        }
+
+        /// Append tokens to existing session cache on incremental suffix turn.
+        mutating func append(turns: [ChatTurn], additionalTokens: [llama_token], additionalCount: Int) {
+            self.turns = turns
+            if !tokens.isEmpty {
+                self.tokens.append(contentsOf: additionalTokens)
+            }
+            self.tokenCount += additionalCount
+        }
+
+        /// Multimodal full evaluation commit: physical count tracked, but no pure text tokens.
+        mutating func commitMultimodal(turns: [ChatTurn], count: Int) {
+            self.turns = turns
+            self.tokens.removeAll()
+            self.tokenCount = count
+        }
     }
 
     /// Lightweight spec gate to detect tool-call blocks and suppress draft speculation during structured output.
