@@ -1011,7 +1011,8 @@ public actor LlamaEngine: LLMEngine {
             // Only purely incremental continuations (where the verified session prefix was never modified or rolled back)
             // can safely prune back to `initialCachedSessionTokenCount`. Any prefix-rollback or full-recompute path
             // altered the physical KV positions, so pruning to the old length would retain alien tokens and corrupt KV cache.
-            if isIncrementalContinuation, let context, initialCachedSessionTokenCount > 0 && initialCachedSessionTokensCount > 0 {
+            // Furthermore, multimodal sessions carrying visual ViT embeddings must never undergo partial KV truncation (per e87379f).
+            if isIncrementalContinuation, !sessionCache.hasImages, let context, initialCachedSessionTokenCount > 0 && initialCachedSessionTokensCount > 0 {
                 // Retain previously verified conversational prefix: prune only uncommitted tokens added during this cancelled turn.
                 if sessionCache.prune(to: initialCachedSessionTokenCount, context: context) {
                     NSLog("[LlamaEngine] Cancellation: retained %d prefix tokens (pruned uncommitted turn)", Int32(initialCachedSessionTokenCount))
