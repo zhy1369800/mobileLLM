@@ -126,6 +126,8 @@ public final class AppContainer {
                                    downloader: downloader, installProbe: installProbe,
                                    systemModelProbe: systemModelProbe,
                                    availableMemory: availableMemory)
+        self.models.idleTimerOverride = { [weak settings] in settings?.keepScreenAwake ?? false }
+        settings.isDownloadingProvider = { [weak self] in self?.models.hasActiveDownloads ?? false }
         // Tool seams for the agent loop. The memory store lives beside the conversation records (durable +
         // atomic — losing saved facts is annoying). The privacy-gated calendar / location adapters are
         // injected by the app-assembly layer (the App scene), NOT constructed here, so previews and unit

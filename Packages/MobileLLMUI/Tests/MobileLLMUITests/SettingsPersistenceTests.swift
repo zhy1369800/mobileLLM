@@ -365,4 +365,31 @@ final class SettingsPersistenceTests: XCTestCase {
         let settings = AppSettings(defaults: defaults)
         XCTAssertTrue(settings.useHuggingFaceMirror)
     }
+
+    // MARK: Keep screen awake persistence
+
+    func testKeepScreenAwakeDefaultsToFalseOnFreshInstall() {
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertFalse(settings.keepScreenAwake)
+    }
+
+    func testKeepScreenAwakePersistsAndRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        settings.keepScreenAwake = true
+        XCTAssertTrue(AppSettings(defaults: defaults).keepScreenAwake)
+
+        settings.keepScreenAwake = false
+        XCTAssertFalse(AppSettings(defaults: defaults).keepScreenAwake)
+    }
+
+    func testLegacySnapshotDecodesWithKeepScreenAwakeDefaultFalse() {
+        write(#"""
+        {"defaultModelID":"bonsai-8b","systemPrompt":"keep me","systemPromptSeeded":true,
+         "thinkingDefault":true,"thinkingDisplay":"autoCollapse","toolsEnabled":false,
+         "temperature":0.7,"topP":0.95,"topK":20,"repetitionPenalty":1.05,"maxTokens":1024,
+         "contextLength":8192,"kvBits":4,"appearance":"system"}
+        """#)
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertFalse(settings.keepScreenAwake)
+    }
 }

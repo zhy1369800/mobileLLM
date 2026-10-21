@@ -612,6 +612,17 @@ struct SettingsView: View {
             Segmented(selection: $settings.appearance, options: AppearanceMode.allCases) { $0.label }
             Text("Match your system, or pin to Light or Dark.")
                 .font(.caption).foregroundStyle(Theme.textTertiary)
+            #if os(iOS)
+            Divider().background(Theme.hairline)
+            Toggle(isOn: $settings.keepScreenAwake) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Keep screen awake").font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    Text("Prevent the device from sleeping while mobileLLM is in the foreground.")
+                        .font(.caption).foregroundStyle(Theme.textTertiary)
+                }
+            }
+            .tint(Theme.accent)
+            #endif
         }
     }
 

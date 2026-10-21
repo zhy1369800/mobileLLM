@@ -4,6 +4,9 @@ import Foundation
 import Observation
 import AppRuntime
 import LLMCore
+#if os(iOS)
+import UIKit
+#endif
 
 /// Thread-safe configuration mirror for `LoggingEngine` that can be read across concurrency boundaries.
 public final class LoggingConfiguration: @unchecked Sendable {
@@ -295,6 +298,24 @@ public final class AppSettings {
     // MARK: Appearance
     public var appearance: AppearanceMode { didSet { persist() } }
 
+    /// Keep the screen awake while the app is in the foreground (iOS only).
+    public var keepScreenAwake: Bool {
+        didSet {
+            applyIdleTimer()
+            persist()
+        }
+    }
+
+    public var isDownloadingProvider: (@MainActor () -> Bool)?
+
+    /// Synchronize the iOS idle timer with the user preference and active background tasks.
+    public func applyIdleTimer(isDownloading: Bool? = nil) {
+        #if os(iOS)
+        let downloading = isDownloading ?? (isDownloadingProvider?() ?? false)
+        UIApplication.shared.isIdleTimerDisabled = keepScreenAwake || downloading
+        #endif
+    }
+
     public static let storageKey = AppConfigurationKeys.settingsStorageKey
     private let defaults: UserDefaults
     private let key = AppSettings.storageKey
@@ -404,10 +425,12 @@ public final class AppSettings {
         continuedProcessingEnabled = snap?.continuedProcessingEnabled ?? false
         localModelLoggingEnabled = snap?.localModelLoggingEnabled ?? false
         appearance = snap?.appearance ?? .system
+        keepScreenAwake = snap?.keepScreenAwake ?? false
         let initialMirror = snap?.useHuggingFaceMirror ?? (UserDefaults.standard.object(forKey: HuggingFaceEndpoint.userDefaultsKey) as? Bool ?? true)
         useHuggingFaceMirror = initialMirror
         UserDefaults.standard.set(initialMirror, forKey: HuggingFaceEndpoint.userDefaultsKey)
         loading = false
+        applyIdleTimer()
         // First launch after an update: any plaintext token was just moved into the Keychain — re-persist
         // now so the scrubbed snapshot (no plaintext) replaces the one still on disk. The same pass
         // stamps the output-budget migration marker so a later explicit 4096 is never re-migrated.
@@ -560,6 +583,7 @@ public final class AppSettings {
         var continuedProcessingEnabled: Bool? = nil
         var localModelLoggingEnabled: Bool? = nil
         var appearance: AppearanceMode
+        var keepScreenAwake: Bool? = false
         var useHuggingFaceMirror: Bool? = nil
     }
 
@@ -597,6 +621,7 @@ public final class AppSettings {
                             continuedProcessingEnabled: continuedProcessingEnabled,
                             localModelLoggingEnabled: localModelLoggingEnabled,
                             appearance: appearance,
+                            keepScreenAwake: keepScreenAwake,
                             useHuggingFaceMirror: useHuggingFaceMirror)
         if let data = try? JSONEncoder().encode(snap) { defaults.set(data, forKey: key) }
     }
@@ -644,9 +669,11 @@ public final class AppSettings {
         continuedProcessingEnabled = false
         localModelLoggingEnabled = false
         appearance = .system
+        keepScreenAwake = false
         useHuggingFaceMirror = true
         UserDefaults.standard.set(true, forKey: HuggingFaceEndpoint.userDefaultsKey)
         loading = false
+        applyIdleTimer()
         defaults.removeObject(forKey: key)
 
         if let keychainFailure { throw keychainFailure }

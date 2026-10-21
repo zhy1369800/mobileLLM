@@ -877,9 +877,14 @@ public final class ModelManager {
     /// die to the auto-lock, but we must release the assertion the instant the last download ends.
     private func updateIdleTimer() {
         #if os(iOS)
-        UIApplication.shared.isIdleTimerDisabled = !downloadTasks.isEmpty
+        UIApplication.shared.isIdleTimerDisabled = !downloadTasks.isEmpty || (idleTimerOverride?() ?? false)
         #endif
     }
+
+    /// Optional external check to keep screen awake (e.g. user setting in AppSettings).
+    public var idleTimerOverride: (@MainActor () -> Bool)?
+
+    public var hasActiveDownloads: Bool { !downloadTasks.isEmpty }
 
     public func isDownloading(_ variant: LLMVariant) -> Bool {
         downloadTasks[variant.id] != nil
