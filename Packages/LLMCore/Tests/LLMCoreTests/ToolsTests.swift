@@ -122,6 +122,7 @@ final class ToolsTests: XCTestCase {
         guard case let .call(call)? = events.last else { return XCTFail("expected a call, got \(events)") }
         XCTAssertEqual(call.name, "calculator")
         XCTAssertEqual(call.arg("expression"), "2+2")
+        XCTAssertEqual(call.rawText, #"<tool_call>{"name":"calculator","arguments":{"expression":"2+2"}}</tool_call>"#)
         // The <tool_call> markup must NOT appear as text.
         XCTAssertFalse(events.contains { if case .text(let s) = $0 { return s.contains("tool_call") }; return false })
     }

@@ -37,8 +37,13 @@ public struct ToolParam: Sendable, Hashable, Codable {
 public struct ToolCall: Sendable, Hashable, Codable, Identifiable {
     public let name: String
     public let argumentsJSON: String        // raw JSON object, e.g. `{"expression":"17+25"}`
+    public let rawText: String?             // the exact raw text emitted by the model
     public var id: String { "\(name)(\(argumentsJSON))" }
-    public init(name: String, argumentsJSON: String) { self.name = name; self.argumentsJSON = argumentsJSON }
+    public init(name: String, argumentsJSON: String, rawText: String? = nil) {
+        self.name = name
+        self.argumentsJSON = argumentsJSON
+        self.rawText = rawText
+    }
 
     /// Decode a named string/number argument (numbers are stringified) — a lenient helper for tools.
     public func arg(_ key: String) -> String? {

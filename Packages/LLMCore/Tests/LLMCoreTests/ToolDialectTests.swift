@@ -344,7 +344,9 @@ final class BareJSONToolCallTests: XCTestCase {
     /// The regression: DeepSeek's real, measured emission.
     func testDeepSeeksUntaggedJSONIsReadAsACall() {
         let raw = #"{"name": "remember", "arguments": {"text": "The user's name is Tom"}}"#
-        XCTAssertEqual(firstCall(events([raw], bare: true))?.name, "remember")
+        let call = firstCall(events([raw], bare: true))
+        XCTAssertEqual(call?.name, "remember")
+        XCTAssertEqual(call?.rawText, raw)
         XCTAssertEqual(text(events([raw], bare: true)), "", "the JSON must not also be shown")
     }
 

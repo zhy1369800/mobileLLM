@@ -78,8 +78,7 @@ extension ChatStore {
                         """
                         kept.append(ChatTurn(role: .user, content: safeResult))
                     }
-                    let args = run.arguments.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "{}" : run.arguments
-                    let callContent = run.rawCallText ?? "<tool_call>{\"name\":\"\(run.name)\",\"arguments\":\(args)}</tool_call>"
+                    let callContent = run.rawCallText ?? (run.arguments.isEmpty ? run.name : run.arguments)
                     kept.append(ChatTurn(role: .assistant, content: callContent))
                 }
             } else {

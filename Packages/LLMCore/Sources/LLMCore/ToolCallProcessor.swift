@@ -26,6 +26,7 @@ public struct ToolCallProcessor {
     /// The close marker we're scanning for while inside a call — set when its open marker matched, so a
     /// dialect's call is always closed by ITS OWN terminator.
     private var closingWith: String?
+    private var currentOpenMarker: String?
 
     /// Accept an UNTAGGED `{"name":…,"arguments":…}` as a call, but only as the opening of the answer.
     ///
@@ -60,14 +61,17 @@ public struct ToolCallProcessor {
             if let close = closingWith {
                 guard let r = buffer.range(of: close) else { break }
                 let body = String(buffer[buffer.startIndex..<r.lowerBound])
-                out.append(event(forBody: body))
+                let rawSnippet = (currentOpenMarker ?? "") + body + String(buffer[r])
+                out.append(event(forBody: body, rawText: rawSnippet))
                 buffer.removeSubrange(buffer.startIndex..<r.upperBound)
                 closingWith = nil
+                currentOpenMarker = nil
                 continue
             }
             if let hit = ToolCallSyntax.firstOpen(in: buffer) {
                 let before = String(buffer[buffer.startIndex..<hit.range.lowerBound])
                 emitText(before, into: &out)
+                currentOpenMarker = String(buffer[hit.range])
                 buffer.removeSubrange(buffer.startIndex..<hit.range.upperBound)
                 closingWith = hit.close
                 continue
@@ -97,8 +101,11 @@ public struct ToolCallProcessor {
             }
         } else if flush, !buffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             // Unterminated call at stream end — best-effort parse, else report rather than drop it.
-            out.append(event(forBody: buffer))
+            let rawSnippet = (currentOpenMarker ?? "") + buffer
+            out.append(event(forBody: buffer, rawText: rawSnippet))
             buffer.removeAll()
+            closingWith = nil
+            currentOpenMarker = nil
         }
         return out
     }
@@ -119,8 +126,9 @@ public struct ToolCallProcessor {
             // Still open. Keep waiting unless the stream ended or it has run away.
             return (flush || buffer.count > Self.bareJSONCap) ? .notACall : .keepWaiting
         }
-        guard let call = ToolCallSyntax.parse(String(lead[lead.startIndex..<end])) else { return .notACall }
-        return .call(call)
+        let rawJSON = String(lead[lead.startIndex..<end])
+        guard let call = ToolCallSyntax.parse(rawJSON) else { return .notACall }
+        return .call(ToolCall(name: call.name, argumentsJSON: call.argumentsJSON, rawText: rawJSON))
     }
 
     /// Index just past the `}` that closes the object `s` starts with, honouring strings and escapes —
@@ -155,8 +163,10 @@ public struct ToolCallProcessor {
         if !text.isEmpty { out.append(.text(text)); emittedAnything = true }
     }
 
-    private func event(forBody body: String) -> Event {
-        if let call = ToolCallSyntax.parse(body) { return .call(call) }
+    private func event(forBody body: String, rawText: String) -> Event {
+        if let call = ToolCallSyntax.parse(body) {
+            return .call(ToolCall(name: call.name, argumentsJSON: call.argumentsJSON, rawText: rawText))
+        }
         return .malformed(body.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
