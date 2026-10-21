@@ -411,7 +411,7 @@ private enum LocalModelGeneration {
         var policyBlocks: [String] = []
         let priorResponses = await residencyDriver?.pendingToolCallResponses(for: request.runID) ?? []
         var toolResponseIndex = 0
-        var previousRole: AgentMessageRole? = nil
+        var previousRole: AgentModelMessageRole? = nil
         for message in request.messages {
             if isInternalRunStateMessage(message) {
                 if let repair = extractRepairInstruction(from: message.content) {
