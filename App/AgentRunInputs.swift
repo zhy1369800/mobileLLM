@@ -657,7 +657,9 @@ struct AppFrozenInputBuilder: Sendable {
         var hasher = SHA256()
         hasher.update(data: Data(base.uuidString.utf8))
         hasher.update(data: Data(tag.utf8))
-        let digest = Array(hasher.finalize().prefix(16))
+        var digest = Array(hasher.finalize().prefix(16))
+        digest[6] = (digest[6] & 0x0f) | 0x50 // RFC 4122 Version 5 (name-based)
+        digest[8] = (digest[8] & 0x3f) | 0x80 // RFC 4122 Variant
         return UUID(uuid: (
             digest[0], digest[1], digest[2], digest[3],
             digest[4], digest[5], digest[6], digest[7],
