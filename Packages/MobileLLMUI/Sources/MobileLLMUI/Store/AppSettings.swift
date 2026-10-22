@@ -312,7 +312,12 @@ public final class AppSettings {
     public func applyIdleTimer(isDownloading: Bool? = nil) {
         #if os(iOS)
         let downloading = isDownloading ?? (isDownloadingProvider?() ?? false)
-        UIApplication.shared.isIdleTimerDisabled = keepScreenAwake || downloading
+        let target = keepScreenAwake || downloading
+        UIApplication.shared.isIdleTimerDisabled = target
+        NSLog("[IdleTimer] applyIdleTimer keepScreenAwake=%@ downloading=%@ -> isIdleTimerDisabled=%@",
+              keepScreenAwake ? "true" : "false",
+              downloading ? "true" : "false",
+              target ? "true" : "false")
         #endif
     }
 

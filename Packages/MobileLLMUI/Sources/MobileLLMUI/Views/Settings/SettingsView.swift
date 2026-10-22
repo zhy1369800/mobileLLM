@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: MIT
 
 import SwiftUI
+import Combine
 import AppUI
 import LLMCore
+#if os(iOS)
+import UIKit
+#endif
 
 /// Settings (DESIGN §4): default model, chat behavior, sampling (progressive-disclosure Advanced),
 /// appearance, data & privacy, and about. Section/row builders in a clean studio style.
@@ -21,6 +25,7 @@ struct SettingsView: View {
     @State private var showLocalLogs = false
     @State private var newShortcutName = ""
     @State private var newShortcutTarget = ""
+    @State private var idleTimerActual = false
     @FocusState private var isShortcutFieldFocused: Bool
 
     init(container: AppContainer) {
@@ -622,6 +627,18 @@ struct SettingsView: View {
                 }
             }
             .tint(Theme.accent)
+            // 诊断显示：系统实际接受的 isIdleTimerDisabled（每秒刷新；定位常亮问题用，确认后可删）
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(idleTimerActual ? Color.green : Color.red)
+                    .frame(width: 8, height: 8)
+                Text("System idle-timer: \(idleTimerActual ? "disabled (awake)" : "ENABLED (may sleep)")")
+                    .font(.caption2).foregroundStyle(Theme.textTertiary)
+            }
+            .onAppear { idleTimerActual = UIApplication.shared.isIdleTimerDisabled }
+            .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+                idleTimerActual = UIApplication.shared.isIdleTimerDisabled
+            }
             #endif
         }
     }

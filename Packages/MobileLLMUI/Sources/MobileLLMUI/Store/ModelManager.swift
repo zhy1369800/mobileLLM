@@ -877,7 +877,13 @@ public final class ModelManager {
     /// die to the auto-lock, but we must release the assertion the instant the last download ends.
     private func updateIdleTimer() {
         #if os(iOS)
-        UIApplication.shared.isIdleTimerDisabled = !downloadTasks.isEmpty || (idleTimerOverride?() ?? false)
+        let override = idleTimerOverride?() ?? false
+        let target = !downloadTasks.isEmpty || override
+        UIApplication.shared.isIdleTimerDisabled = target
+        NSLog("[IdleTimer] updateIdleTimer activeDownloads=%d override=%@ -> isIdleTimerDisabled=%@",
+              downloadTasks.count,
+              override ? "true" : "false",
+              target ? "true" : "false")
         #endif
     }
 

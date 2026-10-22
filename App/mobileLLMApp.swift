@@ -685,6 +685,11 @@ struct MobileLLMApp: App {
                     } else if phase == .active || phase == .inactive {
                         container.lifecycle.enterForeground()
                     }
+                    // Re-assert the idle timer after system UI (Control Center, notification
+                    // banner, lock screen) may have reset it — keeps "Keep screen awake" reliable.
+                    if phase == .active {
+                        container.settings.applyIdleTimer()
+                    }
                     #else
                     // Free the resident model when the app leaves the foreground: it stops a 5 GB model
                     // hogging memory while unused and stops macOS jetsam-killing the app in the background.
