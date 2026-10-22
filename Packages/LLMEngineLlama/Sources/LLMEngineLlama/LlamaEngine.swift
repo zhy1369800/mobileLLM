@@ -1364,7 +1364,7 @@ public actor LlamaEngine: LLMEngine {
         let chain = llama_sampler_chain_init(llama_sampler_chain_default_params())!
         if params.repetitionPenalty > 1.0 {
             let nVocab = llama_vocab_n_tokens(vocab)
-            llama_sampler_chain_add(chain, llama_sampler_init_penalties(nVocab, 64, Int32(params.repetitionPenalty), 0, 0))
+            llama_sampler_chain_add(chain, llama_sampler_init_penalties(nVocab, 64, Float(params.repetitionPenalty), 0, 0))
         }
         if params.temperature <= 0 {
             llama_sampler_chain_add(chain, llama_sampler_init_greedy())
