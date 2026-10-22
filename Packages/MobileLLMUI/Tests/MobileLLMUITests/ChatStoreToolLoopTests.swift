@@ -405,6 +405,50 @@ final class ChatStoreToolLoopTests: XCTestCase {
 
     /// Give any just-finished generation task time to run its trailing (no-op) finalize on the main actor
     /// before a second send starts on the same store.
+
+    // MARK: - Token consistency & replay locking
+
+    /// Verifies that when a turn executes a tool, the preserved rawCallText and rawResponseText
+    /// replay in subsequent turns with 100% byte-for-byte fidelity, guaranteeing KV cache alignment
+    /// across multi-turn chats without synthetic reconstruction mismatches.
+    func testToolCallAndResponsePreservedRawTextMatchesExactLiveTurnHistory() async throws {
+        let engine = ScriptedEngine([Self.calcCall, "The answer is 42."])
+        let (chat, _, _, dir) = makeStore(engine: engine)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        chat.draft = "what is 17+25?"
+        chat.send()
+        try await waitUntilIdle(chat)
+
+        let assistant = try XCTUnwrap(chat.activeConversation?.messages.last)
+        let run = try XCTUnwrap(assistant.toolRuns?.first)
+        XCTAssertEqual(run.rawCallText, Self.calcCall)
+        XCTAssertNotNil(run.rawResponseText)
+
+        // Now prepare context for the next turn:
+        let convo = try XCTUnwrap(chat.activeConversation)
+        let prepared = ChatStore.preparedContext(conversation: convo, cap: 4096)
+        let preparedTurns = prepared.messages
+
+        // Expectation:
+        // [0] User: "what is 17+25?"
+        // [1] Assistant: exact rawCallText
+        // [2] User: exact rawResponseText
+        // [3] Assistant: "The answer is 42."
+        XCTAssertEqual(preparedTurns.count, 4)
+        XCTAssertEqual(preparedTurns[0].role, .user)
+        XCTAssertEqual(preparedTurns[0].content, "what is 17+25?")
+
+        XCTAssertEqual(preparedTurns[1].role, .assistant)
+        XCTAssertEqual(preparedTurns[1].content, run.rawCallText, "Replayed tool call must match rawCallText byte-for-byte")
+
+        XCTAssertEqual(preparedTurns[2].role, .user)
+        XCTAssertEqual(preparedTurns[2].content, run.rawResponseText, "Replayed tool response must match rawResponseText byte-for-byte")
+
+        XCTAssertEqual(preparedTurns[3].role, .assistant)
+        XCTAssertEqual(preparedTurns[3].content, "The answer is 42.")
+    }
+
     private func settle() async throws {
         for _ in 0..<8 { await Task.yield() }
         try await Task.sleep(nanoseconds: 30_000_000)

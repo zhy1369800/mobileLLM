@@ -236,6 +236,7 @@ public actor LlamaEngine: LLMEngine {
         loadedGpuLayers = 0
         hasMtpSupport = false
         sessionCache.reset()
+        sessionCache.resetCapability()
     }
 
     /// (Re)create the decode context sized to `cap` tokens with the requested KV-cache width. Kept separate
@@ -504,9 +505,10 @@ public actor LlamaEngine: LLMEngine {
                 let residentHadImages = sessionCache.hasImages
 
                 // Calculate Longest Common Prefix (LCP) between resident KV tokens and new prompt tokens.
-                // Only valid if resident session was pure text and has authoritative physical tokens cached.
+                // Only valid if resident session was pure text, has authoritative physical tokens cached,
+                // and the model architecture actually supports partial state rollback.
                 var commonCount = 0
-                if !residentHadImages && !sessionCache.tokens.isEmpty {
+                if sessionCache.supportsPartialTrim && !residentHadImages && !sessionCache.tokens.isEmpty {
                     let maxLcp = min(sessionCache.tokens.count, promptTokens.count)
                     while commonCount < maxLcp && sessionCache.tokens[commonCount] == promptTokens[commonCount] {
                         commonCount += 1
@@ -514,14 +516,17 @@ public actor LlamaEngine: LLMEngine {
                 }
 
                 let incrementalReserve = min(reserve, 256)
-                let canRollback = !residentHadImages &&
+                let canRollback = sessionCache.supportsPartialTrim &&
+                                  !residentHadImages &&
                                   !sessionCache.tokens.isEmpty &&
                                   commonCount >= 16 &&
                                   commonCount < promptTokens.count &&
                                   (promptTokens.count + incrementalReserve <= contextCap)
 
                 if !canRollback {
-                    if residentHadImages {
+                    if !sessionCache.supportsPartialTrim {
+                        rollbackDiagnosticMessage = "跳过回滚: 当前模型架构不支持局部显存截断 (SSM/Recurrent状态已记录)"
+                    } else if residentHadImages {
                         rollbackDiagnosticMessage = "跳过回滚: 包含多模态图片"
                     } else if sessionCache.tokens.isEmpty {
                         rollbackDiagnosticMessage = "跳过回滚: 显存中无历史会话Token"
@@ -587,6 +592,7 @@ public actor LlamaEngine: LLMEngine {
                             NSLog("[LlamaEngine] Prefix rollback decode failed, falling back to clean slate")
                         }
                     } else {
+                        sessionCache.markPartialTrimUnsupported()
                         rollbackDiagnosticMessage = "回滚跳过: 显存不支持局部截断 (如Qwen3.5等混合SSM/Recurrent架构隐状态在数学上不可逆)，已安全全量重新预填充"
                         NSLog("[LlamaEngine] Prefix rollback llama_memory_seq_rm rejected partial sequence trim (likely hybrid/recurrent architecture like Qwen 3.5), safely falling back to clean slate")
                     }
@@ -1448,9 +1454,20 @@ public actor LlamaEngine: LLMEngine {
         private(set) var turns: [ChatTurn] = []
         private(set) var tokens: [llama_token] = []
         private(set) var tokenCount: Int = 0
+        /// Tracks whether the active backend/model architecture supports partial KV cache trimming via seq_rm.
+        /// Once rejected (e.g. Qwen 3.5 hybrid Gated DeltaNet state), further attempts are bypassed.
+        private(set) var supportsPartialTrim: Bool = true
 
         var isEmpty: Bool { turns.isEmpty && tokens.isEmpty && tokenCount == 0 }
         var hasImages: Bool { turns.contains { !$0.images.isEmpty } }
+
+        mutating func markPartialTrimUnsupported() {
+            supportsPartialTrim = false
+        }
+
+        mutating func resetCapability() {
+            supportsPartialTrim = true
+        }
 
         /// Reset physical KV memory (if context is non-nil) and clear all Swift state.
         mutating func reset(context: OpaquePointer? = nil) {
@@ -1480,6 +1497,7 @@ public actor LlamaEngine: LLMEngine {
                 tokenCount = count
                 return true
             } else {
+                supportsPartialTrim = false
                 reset(context: context)
                 return false
             }
