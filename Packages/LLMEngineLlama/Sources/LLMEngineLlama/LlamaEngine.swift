@@ -88,6 +88,9 @@ public actor LlamaEngine: LLMEngine {
     private var reasoningStyle: ReasoningStyle = .thinkTags
     /// Whether the currently loaded model declares MTP / nextn draft prediction layers.
     public private(set) var hasMtpSupport: Bool = false
+    /// Tracks whether the active backend/model architecture supports partial KV cache trimming via seq_rm.
+    /// Initialized to true on load; if rejected (e.g. Qwen 3.5 hybrid Gated DeltaNet state), further attempts are bypassed.
+    private var supportsPartialTrim: Bool = true
     private var loadedGpuLayers: Int32 = 0
     nonisolated private let generationLifecycle = GenerationLifecycle()
     nonisolated private let governanceFactory: GovernanceFactory
@@ -166,6 +169,7 @@ public actor LlamaEngine: LLMEngine {
         promptTemplate = modelSpec.architecture.promptTemplate
         reasoningStyle = modelSpec.architecture.reasoningStyle
         hasMtpSupport = MtpDetector.detectMtpSupport(model: m)
+        supportsPartialTrim = true
         NSLog("[LlamaEngine] Model loaded: id=%@, MTP supported=%d, gpu_layers=%d",
               modelSpec.id, hasMtpSupport ? 1 : 0, loadedGpuLayers)
         context = nil; contextCap = 0; contextKVBits = -1
@@ -235,8 +239,8 @@ public actor LlamaEngine: LLMEngine {
         context = nil; model = nil; vocab = nil; loadedID = nil; contextCap = 0; contextKVBits = -1
         loadedGpuLayers = 0
         hasMtpSupport = false
+        supportsPartialTrim = true
         sessionCache.reset()
-        sessionCache.resetCapability()
     }
 
     /// (Re)create the decode context sized to `cap` tokens with the requested KV-cache width. Kept separate
@@ -508,7 +512,7 @@ public actor LlamaEngine: LLMEngine {
                 // Only valid if resident session was pure text, has authoritative physical tokens cached,
                 // and the model architecture actually supports partial state rollback.
                 var commonCount = 0
-                if sessionCache.supportsPartialTrim && !residentHadImages && !sessionCache.tokens.isEmpty {
+                if supportsPartialTrim && !residentHadImages && !sessionCache.tokens.isEmpty {
                     let maxLcp = min(sessionCache.tokens.count, promptTokens.count)
                     while commonCount < maxLcp && sessionCache.tokens[commonCount] == promptTokens[commonCount] {
                         commonCount += 1
@@ -516,7 +520,7 @@ public actor LlamaEngine: LLMEngine {
                 }
 
                 let incrementalReserve = min(reserve, 256)
-                let canRollback = sessionCache.supportsPartialTrim &&
+                let canRollback = supportsPartialTrim &&
                                   !residentHadImages &&
                                   !sessionCache.tokens.isEmpty &&
                                   commonCount >= 16 &&
@@ -524,7 +528,7 @@ public actor LlamaEngine: LLMEngine {
                                   (promptTokens.count + incrementalReserve <= contextCap)
 
                 if !canRollback {
-                    if !sessionCache.supportsPartialTrim {
+                    if !supportsPartialTrim {
                         rollbackDiagnosticMessage = "跳过回滚: 当前模型架构不支持局部显存截断 (SSM/Recurrent状态已记录)"
                     } else if residentHadImages {
                         rollbackDiagnosticMessage = "跳过回滚: 包含多模态图片"
@@ -592,7 +596,7 @@ public actor LlamaEngine: LLMEngine {
                             NSLog("[LlamaEngine] Prefix rollback decode failed, falling back to clean slate")
                         }
                     } else {
-                        sessionCache.markPartialTrimUnsupported()
+                        supportsPartialTrim = false
                         rollbackDiagnosticMessage = "回滚跳过: 显存不支持局部截断 (如Qwen3.5等混合SSM/Recurrent架构隐状态在数学上不可逆)，已安全全量重新预填充"
                         NSLog("[LlamaEngine] Prefix rollback llama_memory_seq_rm rejected partial sequence trim (likely hybrid/recurrent architecture like Qwen 3.5), safely falling back to clean slate")
                     }
@@ -1023,6 +1027,7 @@ public actor LlamaEngine: LLMEngine {
                 if sessionCache.prune(to: initialCachedSessionTokenCount, context: context) {
                     NSLog("[LlamaEngine] Cancellation: retained %d prefix tokens (pruned uncommitted turn)", Int32(initialCachedSessionTokenCount))
                 } else {
+                    supportsPartialTrim = false
                     NSLog("[LlamaEngine] Cancellation: backend rejected partial sequence trim (hybrid/recurrent state), safely cleared entire session")
                 }
             } else {
@@ -1454,20 +1459,9 @@ public actor LlamaEngine: LLMEngine {
         private(set) var turns: [ChatTurn] = []
         private(set) var tokens: [llama_token] = []
         private(set) var tokenCount: Int = 0
-        /// Tracks whether the active backend/model architecture supports partial KV cache trimming via seq_rm.
-        /// Once rejected (e.g. Qwen 3.5 hybrid Gated DeltaNet state), further attempts are bypassed.
-        private(set) var supportsPartialTrim: Bool = true
 
         var isEmpty: Bool { turns.isEmpty && tokens.isEmpty && tokenCount == 0 }
         var hasImages: Bool { turns.contains { !$0.images.isEmpty } }
-
-        mutating func markPartialTrimUnsupported() {
-            supportsPartialTrim = false
-        }
-
-        mutating func resetCapability() {
-            supportsPartialTrim = true
-        }
 
         /// Reset physical KV memory (if context is non-nil) and clear all Swift state.
         mutating func reset(context: OpaquePointer? = nil) {
@@ -1494,8 +1488,7 @@ public actor LlamaEngine: LLMEngine {
         /// cache state.
         ///
         /// If `llama_memory_seq_rm` fails (e.g. Qwen 3.5 hybrid Gated DeltaNet / recurrent state
-        /// cannot be partially rewound), `supportsPartialTrim` is set to `false` and a full
-        /// `reset(context:)` is performed to enforce consistency.
+        /// cannot be partially rewound), a full `reset(context:)` is performed to enforce consistency.
         @discardableResult
         mutating func prune(to count: Int, context: OpaquePointer?) -> Bool {
             guard let context else {
@@ -1511,7 +1504,6 @@ public actor LlamaEngine: LLMEngine {
                 // `turns` is intentionally left intact — see doc comment above.
                 return true
             } else {
-                supportsPartialTrim = false
                 reset(context: context)
                 return false
             }
