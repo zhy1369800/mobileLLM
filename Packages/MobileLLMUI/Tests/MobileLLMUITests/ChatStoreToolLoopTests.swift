@@ -425,25 +425,32 @@ final class ChatStoreToolLoopTests: XCTestCase {
         XCTAssertEqual(run.rawCallText, Self.calcCall)
         XCTAssertNotNil(run.rawResponseText)
 
-        // Now prepare context for the next turn:
+        // Now prepare context for the next turn using the public chatTurns API —
+        // this is exactly the path the real engine uses during replay, so a byte-for-byte
+        // match here proves KV cache alignment without mocking.
         let convo = try XCTUnwrap(chat.activeConversation)
-        let prepared = ChatStore.preparedContext(conversation: convo, cap: 4096)
-        let preparedTurns = prepared.messages
+        let preparedTurns = ChatStore.chatTurns(
+            messages: convo.messages,
+            systemPrompt: nil,   // strip system for structural clarity; KV alignment is message-content only
+            cap: 4096
+        )
 
-        // Expectation:
-        // [0] User: "what is 17+25?"
-        // [1] Assistant: exact rawCallText
-        // [2] User: exact rawResponseText
+        // Expected turn layout after a single tool round-trip (no system prompt):
+        // [0] User:      "what is 17+25?"
+        // [1] Assistant: rawCallText  (exact bytes the model generated live)
+        // [2] User:      rawResponseText  (exact bytes fed back to the model)
         // [3] Assistant: "The answer is 42."
-        XCTAssertEqual(preparedTurns.count, 4)
+        XCTAssertEqual(preparedTurns.count, 4, "four turns: user → tool-call → tool-response → answer")
         XCTAssertEqual(preparedTurns[0].role, .user)
         XCTAssertEqual(preparedTurns[0].content, "what is 17+25?")
 
         XCTAssertEqual(preparedTurns[1].role, .assistant)
-        XCTAssertEqual(preparedTurns[1].content, run.rawCallText, "Replayed tool call must match rawCallText byte-for-byte")
+        XCTAssertEqual(preparedTurns[1].content, run.rawCallText,
+                       "Replayed tool call must match rawCallText byte-for-byte to preserve KV prefix")
 
         XCTAssertEqual(preparedTurns[2].role, .user)
-        XCTAssertEqual(preparedTurns[2].content, run.rawResponseText, "Replayed tool response must match rawResponseText byte-for-byte")
+        XCTAssertEqual(preparedTurns[2].content, run.rawResponseText,
+                       "Replayed tool response must match rawResponseText byte-for-byte to preserve KV prefix")
 
         XCTAssertEqual(preparedTurns[3].role, .assistant)
         XCTAssertEqual(preparedTurns[3].content, "The answer is 42.")
