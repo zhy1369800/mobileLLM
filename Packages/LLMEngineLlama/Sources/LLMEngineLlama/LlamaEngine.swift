@@ -1479,10 +1479,23 @@ public actor LlamaEngine: LLMEngine {
             tokenCount = 0
         }
 
-        /// Prune the session cache to `count` tokens.
-        /// If llama_memory_seq_rm succeeds, trims `tokens` and updates `tokenCount`.
-        /// If it fails (e.g. hybrid SSM / recurrent state rejection on Qwen 3.5),
-        /// it automatically performs a full `reset(context:)` to enforce consistency.
+        /// Prune the session cache to `count` tokens by trimming the physical KV cache.
+        ///
+        /// **What is pruned**: `tokens` (the authoritative KV-position map) and `tokenCount` are
+        /// truncated to `count`. This is the only source of truth for which physical slots are live.
+        ///
+        /// **What is intentionally NOT pruned**: `turns` is left untouched. `turns` is used solely
+        /// as the source of truth for reconstructing the next prompt (KV marker), not as an independent
+        /// turn counter. After a successful prefix rollback the logical turn boundaries are still valid —
+        /// only the suffix tokens are evicted from the KV cache, so `turns` must remain intact so the
+        /// next `chatTurns()` call can rebuild the correct full prompt. Do NOT use `turns.count` to
+        /// infer how many rounds of conversation have been physically prefilled; use `tokenCount` for
+        /// that. Callers that need to count logical turns should query the conversation store, not this
+        /// cache state.
+        ///
+        /// If `llama_memory_seq_rm` fails (e.g. Qwen 3.5 hybrid Gated DeltaNet / recurrent state
+        /// cannot be partially rewound), `supportsPartialTrim` is set to `false` and a full
+        /// `reset(context:)` is performed to enforce consistency.
         @discardableResult
         mutating func prune(to count: Int, context: OpaquePointer?) -> Bool {
             guard let context else {
@@ -1495,6 +1508,7 @@ public actor LlamaEngine: LLMEngine {
                     tokens = Array(tokens.prefix(count))
                 }
                 tokenCount = count
+                // `turns` is intentionally left intact — see doc comment above.
                 return true
             } else {
                 supportsPartialTrim = false
