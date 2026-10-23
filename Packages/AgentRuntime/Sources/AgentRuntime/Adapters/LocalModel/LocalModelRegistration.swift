@@ -53,8 +53,8 @@ public struct LocalModelRegistration: Hashable, Sendable {
 
         let selection = AgentModelSelection(
             providerID: providerID,
-            modelID: try AgentModelID(model.id),
-            variantID: try AgentModelVariantID(variant.id),
+            modelID: try Self.boundedModelID(model.id),
+            variantID: try Self.boundedVariantID(variant.id),
             capabilityVersion: capabilityVersion
         )
         var features: [AgentModelCapability] = [.textToolDialect, .multipleToolCalls]
@@ -84,29 +84,75 @@ public struct LocalModelRegistration: Hashable, Sendable {
         toolDialect = ToolDialect(model.architecture.promptTemplate)
     }
 
+    /// Returns a contract-valid model identifier, bounding overlong (>256 UTF-8 byte) Explore IDs with a
+    /// deterministic SHA-256 suffix while preserving all normal identifiers byte-for-byte.
+    public static func boundedModelID(_ rawValue: String) throws -> AgentModelID {
+        try AgentModelID(boundedNamedIdentifier(rawValue, domain: "mobilellm.local-model-id.v1"))
+    }
+
+    /// Returns a contract-valid variant identifier, bounding overlong (>256 UTF-8 byte) `sourceArtifactV2`
+    /// identifiers with a deterministic SHA-256 suffix while preserving all normal identifiers byte-for-byte.
+    public static func boundedVariantID(_ rawValue: String) throws -> AgentModelVariantID {
+        try AgentModelVariantID(boundedNamedIdentifier(rawValue, domain: "mobilellm.local-variant-id.v1"))
+    }
+
+    private static func boundedNamedIdentifier(_ rawValue: String, domain: String) -> String {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return rawValue }
+        if trimmed.utf8.count <= 256,
+           trimmed.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) })
+        {
+            return trimmed
+        }
+        let cleanedScalars = trimmed.unicodeScalars.filter {
+            !CharacterSet.controlCharacters.contains($0)
+        }
+        var prefix = ""
+        for scalar in cleanedScalars {
+            let next = String(scalar)
+            if prefix.utf8.count + next.utf8.count > 180 { break }
+            prefix += next
+        }
+        prefix = prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+        let digest = StableDigest.fingerprint(
+            domain: domain,
+            components: [Data(rawValue.utf8)]
+        ).rawValue
+        return prefix.isEmpty ? digest : "\(prefix).\(digest)"
+    }
+
     /// Builds every registrable (model, variant) pair across a model catalog, skipping variants whose
-    /// backend this runtime cannot serve (AWQ). Assembly must not fail as a whole because one
-    /// explore-adopted variant is unsupported: a half-downloaded or AWQ-only community model stays out
-    /// of the registry while every other model keeps the agent runtime usable.
+    /// backend this runtime cannot serve (AWQ), whose persisted community metadata is malformed, or whose
+    /// derived selection/provider identity collides with an earlier entry. Assembly must not fail as a
+    /// whole because one explore-adopted record in `adopted-models.json` is invalid or duplicated.
     public static func registrations(
         for models: [LLMModel],
         capabilityVersion: SemanticVersion,
         providerID: (LLMModel, LLMVariant) throws -> AgentModelProviderID,
         weightsDirectory: (LLMVariant) -> URL
     ) throws -> [LocalModelRegistration] {
-        try models.flatMap { model -> [LocalModelRegistration] in
-            try model.variants
-                .filter { $0.backend != .awqUnsupported }
-                .map { variant in
-                    try LocalModelRegistration(
-                        providerID: try providerID(model, variant),
-                        capabilityVersion: capabilityVersion,
-                        model: model,
-                        variant: variant,
-                        weightsDirectory: weightsDirectory(variant)
-                    )
+        var result: [LocalModelRegistration] = []
+        var seenSelections: Set<AgentModelSelection> = []
+        var seenProviderIDs: Set<AgentModelProviderID> = []
+        for model in models {
+            for variant in model.variants where variant.backend != .awqUnsupported {
+                guard let resolvedProviderID = try? providerID(model, variant),
+                      let registration = try? LocalModelRegistration(
+                          providerID: resolvedProviderID,
+                          capabilityVersion: capabilityVersion,
+                          model: model,
+                          variant: variant,
+                          weightsDirectory: weightsDirectory(variant)
+                      ),
+                      seenSelections.insert(registration.selection).inserted,
+                      seenProviderIDs.insert(registration.selection.providerID).inserted
+                else {
+                    continue
                 }
+                result.append(registration)
+            }
         }
+        return result
     }
 }
 

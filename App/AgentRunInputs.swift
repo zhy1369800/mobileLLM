@@ -272,11 +272,38 @@ struct AppFrozenInputBuilder: Sendable {
 
     /// Stable provider identity for one exact (model, variant) registration. The request builder and
     /// the app assembly MUST derive it the same way or the runtime cannot resolve the pinned provider.
+    ///
+    /// Curated v1 variants fit within 120 characters and keep their human-readable
+    /// `local.mobilellm.<model>.<variant>` identifier unchanged. Explore (`sourceArtifactV2`) variants
+    /// embed base64url-encoded repository, 40-char commit SHA, and file path segments whose shared
+    /// prefix exceeds 120 characters; truncating with `.prefix(120)` collapsed every quant in a
+    /// repository onto the same provider ID and failed `StaticAgentModelProviderCatalog` with
+    /// `duplicateProvider`. Explore or overlong identifiers therefore bind a deterministic SHA-256
+    /// suffix over the full model and variant artifact identity.
     static func providerID(model: LLMModel, variant: LLMVariant) throws -> AgentModelProviderID {
-        try AgentModelProviderID(
-            "local.mobilellm.\(model.id).\(variant.id.sanitizedProviderComponent)"
-                .prefix(120).description
-        )
+        let modelComponent = model.id.sanitizedProviderComponent
+        let variantComponent = variant.id.sanitizedProviderComponent
+        let legacyCandidate = "local.mobilellm.\(model.id).\(variantComponent)"
+        if variant.identityScheme == .repositoryAndFormatV1,
+           model.id == modelComponent,
+           !modelComponent.isEmpty,
+           legacyCandidate.utf8.count <= 120,
+           let id = try? AgentModelProviderID(legacyCandidate)
+        {
+            return id
+        }
+        let digest = StableDigest.fingerprint(
+            domain: "mobilellm.local-provider-id.v1",
+            components: [
+                Data(model.id.utf8),
+                Data(variant.id.utf8),
+                Data(variant.quant.label.utf8),
+                Data((variant.source.fileName ?? "").utf8),
+                Data(variant.backend.rawValue.utf8),
+            ]
+        ).rawValue.prefix(32)
+        let boundedModel = modelComponent.isEmpty ? "model" : String(modelComponent.prefix(64))
+        return try AgentModelProviderID("local.mobilellm.\(boundedModel).\(digest)")
     }
 
     /// The exact selection pinned for a run: online when the snapshot opted in, otherwise the local

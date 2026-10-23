@@ -154,6 +154,53 @@ final class LocalModelRegistrationAndPromptTests: XCTestCase {
         ))
     }
 
+    func testCatalogBuilderHandlesOverlongExploreVariantIDsAndDeduplicatesCollidingProviders() throws {
+        let version = SemanticVersion("1.0.0")!
+        let sha = "0123456789abcdef0123456789abcdef01234567"
+        let longRepo = "lmstudio-community/DeepSeek-R1-Distill-Qwen-32B-Instruct-2507-GGUF"
+        let quantA = RemoteVariant(
+            quantLabel: "Q4_K_M",
+            repo: longRepo,
+            revision: sha,
+            fileName: "sub/DeepSeek-R1-Distill-Qwen-32B-Instruct-2507-Q4_K_M.gguf",
+            sizeBytes: 1_000
+        )
+        let quantB = RemoteVariant(
+            quantLabel: "Q8_0",
+            repo: longRepo,
+            revision: sha,
+            fileName: "sub/DeepSeek-R1-Distill-Qwen-32B-Instruct-2507-Q8_0.gguf",
+            sizeBytes: 2_000
+        )
+        let exploreGGUF = RemoteModel(
+            id: longRepo,
+            name: "DeepSeek R1 Distill Qwen 32B",
+            publisher: "lmstudio-community",
+            engine: .llamaCpp,
+            downloads: 100,
+            revision: sha,
+            variants: [quantA, quantB]
+        ).asLLMModel(paramsBillions: 32)
+
+        XCTAssertGreaterThan(exploreGGUF.variants[0].id.utf8.count, 256)
+        let registrations = try LocalModelRegistration.registrations(
+            for: [LLMCatalog.bonsai8b, exploreGGUF],
+            capabilityVersion: version,
+            providerID: { model, variant in
+                let digest = StableDigest.fingerprint(
+                    domain: "test.provider.v1",
+                    components: [Data(model.id.utf8), Data(variant.id.utf8)]
+                ).rawValue.prefix(32)
+                return try AgentModelProviderID("local.test.\(digest)")
+            },
+            weightsDirectory: { _ in URL(fileURLWithPath: "/tmp/model") }
+        )
+        let exploreRegs = registrations.filter { $0.model.id == longRepo }
+        XCTAssertEqual(exploreRegs.count, 2)
+        XCTAssertNotEqual(exploreRegs[0].selection.variantID, exploreRegs[1].selection.variantID)
+        XCTAssertNotEqual(exploreRegs[0].selection.providerID, exploreRegs[1].selection.providerID)
+    }
+
     func testRegistryAndProviderRejectDuplicatesEmptyAndDescriptorMismatches() async throws {
         let harness = try LocalAdapterHarness.make()
         XCTAssertThrowsError(try LLMCoreModelResidencyDriver(

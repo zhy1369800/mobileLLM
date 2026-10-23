@@ -705,6 +705,87 @@ final class ToolV2AdapterTests: XCTestCase {
         let allowedLogicalIDs = Set(frozen.toolPolicy.allowedToolIDs)
         XCTAssertEqual(selectedLogicalIDs, allowedLogicalIDs)
     }
+
+    @MainActor
+    func testAgentRuntimeAssemblySucceedsWithMultiVariantExploreModelsInAdoptedRegistry() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appending(component: "agent-assembly-explore-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let sha = "a1b2c3d4e5f60123456789abcdef0123456789ab"
+        let ggufRepo = "bartowski/Qwen_Qwen3.5-9B-Instruct-GGUF"
+        let exploreGGUF = RemoteModel(
+            id: ggufRepo,
+            name: "Qwen3.5 9B",
+            publisher: "bartowski",
+            engine: .llamaCpp,
+            downloads: 500,
+            revision: sha,
+            variants: [
+                RemoteVariant(
+                    quantLabel: "Q4_K_M",
+                    repo: ggufRepo,
+                    revision: sha,
+                    fileName: "Qwen_Qwen3.5-9B-Instruct-Q4_K_M.gguf",
+                    sizeBytes: 5_600_000_000
+                ),
+                RemoteVariant(
+                    quantLabel: "Q8_0",
+                    repo: ggufRepo,
+                    revision: sha,
+                    fileName: "Qwen_Qwen3.5-9B-Instruct-Q8_0.gguf",
+                    sizeBytes: 9_500_000_000
+                ),
+                RemoteVariant(
+                    quantLabel: "BF16",
+                    repo: ggufRepo,
+                    revision: sha,
+                    fileName: "Qwen_Qwen3.5-9B-Instruct-bf16.gguf",
+                    sizeBytes: 18_000_000_000
+                ),
+            ]
+        ).asLLMModel(paramsBillions: 9)
+
+        let exploreMLX = RemoteModel(
+            id: "mlx-community/DeepSeek R1 Distill Qwen 32B",
+            name: "DeepSeek R1 Distill Qwen 32B",
+            publisher: "mlx-community",
+            engine: .mlx,
+            downloads: 300,
+            revision: sha,
+            variants: [
+                RemoteVariant(
+                    quantLabel: "4-bit",
+                    repo: "mlx-community/DeepSeek-R1-Distill-Qwen-32B-Instruct-4bit",
+                    revision: sha
+                ),
+                RemoteVariant(
+                    quantLabel: "8-bit",
+                    repo: "mlx-community/DeepSeek-R1-Distill-Qwen-32B-Instruct-8bit",
+                    revision: sha
+                ),
+            ]
+        ).asLLMModel(paramsBillions: 32)
+
+        let ggufProviderIDs = try exploreGGUF.variants.map {
+            try AppFrozenInputBuilder.providerID(model: exploreGGUF, variant: $0)
+        }
+        XCTAssertEqual(Set(ggufProviderIDs).count, exploreGGUF.variants.count)
+
+        let mlxProviderIDs = try exploreMLX.variants.map {
+            try AppFrozenInputBuilder.providerID(model: exploreMLX, variant: $0)
+        }
+        XCTAssertEqual(Set(mlxProviderIDs).count, exploreMLX.variants.count)
+
+        let assembly = try AgentRuntimeAssembly(
+            engine: MockLLMEngine(script: .init()),
+            downloadBase: directory,
+            conversationDirectory: directory,
+            models: LLMCatalog.all + [exploreGGUF, exploreMLX],
+            snapshot: { _, _, _, _ in nil }
+        )
+        XCTAssertNotNil(assembly.runStore)
+    }
 }
 
 // MARK: - Canned HTTP fixture
