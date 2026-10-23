@@ -297,9 +297,9 @@ struct AppFrozenInputBuilder: Sendable {
             components: [
                 Data(model.id.utf8),
                 Data(variant.id.utf8),
-                Data(variant.quant.label.utf8),
+                Data(variant.quant.displayName.utf8),
                 Data((variant.source.fileName ?? "").utf8),
-                Data(variant.backend.rawValue.utf8),
+                Data(variant.backend.formatTag.utf8),
             ]
         ).rawValue.prefix(32)
         let boundedModel = modelComponent.isEmpty ? "model" : String(modelComponent.prefix(64))
