@@ -1415,15 +1415,20 @@ public final class ChatStore {
         let dialect = currentToolDialect()
         let toolRuns = steps.compactMap { step -> ToolRun? in
             guard step.kind == .toolCall else { return nil }
-            let rawContent = step.detail.isEmpty ? step.title : step.detail
             let result = step.resultText ?? step.statusText
-            let rawResponse = result.map { ToolPrompt.frameToolResult($0, name: step.title, dialect: dialect) }
+            // `rawCallText` / `rawResponseText` are the exact (already framed) turns the local engine
+            // saw; without them, fall back to a canonical call built from the FULL arguments (the UI
+            // `detail` is truncated) and the bounded result summary.
             return ToolRun(
                 name: step.title,
                 arguments: step.detail,
                 result: result,
-                rawCallText: rawContent,
-                rawResponseText: rawResponse
+                rawCallText: step.rawCallText ?? ToolRun.canonicalCallText(
+                    name: step.title,
+                    arguments: step.rawArguments ?? ""
+                ),
+                rawResponseText: step.rawResponseText
+                    ?? result.map { ToolPrompt.frameToolResult($0, name: step.title, dialect: dialect) }
             )
         }
         if !toolRuns.isEmpty { message.toolRuns = toolRuns }

@@ -864,7 +864,10 @@ public final class AgentRuntimeAssembly {
         runStore = AgentRunStore(
             executor: executor,
             requestBuilder: builder,
-            recovery: SQLiteJournalRecoveryLister(repository: repository)
+            recovery: SQLiteJournalRecoveryLister(repository: repository),
+            takeRecordedToolTurns: { [residencyDriver] runID in
+                residencyDriver.takeRecordedToolTurns(for: runID)
+            }
         )
     }
 

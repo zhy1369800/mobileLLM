@@ -156,6 +156,45 @@ public struct LocalModelRegistration: Hashable, Sendable {
     }
 }
 
+/// Exact assistant tool-call and user tool-response texts fed to the local engine during a follow-up
+/// pass, preserved so the committed conversation record replays identical bytes on subsequent turns.
+public struct RecordedLocalToolTurn: Sendable, Equatable {
+    public let rawCallText: String
+    public let rawResponseText: String
+
+    public init(rawCallText: String, rawResponseText: String) {
+        self.rawCallText = rawCallText
+        self.rawResponseText = rawResponseText
+    }
+}
+
+private final class RecordedLocalToolTurnBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var order: [AgentRunID] = []
+    private var turnsByRun: [AgentRunID: [RecordedLocalToolTurn]] = [:]
+    private let capacity = 32
+
+    func record(_ turns: [RecordedLocalToolTurn], for runID: AgentRunID) {
+        lock.lock()
+        defer { lock.unlock() }
+        if turnsByRun[runID] == nil {
+            order.append(runID)
+            while order.count > capacity {
+                let oldest = order.removeFirst()
+                turnsByRun.removeValue(forKey: oldest)
+            }
+        }
+        turnsByRun[runID] = turns
+    }
+
+    func take(for runID: AgentRunID) -> [RecordedLocalToolTurn] {
+        lock.lock()
+        defer { lock.unlock() }
+        order.removeAll { $0 == runID }
+        return turnsByRun.removeValue(forKey: runID) ?? []
+    }
+}
+
 /// Owns exactly one `LLMEngine` and at most one resident selection.
 ///
 /// The runtime's resource arbiter owns policy. This actor supplies the narrow lifecycle driver and
@@ -174,6 +213,7 @@ public actor LLMCoreModelResidencyDriver: ModelResidencyDriver {
     private var residentSelection: AgentModelSelection?
     private var activeGeneration: ActiveGeneration?
     private var lifecycleTransition = false
+    private nonisolated let recordedToolTurnBuffer = RecordedLocalToolTurnBuffer()
 
     public init(
         engine: any LLMEngine,
@@ -320,5 +360,20 @@ public actor LLMCoreModelResidencyDriver: ModelResidencyDriver {
 
     public func clearPendingToolCallResponses(for runID: AgentRunID) {
         pendingToolCallResponses.removeValue(forKey: runID)
+    }
+
+    public nonisolated func recordCompiledToolTurns(
+        _ turns: [RecordedLocalToolTurn],
+        for runID: AgentRunID
+    ) {
+        recordedToolTurnBuffer.record(turns, for: runID)
+    }
+
+    /// Returns and forgets the turns recorded for `runID`, so tool payloads (calendar entries, fetched
+    /// pages) do not linger in memory after the answer is committed.
+    public nonisolated func takeRecordedToolTurns(
+        for runID: AgentRunID
+    ) -> [RecordedLocalToolTurn] {
+        recordedToolTurnBuffer.take(for: runID)
     }
 }

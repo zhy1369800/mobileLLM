@@ -433,14 +433,15 @@ struct AppFrozenInputBuilder: Sendable {
             if message.role == .assistant, let runs = message.toolRuns, !runs.isEmpty {
                 var expanded: [ConversationTurnContextSource] = []
                 for (idx, run) in runs.enumerated() {
-                    let callContent = run.rawCallText ?? (run.arguments.isEmpty ? run.name : run.arguments)
-                    let callID = Self.deterministicUUID(from: message.id, tag: "call-\(idx)")
-                    expanded.append(try ConversationTurnContextSource(
-                        messageID: MessageID(rawValue: callID),
-                        revision: "tool-call-\(idx)",
-                        role: .assistant,
-                        content: callContent
-                    ))
+                    if let callContent = run.replayCallText {
+                        let callID = Self.deterministicUUID(from: message.id, tag: "call-\(idx)")
+                        expanded.append(try ConversationTurnContextSource(
+                            messageID: MessageID(rawValue: callID),
+                            revision: "tool-call-\(idx)",
+                            role: .assistant,
+                            content: callContent
+                        ))
+                    }
                     if let result = run.result {
                         let resultID = Self.deterministicUUID(from: message.id, tag: "result-\(idx)")
                         let safeResult = run.rawResponseText ?? """

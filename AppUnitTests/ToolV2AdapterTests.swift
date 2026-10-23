@@ -223,7 +223,10 @@ final class ToolV2AdapterTests: XCTestCase {
     }
 
     @MainActor
-    private func makeSnapshot(userMessageID: UUID) -> AgentRunRequestSnapshot {
+    private func makeSnapshot(
+        userMessageID: UUID,
+        history: [Message] = []
+    ) -> AgentRunRequestSnapshot {
         let model = LLMCatalog.bonsai8b
         let variant = model.defaultVariantValue
         return AgentRunRequestSnapshot(
@@ -231,7 +234,7 @@ final class ToolV2AdapterTests: XCTestCase {
             userTurnID: userMessageID,
             text: "What's this?",
             imageRefs: [],
-            messages: [Message(id: userMessageID, role: .user, answer: "What's this?")],
+            messages: history + [Message(id: userMessageID, role: .user, answer: "What's this?")],
             systemPrompt: "You are helpful.",
             memoryFacts: [],
             activeSkill: nil,
@@ -785,6 +788,63 @@ final class ToolV2AdapterTests: XCTestCase {
             snapshot: { _, _, _, _ in nil }
         )
         XCTAssertNotNil(assembly.runStore)
+    }
+
+    @MainActor
+    func testFrozenHistoryReplaysExactRecordedToolTurns() throws {
+        let userID = UUID()
+        let currentID = UUID()
+        let exactCall = "好嘞，咱来查查你的日程安排。\n\n<tool_call>{\"name\":\"list_calendar_events\",\"arguments\":{}}</tool_call>"
+        let exactResponse = ToolDialect.qwen.frameResult(
+            "{\"kind\":\"untrustedToolResult\",\"payload\":\"Events in the next 7 days:\\n• 霜降\"}",
+            name: "external_data"
+        )
+        let snapshot = makeSnapshot(userMessageID: currentID, history: [
+            Message(id: userID, role: .user, answer: "查看我近期的日历"),
+            Message(
+                role: .assistant,
+                answer: "接下来一周只有一条日程安排：霜降。",
+                toolRuns: [ToolRun(
+                    name: "list_calendar_events",
+                    arguments: "{}",
+                    result: "Events in the next 7 days: • 霜降",
+                    rawCallText: exactCall,
+                    rawResponseText: exactResponse
+                )]
+            ),
+        ])
+        let builder = AppFrozenInputBuilder(capabilityVersion: SemanticVersion("1.0.0")!)
+
+        let frozen = try builder.frozenInputs(snapshot: snapshot, artifactReferences: [])
+
+        XCTAssertEqual(frozen.conversation.map(\.frozen.content), [
+            "查看我近期的日历",
+            exactCall,
+            exactResponse,
+            "接下来一周只有一条日程安排：霜降。",
+        ])
+    }
+
+    func testToolRunReplayCallTextRepairsLegacyRecordsAndSkipsBatchSiblings() {
+        let canonical = "<tool_call>{\"name\":\"list_calendar_events\",\"arguments\":{}}</tool_call>"
+        // Older builds stored the argument summary or bare name as the call text.
+        XCTAssertEqual(
+            ToolRun(name: "list_calendar_events", arguments: "{}", rawCallText: "{}").replayCallText,
+            canonical
+        )
+        XCTAssertEqual(
+            ToolRun(name: "list_calendar_events", arguments: "", rawCallText: "list_calendar_events")
+                .replayCallText,
+            canonical
+        )
+        XCTAssertEqual(ToolRun(name: "list_calendar_events", arguments: "{}").replayCallText, canonical)
+        // Later calls of one parallel batch share the first call's assistant turn.
+        XCTAssertNil(ToolRun(name: "b", arguments: "{}", rawCallText: "").replayCallText)
+        // Exact model text is replayed verbatim.
+        XCTAssertEqual(
+            ToolRun(name: "a", arguments: "{}", rawCallText: "prose\n<tool_call>x</tool_call>").replayCallText,
+            "prose\n<tool_call>x</tool_call>"
+        )
     }
 }
 

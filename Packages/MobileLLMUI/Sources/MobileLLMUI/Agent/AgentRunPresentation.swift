@@ -34,6 +34,13 @@ public struct AgentRunStep: Identifiable, Equatable, Sendable {
     /// Short user-visible outcome for a committed action (e.g. the text a tool returned). nil until
     /// the action settles, and for actions whose outcome carries no summary.
     public let resultText: String?
+    /// Full canonical JSON arguments for a tool call (never UI-truncated).
+    public let rawArguments: String?
+    /// Exact assistant tool-call text emitted by the model (including any leading prose and tags)
+    /// so multi-turn replay matches the live prompt byte-for-byte.
+    public let rawCallText: String?
+    /// Exact tool-response payload/frame fed back to the model during the run.
+    public let rawResponseText: String?
     public let status: Status
     public let sequence: UInt64
 
@@ -43,6 +50,9 @@ public struct AgentRunStep: Identifiable, Equatable, Sendable {
         title: String,
         detail: String = "",
         resultText: String? = nil,
+        rawArguments: String? = nil,
+        rawCallText: String? = nil,
+        rawResponseText: String? = nil,
         status: Status,
         sequence: UInt64
     ) {
@@ -51,6 +61,9 @@ public struct AgentRunStep: Identifiable, Equatable, Sendable {
         self.title = title
         self.detail = detail
         self.resultText = resultText
+        self.rawArguments = rawArguments
+        self.rawCallText = rawCallText
+        self.rawResponseText = rawResponseText
         self.status = status
         self.sequence = sequence
     }

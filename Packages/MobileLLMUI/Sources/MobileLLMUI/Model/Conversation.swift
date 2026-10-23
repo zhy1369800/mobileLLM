@@ -22,6 +22,25 @@ public struct ToolRun: Identifiable, Codable, Sendable, Equatable {
     }
 }
 
+public extension ToolRun {
+    /// A canonical Qwen-style call block, used only when the exact model text was never captured.
+    static func canonicalCallText(name: String, arguments: String) -> String {
+        let args = arguments.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "<tool_call>{\"name\":\"\(name)\",\"arguments\":\(args.isEmpty ? "{}" : args)}</tool_call>"
+    }
+
+    /// The assistant turn to replay before this tool's result, or nil when none should be emitted.
+    /// `""` marks a later call of a parallel batch whose single assistant turn was replayed with the
+    /// first call. Records written by an older build stored the argument summary (or bare name) as
+    /// the call text; those are repaired to a canonical call block instead of replaying `{}`.
+    var replayCallText: String? {
+        guard let raw = rawCallText else { return Self.canonicalCallText(name: name, arguments: arguments) }
+        if raw.isEmpty { return nil }
+        if raw == arguments || raw == name { return Self.canonicalCallText(name: name, arguments: arguments) }
+        return raw
+    }
+}
+
 /// A reference to one image the user attached to a turn. The bytes live as a FILE
 /// (`attachments/<id>.jpg` under the conversation store root, written/deleted by `ConversationStore`),
 /// never inlined into the conversation JSON — so a multi-MB photo doesn't bloat every record load, and a

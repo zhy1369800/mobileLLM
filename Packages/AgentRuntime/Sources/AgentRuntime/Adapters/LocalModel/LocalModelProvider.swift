@@ -412,6 +412,7 @@ private enum LocalModelGeneration {
         let priorResponses = await residencyDriver?.pendingToolCallResponses(for: request.runID) ?? []
         var toolResponseIndex = 0
         var previousRole: AgentModelMessageRole? = nil
+        var compiledToolTurns: [RecordedLocalToolTurn] = []
         for message in request.messages {
             if isInternalRunStateMessage(message) {
                 if let repair = extractRepairInstruction(from: message.content) {
@@ -437,11 +438,13 @@ private enum LocalModelGeneration {
             }
             let isToolMessage = (message.role == .tool && message.isUntrustedData)
             let isFirstOfToolGroup = isToolMessage && (previousRole != .tool)
+            var rawCallText = ""
             if isFirstOfToolGroup {
                 if toolResponseIndex < priorResponses.count {
+                    rawCallText = priorResponses[toolResponseIndex]
                     turns.append(ChatTurn(
                         role: .assistant,
-                        content: priorResponses[toolResponseIndex]
+                        content: rawCallText
                     ))
                     toolResponseIndex += 1
                 }
@@ -458,6 +461,15 @@ private enum LocalModelGeneration {
                 content: content,
                 images: images
             ))
+            if isToolMessage {
+                compiledToolTurns.append(RecordedLocalToolTurn(
+                    rawCallText: rawCallText,
+                    rawResponseText: content
+                ))
+            }
+        }
+        if !compiledToolTurns.isEmpty {
+            residencyDriver?.recordCompiledToolTurns(compiledToolTurns, for: request.runID)
         }
 
         let bindings = LocalModelPromptRenderer.bindings(for: request.advertisedTools)

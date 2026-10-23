@@ -84,6 +84,8 @@ public final class AgentRunStore {
     private let executor: any AgentExecutor
     private let requestBuilder: any AgentRunRequestBuilding
     private let recovery: (any AgentRunRecoveryListing)?
+    /// Consumes (reads and forgets) the exact tool turns the local provider fed to the engine.
+    private let takeRecordedToolTurns: @Sendable (AgentRunID) -> [RecordedLocalToolTurn]
     private var handles: [AgentRunID: any AgentExecutionHandle] = [:]
     private var eventTasks: [AgentRunID: Task<Void, Never>] = [:]
     private var ephemeralTasks: [AgentRunID: Task<Void, Never>] = [:]
@@ -91,11 +93,13 @@ public final class AgentRunStore {
     public init(
         executor: any AgentExecutor,
         requestBuilder: any AgentRunRequestBuilding,
-        recovery: (any AgentRunRecoveryListing)? = nil
+        recovery: (any AgentRunRecoveryListing)? = nil,
+        takeRecordedToolTurns: @escaping @Sendable (AgentRunID) -> [RecordedLocalToolTurn] = { _ in [] }
     ) {
         self.executor = executor
         self.requestBuilder = requestBuilder
         self.recovery = recovery
+        self.takeRecordedToolTurns = takeRecordedToolTurns
     }
 
     // MARK: - Submitting
@@ -398,6 +402,10 @@ public final class AgentRunStore {
                     kind: entry.kind,
                     title: entry.title,
                     detail: entry.detail,
+                    resultText: entry.resultText,
+                    rawArguments: entry.rawArguments,
+                    rawCallText: entry.rawCallText,
+                    rawResponseText: entry.rawResponseText,
                     status: .succeeded,
                     sequence: entry.sequence
                 )
@@ -468,10 +476,11 @@ public final class AgentRunStore {
                 sequence: record.sequence
             ))
         case .toolIntentRecorded(let prepared):
-            steps.append(step(
+            steps.append(AgentRunStep(
                 kind: .toolCall,
                 title: Self.toolDisplayName(prepared.plan.subjectID),
                 detail: Self.toolArgumentSummary(prepared.plan.canonicalArguments?.string),
+                rawArguments: prepared.plan.canonicalArguments?.string,
                 status: .running,
                 sequence: record.sequence
             ))
@@ -498,6 +507,7 @@ public final class AgentRunStore {
                     title: steps[index].title,
                     detail: steps[index].detail,
                     resultText: resultText,
+                    rawArguments: steps[index].rawArguments,
                     status: status,
                     sequence: steps[index].sequence
                 )
@@ -598,13 +608,17 @@ public final class AgentRunStore {
         reasoning: String,
         steps: [AgentRunStep]
     ) {
+        let finalSteps = Self.applyingRecordedToolTurns(
+            takeRecordedToolTurns(run.runID),
+            to: deduplicated(steps)
+        )
         runs[conversationID] = run.replacing(
-            steps: deduplicated(steps),
+            steps: finalSteps,
             provisionalText: "",
             finalText: text
         )
         guard let assistantMessageID = assistantMessageIDs[conversationID] else { return }
-        onAnswer?(conversationID, assistantMessageID, text, reasoning.isEmpty ? nil : reasoning, steps)
+        onAnswer?(conversationID, assistantMessageID, text, reasoning.isEmpty ? nil : reasoning, finalSteps)
         if run.isTerminal {
             eventTasks[run.runID]?.cancel()
             ephemeralTasks[run.runID]?.cancel()
@@ -796,6 +810,38 @@ public final class AgentRunStore {
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespaces)
         return joined.count <= 240 ? joined : String(joined.prefix(237)) + "…"
+    }
+
+    /// Overlays the exact tool-call / framed tool-result turns the local provider fed to the engine
+    /// on its final pass onto the `.toolCall` steps, so the next turn replays byte-identical history
+    /// (prefix KV-cache reuse). Matching is positional: the replay order equals the prompt order
+    /// even when parallel outcomes settle out of intent order (a run's name may then pair with a
+    /// sibling's raw text, which only affects replay bytes, never the UI summary).
+    private static func applyingRecordedToolTurns(
+        _ recorded: [RecordedLocalToolTurn],
+        to steps: [AgentRunStep]
+    ) -> [AgentRunStep] {
+        guard !recorded.isEmpty else { return steps }
+        var result = steps
+        var recordedIndex = 0
+        for index in result.indices where result[index].kind == .toolCall {
+            guard recordedIndex < recorded.count else { break }
+            let turn = recorded[recordedIndex]
+            recordedIndex += 1
+            result[index] = AgentRunStep(
+                id: result[index].id,
+                kind: result[index].kind,
+                title: result[index].title,
+                detail: result[index].detail,
+                resultText: result[index].resultText,
+                rawArguments: result[index].rawArguments,
+                rawCallText: turn.rawCallText,
+                rawResponseText: turn.rawResponseText,
+                status: result[index].status,
+                sequence: result[index].sequence
+            )
+        }
+        return result
     }
 
     /// Redacted failure text including the typed reason when present, so device diagnostics show why

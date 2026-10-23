@@ -78,8 +78,9 @@ extension ChatStore {
                         """
                         kept.append(ChatTurn(role: .user, content: safeResult))
                     }
-                    let callContent = run.rawCallText ?? (run.arguments.isEmpty ? run.name : run.arguments)
-                    kept.append(ChatTurn(role: .assistant, content: callContent))
+                    if let callContent = run.replayCallText {
+                        kept.append(ChatTurn(role: .assistant, content: callContent))
+                    }
                 }
             } else {
                 kept.append(ChatTurn(role: role, content: message.answer, images: turnImages))
