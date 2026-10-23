@@ -83,6 +83,31 @@ public struct LocalModelRegistration: Hashable, Sendable {
         )
         toolDialect = ToolDialect(model.architecture.promptTemplate)
     }
+
+    /// Builds every registrable (model, variant) pair across a model catalog, skipping variants whose
+    /// backend this runtime cannot serve (AWQ). Assembly must not fail as a whole because one
+    /// explore-adopted variant is unsupported: a half-downloaded or AWQ-only community model stays out
+    /// of the registry while every other model keeps the agent runtime usable.
+    public static func registrations(
+        for models: [LLMModel],
+        capabilityVersion: SemanticVersion,
+        providerID: (LLMModel, LLMVariant) throws -> AgentModelProviderID,
+        weightsDirectory: (LLMVariant) -> URL
+    ) throws -> [LocalModelRegistration] {
+        try models.flatMap { model -> [LocalModelRegistration] in
+            try model.variants
+                .filter { $0.backend != .awqUnsupported }
+                .map { variant in
+                    try LocalModelRegistration(
+                        providerID: try providerID(model, variant),
+                        capabilityVersion: capabilityVersion,
+                        model: model,
+                        variant: variant,
+                        weightsDirectory: weightsDirectory(variant)
+                    )
+                }
+        }
+    }
 }
 
 /// Owns exactly one `LLMEngine` and at most one resident selection.

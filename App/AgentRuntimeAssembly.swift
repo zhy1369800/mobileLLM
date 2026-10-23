@@ -734,18 +734,20 @@ public final class AgentRuntimeAssembly {
         let diagnosticLogger = AgentDiagnosticLogger()
 
         let capabilityVersion = SemanticVersion("1.0.0")!
-        let registrations = try models.flatMap { model -> [LocalModelRegistration] in
-            try model.variants.map { variant in
-                try LocalModelRegistration(
-                    providerID: try AppFrozenInputBuilder.providerID(model: model, variant: variant),
-                    capabilityVersion: capabilityVersion,
-                    model: model,
-                    variant: variant,
-                    weightsDirectory: ModelDownloader(downloadBase: downloadBase)
-                        .localURL(repoId: variant.source.huggingFaceRepo)
-                )
+        // Variants this runtime cannot serve (AWQ) are skipped, never fatal: one unsupported
+        // explore-adopted model (e.g. a download interrupted mid-flight that the adopted registry
+        // keeps around for resumability) must not disable the agent runtime for every other model.
+        let registrations = try LocalModelRegistration.registrations(
+            for: models,
+            capabilityVersion: capabilityVersion,
+            providerID: { model, variant in
+                try AppFrozenInputBuilder.providerID(model: model, variant: variant)
+            },
+            weightsDirectory: { variant in
+                ModelDownloader(downloadBase: downloadBase)
+                    .localURL(repoId: variant.source.huggingFaceRepo)
             }
-        }
+        )
         let residencyDriver = try LLMCoreModelResidencyDriver(engine: engine, registrations: registrations)
         var providers: [any AgentModelProvider] = try registrations.map { registration in
             try LocalModelProvider(

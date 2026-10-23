@@ -110,6 +110,50 @@ final class LocalModelRegistrationAndPromptTests: XCTestCase {
         XCTAssertThrowsError(try LocalModelAdapterConfiguration(maximumBufferedActionBytes: 0))
     }
 
+    func testCatalogBuilderSkipsUnsupportedBackendsInsteadOfFailingAssembly() throws {
+        let provider = try AgentModelProviderID("local.builder")
+        let version = SemanticVersion("1.0.0")!
+        let awq = LLMVariant(
+            quant: .other("AWQ"),
+            backend: .awqUnsupported,
+            onDiskBytes: 1,
+            source: ModelSource(huggingFaceRepo: "fixture/awq")
+        )
+        let unsupported = LLMModel(
+            id: "fixture-awq",
+            displayName: "fixture",
+            family: .unknown,
+            publisher: "fixture",
+            summary: "fixture",
+            license: .unknown,
+            architecture: LLMCatalog.bonsai8b.architecture,
+            variants: [awq],
+            defaultVariant: awq.quant
+        )
+        // Assembly must stay usable when the catalog contains an unsupported variant — the exact
+        // shape a half-downloaded / explore-adopted AWQ model takes in the persisted registry.
+        let registrations = try LocalModelRegistration.registrations(
+            for: [LLMCatalog.bonsai8b, unsupported],
+            capabilityVersion: version,
+            providerID: { model, variant in
+                try AgentModelProviderID("local.builder.\(model.id).\(variant.id)")
+            },
+            weightsDirectory: { _ in URL(fileURLWithPath: "/tmp/model") }
+        )
+        let registeredModels = registrations.map(\.selection.modelID.rawValue)
+        XCTAssertTrue(registeredModels.contains(LLMCatalog.bonsai8b.id))
+        XCTAssertFalse(registeredModels.contains(unsupported.id))
+        XCTAssertFalse(registrations.contains { $0.variant.backend == .awqUnsupported })
+        // The registration guard itself still fails closed if any caller bypasses the builder.
+        XCTAssertThrowsError(try LocalModelRegistration(
+            providerID: provider,
+            capabilityVersion: version,
+            model: unsupported,
+            variant: awq,
+            weightsDirectory: URL(fileURLWithPath: "/tmp/awq")
+        ))
+    }
+
     func testRegistryAndProviderRejectDuplicatesEmptyAndDescriptorMismatches() async throws {
         let harness = try LocalAdapterHarness.make()
         XCTAssertThrowsError(try LLMCoreModelResidencyDriver(
