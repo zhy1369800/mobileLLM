@@ -80,6 +80,7 @@ public actor LlamaEngine: LLMEngine {
     private var projectorPath: String?
     private var contextCap: Int = 0          // the n_ctx the live context was built with
     private var contextKVBits: Int = -1      // the Sampling.kvBits the live context's KV cache was built for
+    private var contextBatchSize: Int = 0    // the n_batch / n_ubatch the live context was built with
     private var sessionCache = SessionCacheState()
     private var loadedID: String?
     private var thinkingCapable = true
@@ -172,7 +173,7 @@ public actor LlamaEngine: LLMEngine {
         supportsPartialTrim = true
         NSLog("[LlamaEngine] Model loaded: id=%@, MTP supported=%d, gpu_layers=%d",
               modelSpec.id, hasMtpSupport ? 1 : 0, loadedGpuLayers)
-        context = nil; contextCap = 0; contextKVBits = -1
+        context = nil; contextCap = 0; contextKVBits = -1; contextBatchSize = 0
 
         // Vision: RESOLVE the projector now, LOAD it on first use. Bringing the vision encoder up here
         // cost every text-only chat the whole mmproj resident — ~940 MB for Gemma 4 E2B, on a phone whose
@@ -236,7 +237,7 @@ public actor LlamaEngine: LLMEngine {
         if let model { llama_model_free(model) }
         mtmdContext = nil
         projectorPath = nil
-        context = nil; model = nil; vocab = nil; loadedID = nil; contextCap = 0; contextKVBits = -1
+        context = nil; model = nil; vocab = nil; loadedID = nil; contextCap = 0; contextKVBits = -1; contextBatchSize = 0
         loadedGpuLayers = 0
         hasMtpSupport = false
         supportsPartialTrim = true
@@ -247,9 +248,10 @@ public actor LlamaEngine: LLMEngine {
     /// from `load` because n_ctx (and the KV-cache dtype) is fixed at context-creation on llama.cpp, while
     /// both are per-generation levers. `kvBits` mirrors `Sampling.kvBits`: 0 = f16 (default), 4 = Q4_0,
     /// 8 = Q8_0. Rebuilds when EITHER the size or the KV width changes.
-    private func ensureContext(cap: Int, kvBits: Int) throws {
+    private func ensureContext(cap: Int, kvBits: Int, batchSize: Int = 512) throws {
         let target = max(512, cap)
-        if context != nil, contextCap == target, contextKVBits == kvBits {
+        let targetBatch = max(128, min(batchSize, target))
+        if context != nil, contextCap == target, contextKVBits == kvBits, contextBatchSize == targetBatch {
             // Keep KV cache resident for prefix reuse; prefill will clear if history diverges
             return
         }
@@ -258,10 +260,11 @@ public actor LlamaEngine: LLMEngine {
         // Reset BEFORE the fallible init below: if llama_init_from_model throws out of this function,
         // `context` must not keep pointing at the freed allocation (a retry would double-free, and the
         // reuse branch above would llama_memory_clear freed memory — a user-reachable UAF via kvBits).
-        context = nil; contextCap = 0; contextKVBits = -1
+        context = nil; contextCap = 0; contextKVBits = -1; contextBatchSize = 0
         var cp = llama_context_default_params()
         cp.n_ctx = UInt32(target)
-        cp.n_batch = 512                                          // small compute buffer; prefill is chunked
+        cp.n_batch = UInt32(targetBatch)
+        cp.n_ubatch = UInt32(targetBatch)
         cp.n_threads = nThreads
         cp.n_threads_batch = nThreads
         // KV-cache quantization and Flash Attention.
@@ -291,7 +294,8 @@ public actor LlamaEngine: LLMEngine {
                   Int32(target), Int32(kvBits))
             var fallbackCp = llama_context_default_params()
             fallbackCp.n_ctx = UInt32(target)
-            fallbackCp.n_batch = 512
+            fallbackCp.n_batch = UInt32(targetBatch)
+            fallbackCp.n_ubatch = UInt32(targetBatch)
             fallbackCp.n_threads = nThreads
             fallbackCp.n_threads_batch = nThreads
             #if !targetEnvironment(simulator)
@@ -325,6 +329,7 @@ public actor LlamaEngine: LLMEngine {
         context = ctx
         contextCap = target
         contextKVBits = kvBits
+        contextBatchSize = targetBatch
     }
 
     // MARK: - Generation
@@ -381,7 +386,7 @@ public actor LlamaEngine: LLMEngine {
                 }
             }
 
-            try ensureContext(cap: params.contextTokenCap, kvBits: params.kvBits)
+            try ensureContext(cap: params.contextTokenCap, kvBits: params.kvBits, batchSize: params.prefillBatchSize)
             guard let context else { throw EngineError.contextInitFailed }
 
             let wantThinking = params.thinking && reasoningStyle.canThink
@@ -405,8 +410,14 @@ public actor LlamaEngine: LLMEngine {
             // attached image also reserves ~600 tokens — its vision-encoder embeddings consume real context.
             let reserve = Self.answerTokenReserve(maxTokens: params.maxTokens)
             let budget = contextCap - reserve
-            guard budget > 0, let kept = Self.fitMessages(messages, budget: budget, tokenCount: {
-                Self.tokenize(vocab: vocab, text: renderPrompt($0), addSpecial: true).count + Self.imageTokenCount($0)
+            var fittedPromptText = ""
+            var fittedPromptTokens: [llama_token] = []
+            guard budget > 0, let kept = Self.fitMessages(messages, budget: budget, tokenCount: { candidate in
+                let rendered = renderPrompt(candidate)
+                let toks = Self.tokenize(vocab: vocab, text: rendered, addSpecial: true)
+                fittedPromptText = rendered
+                fittedPromptTokens = toks
+                return toks.count + Self.imageTokenCount(candidate)
             }) else {
                 throw EngineError.contextWindowExceeded
             }
@@ -419,7 +430,7 @@ public actor LlamaEngine: LLMEngine {
             // through mtmd instead (marker injection → tokenize text+images → chunk-by-chunk encode/decode),
             // which leaves the KV populated so the decode loop below continues from where the prefill ended.
             let prefillStart = Date()
-            let nBatch = 512
+            let nBatch = max(128, contextBatchSize)
             var promptTokenCount: Int = 0
             var cachedRollbackTokensCount: Int = 0
             var rollbackDiagnosticMessage: String? = nil
@@ -489,7 +500,7 @@ public actor LlamaEngine: LLMEngine {
                     batch.n_tokens = Int32(chunkCount)
                     guard llama_decode(context, batch) == 0 else { throw EngineError.decodeFailed }
                     i = end
-                    await Task.yield()
+                    if Task.isCancelled || governance.isCancelled { throw CancellationError() }
                     guard self.context == context else { throw CancellationError() }
                 }
                 promptTokenCount = suffixTokens.count
@@ -503,7 +514,9 @@ public actor LlamaEngine: LLMEngine {
                                                          governance: governance)
             } else {
                 // Pure text evaluation: Prefix Rollback optimization with clean slate fallback
-                let promptTokens = Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true)
+                let promptTokens = fittedPromptTokens.isEmpty
+                    ? Self.tokenize(vocab: vocab, text: renderPrompt(kept), addSpecial: true)
+                    : fittedPromptTokens
                 prefilledPromptTokens = promptTokens
 
                 let residentHadImages = sessionCache.hasImages
@@ -583,7 +596,7 @@ public actor LlamaEngine: LLMEngine {
                                 break
                             }
                             i = end
-                            await Task.yield()
+                            if Task.isCancelled || governance.isCancelled { throw CancellationError() }
                             guard self.context == context else { throw CancellationError() }
                         }
                         if decodeError == nil {
@@ -625,7 +638,7 @@ public actor LlamaEngine: LLMEngine {
                         batch.n_tokens = Int32(chunkCount)
                         guard llama_decode(context, batch) == 0 else { throw EngineError.decodeFailed }
                         i = end
-                        await Task.yield()
+                        if Task.isCancelled || governance.isCancelled { throw CancellationError() }
                         guard self.context == context else { throw CancellationError() }
                     }
                     promptTokenCount = promptTokens.count
@@ -637,7 +650,11 @@ public actor LlamaEngine: LLMEngine {
             // Decode loop. Implicit-open reasoning (Qwen3.5) begins inside the think block. The answer
             // stripper removes a model's answer-wrapper tags (Hunyuan's <answer>…</answer>) so they never
             // reach the UI.
-            var splitter = ThinkSplitter(startInThink: reasoningStyle == .thinkTagsImplicitOpen && wantThinking)
+            let promptOpenedThink = wantThinking && (
+                reasoningStyle == .thinkTagsImplicitOpen
+                || fittedPromptText.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("<think>")
+            )
+            var splitter = ThinkSplitter(startInThink: promptOpenedThink)
             var decoder = PieceDecoder()
             var answerStripper = LiteralStripper(tags: Self.answerStripTags(for: promptTemplate))
             var fullGeneratedAnswer = ""
@@ -726,6 +743,13 @@ public actor LlamaEngine: LLMEngine {
             var kvPos: llama_pos = Int32(baseKvPos + promptTokenCount)
             let physicalHeadroom = max(0, contextCap - Int(kvPos))
             let effectiveMaxTokens = (maxTokens > 0) ? min(maxTokens, physicalHeadroom) : physicalHeadroom
+            let answerReserve = min(256, max(64, effectiveMaxTokens / 4))
+            let maxAllowedThinking = max(32, effectiveMaxTokens - answerReserve)
+            let effectiveThinkingBudget = params.thinkingBudget > 0
+                ? min(params.thinkingBudget, maxAllowedThinking)
+                : maxAllowedThinking
+            var thinkingTokens = 0
+            var forcedThinkClose = false
             var supportsKvRollback = true
             var consecutiveMisses = 0
             var backoffCooldown = 0
@@ -786,9 +810,39 @@ public actor LlamaEngine: LLMEngine {
                     toolGate.feed(text)
                     for d in splitter.feed(text) { emit(d) }
                 }
+                if splitter.isInsideThink {
+                    thinkingTokens += 1
+                }
                 genTokens += 1
                 generatedTokens.append(tokenID)
                 if useSpeculative { conversationTokens.append(tokenID) }
+
+                if splitter.isInsideThink && !forcedThinkClose && thinkingTokens >= effectiveThinkingBudget {
+                    forcedThinkClose = true
+                    let closeTag = "\n</think>\n\n"
+                    let closeTokens = Self.tokenize(vocab: vocab, text: closeTag, addSpecial: false)
+                    let allToDecode = [tokenID] + closeTokens
+                    if Int(kvPos) + allToDecode.count < contextCap {
+                        let closeCap = Int32(max(1, allToDecode.count))
+                        var closeBatch = llama_batch_init(closeCap, 0, 1)
+                        defer { llama_batch_free(closeBatch) }
+                        for (idx, tok) in allToDecode.enumerated() {
+                            let isLast = (idx == allToDecode.count - 1)
+                            Self.setBatchItem(&closeBatch, at: idx, maxCapacity: closeCap, token: tok, pos: kvPos + Int32(idx), logits: isLast)
+                        }
+                        closeBatch.n_tokens = Int32(allToDecode.count)
+                        guard llama_decode(context, closeBatch) == 0 else { throw EngineError.decodeFailed }
+                        kvPos += Int32(allToDecode.count)
+                        generatedTokens.append(contentsOf: closeTokens)
+                        if useSpeculative { conversationTokens.append(contentsOf: closeTokens) }
+                        let flushed = decoder.flush()
+                        if !flushed.isEmpty { for d in splitter.feed(flushed) { emit(d) } }
+                        for d in splitter.feed(closeTag) { emit(d) }
+                        NSLog("[LlamaEngine] Thinking budget reached (%d/%d tokens), forced </think> closure.",
+                              Int32(thinkingTokens), Int32(effectiveThinkingBudget))
+                        continue
+                    }
+                }
 
                 if genTokens >= effectiveMaxTokens {
                     if kvPos < contextCap {
@@ -811,7 +865,8 @@ public actor LlamaEngine: LLMEngine {
                     let drafts: [llama_token]
                     let stepDriver: String
                     let remainingKvForDrafts = max(0, contextCap - Int(kvPos) - 1)
-                    if supportsKvRollback && backoffCooldown == 0 && remainingKvForDrafts > 0 && !toolGate.isInsideToolCall {
+                    let nearThinkBudget = splitter.isInsideThink && (thinkingTokens + effectiveMaxDrafts >= effectiveThinkingBudget)
+                    if supportsKvRollback && backoffCooldown == 0 && remainingKvForDrafts > 0 && !toolGate.isInsideToolCall && !nearThinkBudget {
                         let draftCap = min(effectiveMaxDrafts, remainingKvForDrafts)
                         if let mtpDriver {
                             let mtpDrafts = mtpDriver.predict(lastToken: tokenID, maxDrafts: draftCap)
@@ -863,6 +918,7 @@ public actor LlamaEngine: LLMEngine {
                                     toolGate.feed(dText)
                                     for d in splitter.feed(dText) { emit(d) }
                                 }
+                                if splitter.isInsideThink { thinkingTokens += 1 }
                                 genTokens += 1
                                 generatedTokens.append(actual)
                                 conversationTokens.append(actual)
@@ -888,6 +944,7 @@ public actor LlamaEngine: LLMEngine {
                                         toolGate.feed(aText)
                                         for d in splitter.feed(aText) { emit(d) }
                                     }
+                                    if splitter.isInsideThink { thinkingTokens += 1 }
                                     genTokens += 1
                                     generatedTokens.append(actual)
                                     conversationTokens.append(actual)
@@ -1260,6 +1317,13 @@ public actor LlamaEngine: LLMEngine {
         }
         guard n > 0 else { return nil }
         let rendered = String(decoding: buf.prefix(Int(n)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        let trimmed = rendered.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasSuffix("<think>") {
+            return thinking ? rendered : (rendered + "\n</think>\n\n")
+        }
+        if trimmed.hasSuffix("</think>") {
+            return rendered
+        }
         return rendered + thinkSuffix(reasoning, thinking: thinking)
     }
 

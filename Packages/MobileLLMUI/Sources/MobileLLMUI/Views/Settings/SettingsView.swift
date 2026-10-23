@@ -461,6 +461,27 @@ struct SettingsView: View {
             sliderRow("Temperature", value: $settings.temperature, range: 0...1.5, step: 0.05, format: "%.2f")
             sliderRow("Top-p", value: $settings.topP, range: 0...1, step: 0.01, format: "%.2f")
             stepperRow("Max tokens", value: $settings.maxTokens, range: 128...4096, step: 128)
+            HStack {
+                Text("Thinking budget").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                Spacer()
+                Menu {
+                    ForEach([256, 512, 1_024, 2_048, 4_096], id: \.self) { value in
+                        Button("\(value) tokens") { settings.thinkingBudget = value }
+                    }
+                    Divider()
+                    Button("Auto (up to Max tokens)") { settings.thinkingBudget = 0 }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(settings.thinkingBudget == 0 ? "Auto" : "\(settings.thinkingBudget)")
+                            .font(.subheadline).foregroundStyle(Theme.accent)
+                        Image(systemName: "chevron.up.chevron.down").font(.caption2)
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                }
+                .fixedSize()
+            }
+            Text("Caps how many tokens the model spends inside <think> before automatically closing reasoning and starting the final answer.")
+                .font(.caption).foregroundStyle(Theme.textTertiary)
             if settings.openAIOnlineEnabled {
                 HStack {
                     Text("Online max output").font(.subheadline).foregroundStyle(Theme.textSecondary)
@@ -517,6 +538,25 @@ struct SettingsView: View {
                         .fixedSize()
                     }
                     Text("Off generates one token at a time (standard). Prompt Lookup drafts tokens using repeated patterns. Native MTP prioritizes built-in MTP layers when available, falling back to Prompt Lookup.")
+                        .font(.caption).foregroundStyle(Theme.textTertiary)
+                    HStack {
+                        Text("Prefill batch (n_batch / n_ubatch)").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                        Spacer()
+                        Menu {
+                            ForEach([256, 512, 1_024, 2_048], id: \.self) { value in
+                                Button("\(value)") { settings.prefillBatchSize = value }
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text("\(settings.prefillBatchSize)")
+                                    .font(.subheadline).foregroundStyle(Theme.accent)
+                                Image(systemName: "chevron.up.chevron.down").font(.caption2)
+                                    .foregroundStyle(Theme.textTertiary)
+                            }
+                        }
+                        .fixedSize()
+                    }
+                    Text("Controls llama.cpp n_batch and n_ubatch during prompt prefill. Larger values speed up first-turn prefill at the cost of higher peak compute buffer memory (512 default).")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                 }
                 .padding(.top, Theme.Space.xs)

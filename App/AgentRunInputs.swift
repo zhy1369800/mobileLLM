@@ -442,18 +442,13 @@ struct AppFrozenInputBuilder: Sendable {
                             content: callContent
                         ))
                     }
-                    if let result = run.result {
+                    if let responseContent = run.rawResponseText, !responseContent.isEmpty {
                         let resultID = Self.deterministicUUID(from: message.id, tag: "result-\(idx)")
-                        let safeResult = run.rawResponseText ?? """
-                        <tool_response>
-                        \(ToolDialect.sanitizeResult(result))
-                        </tool_response>
-                        """
                         expanded.append(try ConversationTurnContextSource(
                             messageID: MessageID(rawValue: resultID),
                             revision: "tool-result-\(idx)",
                             role: .user,
-                            content: safeResult
+                            content: responseContent
                         ))
                     }
                 }

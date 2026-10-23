@@ -547,6 +547,24 @@ private enum LocalModelGeneration {
         return .off
     }
 
+    private static func resolvedThinkingBudget() -> Int {
+        if let data = UserDefaults.standard.data(forKey: AppConfigurationKeys.settingsStorageKey),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let budget = json["thinkingBudget"] as? Int, budget >= 0 {
+            return budget
+        }
+        return 512
+    }
+
+    private static func resolvedPrefillBatchSize() -> Int {
+        if let data = UserDefaults.standard.data(forKey: AppConfigurationKeys.settingsStorageKey),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let batch = json["prefillBatchSize"] as? Int, batch >= 128 {
+            return batch
+        }
+        return 512
+    }
+
     private static func samplingParameters(
         _ parameters: AgentModelGenerationParameters,
         registration: LocalModelRegistration,
@@ -568,7 +586,9 @@ private enum LocalModelGeneration {
             kvBits: resolvedKVBits(configuration: configuration),
             quantizedKVStart: 256,
             seed: parameters.seed,
-            speculativeMode: resolvedSpeculativeMode(configuration: configuration)
+            speculativeMode: resolvedSpeculativeMode(configuration: configuration),
+            thinkingBudget: resolvedThinkingBudget(),
+            prefillBatchSize: resolvedPrefillBatchSize()
         )
     }
 

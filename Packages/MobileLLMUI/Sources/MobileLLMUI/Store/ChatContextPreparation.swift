@@ -70,13 +70,8 @@ extension ChatStore {
                     kept.append(ChatTurn(role: .assistant, content: message.answer))
                 }
                 for run in runs.reversed() {
-                    if let result = run.result {
-                        let safeResult = run.rawResponseText ?? """
-                        <tool_response>
-                        \(ToolDialect.sanitizeResult(result))
-                        </tool_response>
-                        """
-                        kept.append(ChatTurn(role: .user, content: safeResult))
+                    if let responseContent = run.rawResponseText, !responseContent.isEmpty {
+                        kept.append(ChatTurn(role: .user, content: responseContent))
                     }
                     if let callContent = run.replayCallText {
                         kept.append(ChatTurn(role: .assistant, content: callContent))

@@ -825,22 +825,9 @@ final class ToolV2AdapterTests: XCTestCase {
         ])
     }
 
-    func testToolRunReplayCallTextRepairsLegacyRecordsAndSkipsBatchSiblings() {
-        let canonical = "<tool_call>{\"name\":\"list_calendar_events\",\"arguments\":{}}</tool_call>"
-        // Older builds stored the argument summary or bare name as the call text.
-        XCTAssertEqual(
-            ToolRun(name: "list_calendar_events", arguments: "{}", rawCallText: "{}").replayCallText,
-            canonical
-        )
-        XCTAssertEqual(
-            ToolRun(name: "list_calendar_events", arguments: "", rawCallText: "list_calendar_events")
-                .replayCallText,
-            canonical
-        )
-        XCTAssertEqual(ToolRun(name: "list_calendar_events", arguments: "{}").replayCallText, canonical)
-        // Later calls of one parallel batch share the first call's assistant turn.
+    func testToolRunReplayCallTextUsesExactRawCallTextWithoutFallback() {
+        XCTAssertNil(ToolRun(name: "list_calendar_events", arguments: "{}").replayCallText)
         XCTAssertNil(ToolRun(name: "b", arguments: "{}", rawCallText: "").replayCallText)
-        // Exact model text is replayed verbatim.
         XCTAssertEqual(
             ToolRun(name: "a", arguments: "{}", rawCallText: "prose\n<tool_call>x</tool_call>").replayCallText,
             "prose\n<tool_call>x</tool_call>"

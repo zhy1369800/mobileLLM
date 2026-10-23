@@ -279,6 +279,10 @@ public final class AppSettings {
     public var kvBits: Int { didSet { persist() } }
     /// Speculative decoding mode (.off = standard autoregressive, .promptLookup, .mtp).
     public var speculativeMode: SpeculativeMode { didSet { persist() } }
+    /// Maximum tokens allowed inside `<think>` before forcing `</think>` closure; `0` = auto-bounded only by maxTokens.
+    public var thinkingBudget: Int { didSet { persist() } }
+    /// Prefill batch size (`n_batch` and `n_ubatch` in llama.cpp).
+    public var prefillBatchSize: Int { didSet { persist() } }
 
     // MARK: iOS 26 background continuation
 
@@ -427,6 +431,8 @@ public final class AppSettings {
         onlineContextLength = snap?.onlineContextLength ?? 32_768
         kvBits = snap?.kvBits ?? 8
         speculativeMode = snap?.speculativeMode ?? .off
+        thinkingBudget = snap?.thinkingBudget ?? 512
+        prefillBatchSize = snap?.prefillBatchSize ?? 512
         continuedProcessingEnabled = snap?.continuedProcessingEnabled ?? false
         localModelLoggingEnabled = snap?.localModelLoggingEnabled ?? false
         appearance = snap?.appearance ?? .system
@@ -490,7 +496,9 @@ public final class AppSettings {
         Sampling(temperature: temperature, topP: topP, topK: topK,
                  repetitionPenalty: repetitionPenalty, maxTokens: maxTokens, thinking: thinking,
                  contextTokenCap: effectiveContext(for: model), kvBits: kvBits,
-                 speculativeMode: speculativeMode)
+                 speculativeMode: speculativeMode,
+                 thinkingBudget: thinkingBudget,
+                 prefillBatchSize: prefillBatchSize)
     }
 
     /// The context the engine really gets for a model — the setting, clamped by the model's native ceiling.
@@ -585,6 +593,8 @@ public final class AppSettings {
         var onlineContextLength: Int? = nil
         var kvBits: Int
         var speculativeMode: SpeculativeMode? = nil
+        var thinkingBudget: Int? = nil
+        var prefillBatchSize: Int? = nil
         var continuedProcessingEnabled: Bool? = nil
         var localModelLoggingEnabled: Bool? = nil
         var appearance: AppearanceMode
@@ -623,6 +633,8 @@ public final class AppSettings {
                             contextLength: contextLength, onlineContextLength: onlineContextLength,
                             kvBits: kvBits,
                             speculativeMode: speculativeMode,
+                            thinkingBudget: thinkingBudget,
+                            prefillBatchSize: prefillBatchSize,
                             continuedProcessingEnabled: continuedProcessingEnabled,
                             localModelLoggingEnabled: localModelLoggingEnabled,
                             appearance: appearance,
@@ -671,6 +683,8 @@ public final class AppSettings {
         onlineContextLength = 32_768
         kvBits = 8
         speculativeMode = .off
+        thinkingBudget = 512
+        prefillBatchSize = 512
         continuedProcessingEnabled = false
         localModelLoggingEnabled = false
         appearance = .system

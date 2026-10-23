@@ -45,6 +45,10 @@ public struct Sampling: Sendable, Equatable, Codable {
     public var seed: UInt64?
     /// Speculative decoding mode (off by default).
     public var speculativeMode: SpeculativeMode
+    /// Maximum tokens allowed inside `<think>` before forcing `</think>` closure; `0` = bounded only by `maxTokens`.
+    public var thinkingBudget: Int
+    /// Prefill batch size (`n_batch` and `n_ubatch` in llama.cpp).
+    public var prefillBatchSize: Int
 
     public init(temperature: Double = 0.7,
                 topP: Double = 0.95,
@@ -56,7 +60,9 @@ public struct Sampling: Sendable, Equatable, Codable {
                 kvBits: Int = 8,
                 quantizedKVStart: Int = 256,
                 seed: UInt64? = nil,
-                speculativeMode: SpeculativeMode = .off) {
+                speculativeMode: SpeculativeMode = .off,
+                thinkingBudget: Int = 512,
+                prefillBatchSize: Int = 512) {
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
@@ -68,11 +74,14 @@ public struct Sampling: Sendable, Equatable, Codable {
         self.quantizedKVStart = quantizedKVStart
         self.seed = seed
         self.speculativeMode = speculativeMode
+        self.thinkingBudget = thinkingBudget
+        self.prefillBatchSize = prefillBatchSize
     }
 
     private enum CodingKeys: String, CodingKey {
         case temperature, topP, topK, repetitionPenalty, maxTokens, thinking
         case contextTokenCap, kvBits, quantizedKVStart, seed, speculativeMode
+        case thinkingBudget, prefillBatchSize
     }
 
     public init(from decoder: Decoder) throws {
@@ -88,6 +97,8 @@ public struct Sampling: Sendable, Equatable, Codable {
         self.quantizedKVStart = try container.decode(Int.self, forKey: .quantizedKVStart)
         self.seed = try container.decodeIfPresent(UInt64.self, forKey: .seed)
         self.speculativeMode = try container.decodeIfPresent(SpeculativeMode.self, forKey: .speculativeMode) ?? .off
+        self.thinkingBudget = try container.decodeIfPresent(Int.self, forKey: .thinkingBudget) ?? 512
+        self.prefillBatchSize = try container.decodeIfPresent(Int.self, forKey: .prefillBatchSize) ?? 512
     }
 }
 

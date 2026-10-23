@@ -28,6 +28,8 @@ public struct ThinkSplitter {
     private static let close = "</think>"
 
     private var inThink = false
+    /// Whether the splitter is currently inside an unclosed `<think>` region.
+    public var isInsideThink: Bool { inThink }
     private var sawOpen = false   // has an opening <think> been consumed (or did we start in-think)?
     private var buffer = ""   // unclassified pending characters, including a possible partial-tag tail
 
