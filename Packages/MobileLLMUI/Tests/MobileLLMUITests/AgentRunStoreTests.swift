@@ -299,6 +299,14 @@ final class AgentRunStoreTests: XCTestCase {
         XCTAssertEqual(deltas[0].1, "reasoning ")
         XCTAssertEqual(deltas[1].0, .answer)
         XCTAssertEqual(deltas[1].1, "answer ")
+        XCTAssertEqual(store.presentation(for: conversationID)?.provisionalText, "answer ")
+
+        // When a model pass resolves into a tool call rather than a final answer, its leading
+        // provisional prose is discarded so the follow-up synthesis pass starts clean.
+        handle.pushEphemeral(.provisionalAnswerResolved(.discarded("answer ")))
+        try await waitUntil { deltas.count == 3 }
+        XCTAssertEqual(deltas[2].0, .discardProvisionalAnswer)
+        XCTAssertEqual(store.presentation(for: conversationID)?.provisionalText, "")
 
         // A terminal event without an answer must settle the run through onRunTerminated.
         handle.push(

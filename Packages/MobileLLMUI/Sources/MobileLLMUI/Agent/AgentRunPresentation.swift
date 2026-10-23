@@ -31,6 +31,9 @@ public struct AgentRunStep: Identifiable, Equatable, Sendable {
     public let kind: Kind
     public let title: String
     public let detail: String
+    /// Durable tool invocation identifier used to pair an outcome with its exact intent step when
+    /// multiple tools run in parallel.
+    public let invocationID: ToolInvocationID?
     /// Short user-visible outcome for a committed action (e.g. the text a tool returned). nil until
     /// the action settles, and for actions whose outcome carries no summary.
     public let resultText: String?
@@ -49,6 +52,7 @@ public struct AgentRunStep: Identifiable, Equatable, Sendable {
         kind: Kind,
         title: String,
         detail: String = "",
+        invocationID: ToolInvocationID? = nil,
         resultText: String? = nil,
         rawArguments: String? = nil,
         rawCallText: String? = nil,
@@ -60,6 +64,7 @@ public struct AgentRunStep: Identifiable, Equatable, Sendable {
         self.kind = kind
         self.title = title
         self.detail = detail
+        self.invocationID = invocationID
         self.resultText = resultText
         self.rawArguments = rawArguments
         self.rawCallText = rawCallText

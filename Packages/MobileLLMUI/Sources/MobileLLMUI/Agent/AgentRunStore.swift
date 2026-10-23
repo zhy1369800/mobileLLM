@@ -402,6 +402,7 @@ public final class AgentRunStore {
                     kind: entry.kind,
                     title: entry.title,
                     detail: entry.detail,
+                    invocationID: entry.invocationID,
                     resultText: entry.resultText,
                     rawArguments: entry.rawArguments,
                     rawCallText: entry.rawCallText,
@@ -480,14 +481,18 @@ public final class AgentRunStore {
                 kind: .toolCall,
                 title: Self.toolDisplayName(prepared.plan.subjectID),
                 detail: Self.toolArgumentSummary(prepared.plan.canonicalArguments?.string),
+                invocationID: prepared.invocationID,
                 rawArguments: prepared.plan.canonicalArguments?.string,
                 status: .running,
                 sequence: record.sequence
             ))
-        case .toolOutcomeRecorded(_, let outcome):
-            if let index = steps.lastIndex(where: {
+        case .toolOutcomeRecorded(let invocationID, let outcome):
+            let matchedIndex = steps.lastIndex(where: {
+                $0.kind == .toolCall && $0.invocationID == invocationID
+            }) ?? steps.lastIndex(where: {
                 $0.kind == .toolCall && $0.status == .running && $0.sequence <= record.sequence
-            }) {
+            })
+            if let index = matchedIndex {
                 let status: AgentRunStep.Status
                 let resultText: String?
                 switch outcome {
@@ -506,6 +511,7 @@ public final class AgentRunStore {
                     kind: .toolCall,
                     title: steps[index].title,
                     detail: steps[index].detail,
+                    invocationID: steps[index].invocationID ?? invocationID,
                     resultText: resultText,
                     rawArguments: steps[index].rawArguments,
                     status: status,
@@ -591,8 +597,11 @@ public final class AgentRunStore {
                 onEphemeral?(conversationID, .answer, delta)
             case .usage:
                 break
-            case .provisionalAnswerResolved:
-                break
+            case .provisionalAnswerResolved(let resolution):
+                if case .discarded = resolution {
+                    run = run.replacing(provisionalText: "")
+                    onEphemeral?(conversationID, .discardProvisionalAnswer, "")
+                }
             }
         case .toolProgress:
             break
@@ -833,6 +842,7 @@ public final class AgentRunStore {
                 kind: result[index].kind,
                 title: result[index].title,
                 detail: result[index].detail,
+                invocationID: result[index].invocationID,
                 resultText: result[index].resultText,
                 rawArguments: result[index].rawArguments,
                 rawCallText: turn.rawCallText,
@@ -943,4 +953,5 @@ extension AgentRunStore {
 public enum AgentEphemeralDeltaKind: Sendable {
     case reasoning
     case answer
+    case discardProvisionalAnswer
 }

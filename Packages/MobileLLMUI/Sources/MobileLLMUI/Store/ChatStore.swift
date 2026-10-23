@@ -284,6 +284,11 @@ public final class ChatStore {
                     self.streaming?.phase = .answering
                 }
                 self.streaming?.answer += delta
+            case .discardProvisionalAnswer:
+                self.streaming?.answer = ""
+                if self.streaming?.phase != .stopping {
+                    self.streaming?.phase = .warming
+                }
             }
         }
     }
