@@ -439,37 +439,66 @@ public actor LlamaEngine: LLMEngine {
 
             // Check if this turn is an incremental continuation of the cached session:
             // Condition:
-            // 1. Prefix of `kept` exactly matches `cachedSessionTurns`
-            // 2. Exactly 1 new turn added (the new user query)
-            // 3. The new query carries no images
-            // 4. Physical KV cache has sufficient headroom for suffix + answer reserve
+            // 1. Prefix of `kept` exactly matches `sessionCache.turns`
+            // 2. One or more new turns added (e.g. a new user query, or parallel tool results)
+            // 3. Physical KV cache has sufficient headroom for suffix + answer reserve
             let previousCount = sessionCache.turns.count
-            let canAttemptIncremental = previousCount > 0 &&
-                kept.count == previousCount + 1 &&
-                Array(kept.prefix(previousCount)) == sessionCache.turns &&
-                kept.last?.images.isEmpty == true
+            let newTurns = (previousCount > 0 && kept.count > previousCount)
+                ? Array(kept[previousCount...])
+                : []
+            let prefixMatched = !newTurns.isEmpty &&
+                Array(kept.prefix(previousCount)) == sessionCache.turns
+            let newTurnsCarryImages = newTurns.contains(where: { !$0.images.isEmpty })
+            let incrementalReserve = min(reserve, 256)
 
             var incrementalSuffixTokens: [llama_token]? = nil
-            if canAttemptIncremental {
-                let newTurnPrompt = Self.buildPrompt(messages: [kept.last!], template: promptTemplate,
-                                                     reasoning: reasoningStyle, thinking: wantThinking)
-                let suffixText = newTurnPrompt.hasPrefix("\n") ? newTurnPrompt : ("\n" + newTurnPrompt)
+            var canAttemptIncrementalMultimodal = false
+            if prefixMatched && !newTurnsCarryImages {
+                let suffixText: String
+                if !hasImages, let m = model,
+                   let prefixRendered = Self.autoPrompt(sessionCache.turns, modelPtr: m,
+                                                        reasoning: reasoningStyle, thinking: wantThinking,
+                                                        addGenerationPrompt: false) {
+                    let cleanPrefix = prefixRendered.hasSuffix("\n")
+                        ? String(prefixRendered.dropLast())
+                        : prefixRendered
+                    if !cleanPrefix.isEmpty && fittedPromptText.hasPrefix(cleanPrefix) {
+                        suffixText = String(fittedPromptText.dropFirst(cleanPrefix.count))
+                    } else {
+                        let fallback = Self.buildPrompt(messages: newTurns, template: promptTemplate,
+                                                        reasoning: reasoningStyle, thinking: wantThinking)
+                        suffixText = fallback.hasPrefix("\n") ? fallback : ("\n" + fallback)
+                    }
+                } else {
+                    let fallback = Self.buildPrompt(messages: newTurns, template: promptTemplate,
+                                                    reasoning: reasoningStyle, thinking: wantThinking)
+                    suffixText = fallback.hasPrefix("\n") ? fallback : ("\n" + fallback)
+                }
                 let tokens = Self.tokenize(vocab: vocab, text: suffixText, addSpecial: false)
-                let incrementalReserve = min(reserve, 256)
                 if !tokens.isEmpty && sessionCache.tokenCount + tokens.count + incrementalReserve <= contextCap {
                     incrementalSuffixTokens = tokens
                 } else {
                     NSLog("[LlamaEngine] Incremental continuation skipped: KV cache headroom exceeded or empty tokens (used=%d, suffix=%d, reserve=%d, cap=%d). Falling back to full evaluation.",
                           Int32(sessionCache.tokenCount), Int32(tokens.count), Int32(incrementalReserve), Int32(contextCap))
                 }
+            } else if prefixMatched && newTurnsCarryImages {
+                let fallback = Self.buildPrompt(messages: newTurns, template: promptTemplate,
+                                                reasoning: reasoningStyle, thinking: wantThinking)
+                let suffixText = fallback.hasPrefix("\n") ? fallback : ("\n" + fallback)
+                let textTokens = Self.tokenize(vocab: vocab, text: suffixText, addSpecial: false)
+                let estimatedTokens = textTokens.count + Self.imageTokenCount(newTurns)
+                if sessionCache.tokenCount + estimatedTokens + incrementalReserve <= contextCap {
+                    canAttemptIncrementalMultimodal = true
+                } else {
+                    NSLog("[LlamaEngine] Incremental multimodal continuation skipped: KV cache headroom exceeded (used=%d, estimatedSuffix=%d, reserve=%d, cap=%d). Falling back to full evaluation.",
+                          Int32(sessionCache.tokenCount), Int32(estimatedTokens), Int32(incrementalReserve), Int32(contextCap))
+                }
             } else if previousCount > 0 {
-                let countOk = kept.count == previousCount + 1
+                let countOk = kept.count > previousCount
                 let prefixOk = countOk && Array(kept.prefix(previousCount)) == sessionCache.turns
-                let noImg = kept.last?.images.isEmpty == true
-                NSLog("[LlamaEngine] Incremental continuation rejected: kept.count=%d (expected %d), prefixMatch=%@, lastNoImages=%@",
-                      Int32(kept.count), Int32(previousCount + 1),
-                      prefixOk ? "true" : "false",
-                      noImg ? "true" : "false")
+                NSLog("[LlamaEngine] Incremental continuation rejected: kept.count=%d (cached %d), prefixMatch=%@",
+                      Int32(kept.count), Int32(previousCount),
+                      prefixOk ? "true" : "false")
             }
 
             var prefilledPromptTokens: [llama_token]? = nil
@@ -507,8 +536,16 @@ public actor LlamaEngine: LLMEngine {
                 promptTokenCount = suffixTokens.count
                 // Note: conversationTokens for speculative n-gram lookup is built lazily below,
                 // only when speculative mode is active and prompt lookup is actually in use.
+            } else if canAttemptIncrementalMultimodal {
+                isIncrementalContinuation = true
+                NSLog("[LlamaEngine] Incremental multimodal continuation matched! New turns: %d, cached pos: %d",
+                      Int32(newTurns.count), Int32(sessionCache.tokenCount))
+                promptTokenCount = try await mtmdPrefill(kept: newTurns, context: context,
+                                                         renderPrompt: renderPrompt, nBatch: nBatch,
+                                                         startPos: Int32(sessionCache.tokenCount),
+                                                         governance: governance)
             } else if hasImages {
-                // Multimodal full evaluation: new image introduced or conversation diverged
+                // Multimodal full evaluation: first image turn or conversation diverged
                 sessionCache.reset(context: context)
                 promptTokenCount = try await mtmdPrefill(kept: kept, context: context,
                                                          renderPrompt: renderPrompt, nBatch: nBatch,
@@ -646,7 +683,7 @@ public actor LlamaEngine: LLMEngine {
                 }
             }
             let promptSecs = max(Date().timeIntervalSince(prefillStart), 0.0001)
-            let cachedPromptTokensCount: Int = incrementalSuffixTokens != nil ? sessionCache.tokenCount : cachedRollbackTokensCount
+            let cachedPromptTokensCount: Int = isIncrementalContinuation ? sessionCache.tokenCount : cachedRollbackTokensCount
 
             // Decode loop. Implicit-open reasoning (Qwen3.5) begins inside the think block. The answer
             // stripper removes a model's answer-wrapper tags (Hunyuan's <answer>…</answer>) so they never
@@ -740,7 +777,7 @@ public actor LlamaEngine: LLMEngine {
                 }
             }
 
-            let baseKvPos = incrementalSuffixTokens != nil ? sessionCache.tokenCount : cachedRollbackTokensCount
+            let baseKvPos = isIncrementalContinuation ? sessionCache.tokenCount : cachedRollbackTokensCount
             var kvPos: llama_pos = Int32(baseKvPos + promptTokenCount)
             let physicalHeadroom = max(0, contextCap - Int(kvPos))
             let effectiveMaxTokens = (maxTokens > 0) ? min(maxTokens, physicalHeadroom) : physicalHeadroom
@@ -1065,11 +1102,11 @@ public actor LlamaEngine: LLMEngine {
                                         tokens: promptTokens + generatedTokens,
                                         count: promptTokens.count + generatedTokens.count)
                 } else {
-                    // Multimodal full evaluation (hasImages):
+                    // Multimodal evaluation (full or incremental):
                     // No purely textual tokens to match for Prefix Rollback, but the total physical
-                    // KV cache occupancy must be preserved so subsequent text turns can incrementally continue.
+                    // KV cache occupancy must be preserved so subsequent turns can incrementally continue.
                     sessionCache.commitMultimodal(turns: updatedTurns,
-                                                  count: promptTokenCount + generatedTokens.count)
+                                                  count: baseKvPos + promptTokenCount + generatedTokens.count)
                 }
             } else {
                 sessionCache.reset(context: context)
@@ -1080,7 +1117,7 @@ public actor LlamaEngine: LLMEngine {
             // can safely prune back to `initialCachedSessionTokenCount`. Any prefix-rollback or full-recompute path
             // altered the physical KV positions, so pruning to the old length would retain alien tokens and corrupt KV cache.
             // Furthermore, multimodal sessions carrying visual ViT embeddings must never undergo partial KV truncation (per e87379f).
-            if isIncrementalContinuation, !sessionCache.hasImages, let context, initialCachedSessionTokenCount > 0 && initialCachedSessionTokensCount > 0 {
+            if isIncrementalContinuation, !hasImages, !sessionCache.hasImages, let context, initialCachedSessionTokenCount > 0 && initialCachedSessionTokensCount > 0 {
                 // Retain previously verified conversational prefix: prune only uncommitted tokens added during this cancelled turn.
                 if sessionCache.prune(to: initialCachedSessionTokenCount, context: context) {
                     NSLog("[LlamaEngine] Cancellation: retained %d prefix tokens (pruned uncommitted turn)", Int32(initialCachedSessionTokenCount))
@@ -1141,10 +1178,12 @@ public actor LlamaEngine: LLMEngine {
     /// acceptable), bailing via the reentrancy guard if a concurrent reload swaps the context out.
     private func mtmdPrefill(kept: [ChatTurn], context: OpaquePointer,
                              renderPrompt: ([ChatTurn]) -> String, nBatch: Int,
+                             startPos: llama_pos = 0,
                              governance: GenerationGovernance) async throws -> Int {
         guard let mtmdCtx = mtmdContext else { throw EngineError.visionUnavailable }
         let marker = String(cString: mtmd_default_marker())
-        let promptText = renderPrompt(Self.injectMediaMarkers(kept, marker: marker))
+        let rawPrompt = renderPrompt(Self.injectMediaMarkers(kept, marker: marker))
+        let promptText = (startPos > 0 && !rawPrompt.hasPrefix("\n")) ? ("\n" + rawPrompt) : rawPrompt
 
         // Decode each attached image (encoded JPEG/PNG bytes) into an mtmd bitmap, in prompt order.
         var bitmaps: [OpaquePointer?] = []
@@ -1169,7 +1208,7 @@ public actor LlamaEngine: LLMEngine {
         let tokenizeRC: Int32 = promptText.withCString { cText -> Int32 in
             // text_len in BYTES (matches the text path's `utf8.count`), robust to any embedded null.
             var input = mtmd_input_text(text: cText, text_len: promptText.utf8.count,
-                                        add_special: true, parse_special: true)
+                                        add_special: startPos == 0, parse_special: true)
             var bmpArray = bitmaps
             return bmpArray.withUnsafeMutableBufferPointer { buf in
                 mtmd_tokenize(mtmdCtx, chunks, &input, buf.baseAddress, bitmaps.count)
@@ -1179,7 +1218,7 @@ public actor LlamaEngine: LLMEngine {
 
         // Evaluate chunk-by-chunk into the KV cache; only the last chunk needs logits (for the first sample).
         let nChunks = mtmd_input_chunks_size(chunks)
-        var nPast: llama_pos = 0
+        var nPast: llama_pos = startPos
         for idx in 0..<nChunks {
             try await governance.checkpoint()
             guard self.context == context else { throw CancellationError() }
@@ -1193,7 +1232,7 @@ public actor LlamaEngine: LLMEngine {
             if Task.isCancelled || governance.isCancelled { throw CancellationError() }
             guard self.context == context else { throw CancellationError() }   // reentrant teardown
         }
-        return Int(mtmd_helper_get_n_tokens(chunks))
+        return Int(nPast - startPos)
     }
 
     /// Downsample large input images (e.g. 12MP/48MP camera shots) to an optimal max dimension
@@ -1294,7 +1333,8 @@ public actor LlamaEngine: LLMEngine {
     /// community checkpoints (Explore), where no hand-written builder exists. Returns nil when the model
     /// ships no template or llama.cpp can't render it, so the caller can fall back to ChatML.
     static func autoPrompt(_ messages: [ChatTurn], modelPtr: OpaquePointer,
-                           reasoning: ReasoningStyle, thinking: Bool) -> String? {
+                           reasoning: ReasoningStyle, thinking: Bool,
+                           addGenerationPrompt: Bool = true) -> String? {
         guard let tmpl = llama_model_chat_template(modelPtr, nil) else { return nil }
         var owned: [UnsafeMutablePointer<CChar>] = []
         defer { owned.forEach { free($0) } }
@@ -1308,16 +1348,17 @@ public actor LlamaEngine: LLMEngine {
         }
         var buf = [CChar](repeating: 0, count: 1 << 15)
         var n = chat.withUnsafeBufferPointer {
-            llama_chat_apply_template(tmpl, $0.baseAddress, chat.count, true, &buf, Int32(buf.count))
+            llama_chat_apply_template(tmpl, $0.baseAddress, chat.count, addGenerationPrompt, &buf, Int32(buf.count))
         }
         if n > Int32(buf.count) {                       // grow once if the template needs more room
             buf = [CChar](repeating: 0, count: Int(n) + 1)
             n = chat.withUnsafeBufferPointer {
-                llama_chat_apply_template(tmpl, $0.baseAddress, chat.count, true, &buf, Int32(buf.count))
+                llama_chat_apply_template(tmpl, $0.baseAddress, chat.count, addGenerationPrompt, &buf, Int32(buf.count))
             }
         }
         guard n > 0 else { return nil }
         let rendered = String(decoding: buf.prefix(Int(n)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        guard addGenerationPrompt else { return rendered }
         let trimmed = rendered.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasSuffix("<think>") {
             return thinking ? rendered : (rendered + "\n</think>\n\n")
