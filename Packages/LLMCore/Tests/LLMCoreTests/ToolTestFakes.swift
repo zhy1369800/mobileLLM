@@ -156,8 +156,57 @@ actor FakeEventStore: EventStoring {
     }
 }
 
-/// A `LocationProviding` that returns a canned result.
+/// A `LocationProviding` that returns canned results.
 struct FakeLocationProvider: LocationProviding {
     let result: Result<LocationFix, LocationError>
+    var geocodeResults: [GeocodedCoordinate] = []
+
     func currentLocation() async throws -> LocationFix { try result.get() }
+    func geocode(address: String) async throws -> [GeocodedCoordinate] { geocodeResults }
+}
+
+/// A `MapKitProviding` fake that returns canned results.
+struct FakeMapKitProvider: MapKitProviding {
+    var placesToReturn: [MapPlaceItem] = []
+    var routeToReturn: RouteInfo? = nil
+    var etaToReturn: EtaInfo? = nil
+    var errorToThrow: Error? = nil
+
+    func searchPlaces(
+        query: String,
+        center: (latitude: Double, longitude: Double)?,
+        radiusMeters: Double,
+        limit: Int
+    ) async throws -> [MapPlaceItem] {
+        if let err = errorToThrow { throw err }
+        return placesToReturn
+    }
+
+    func calculateRoute(
+        fromAddress: String?,
+        fromCoord: (latitude: Double, longitude: Double)?,
+        toAddress: String?,
+        toCoord: (latitude: Double, longitude: Double)?,
+        mode: String?
+    ) async throws -> RouteInfo {
+        if let err = errorToThrow { throw err }
+        guard let route = routeToReturn else {
+            throw MapKitError.routeFailed("No route found.")
+        }
+        return route
+    }
+
+    func calculateEta(
+        fromAddress: String?,
+        fromCoord: (latitude: Double, longitude: Double)?,
+        toAddress: String?,
+        toCoord: (latitude: Double, longitude: Double)?,
+        mode: String?
+    ) async throws -> EtaInfo {
+        if let err = errorToThrow { throw err }
+        guard let eta = etaToReturn else {
+            throw MapKitError.etaFailed("ETA unavailable.")
+        }
+        return eta
+    }
 }

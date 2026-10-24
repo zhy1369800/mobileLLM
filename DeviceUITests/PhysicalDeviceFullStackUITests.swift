@@ -1521,8 +1521,8 @@ final class PhysicalDeviceFullStackUITests: DeviceE2ETestCase {
             ("reminder_task_tool",
              "\(marker)\nCall the reminder_task_tool tool exactly once with action \"create_reminder\", title \"E2E \(marker) "
                  + "reminder\" and no due time, then reply in one short line."),
-            ("current_location",
-             "\(marker)\nCall the current_location tool exactly once with no arguments, "
+            ("location_info_tool",
+             "\(marker)\nCall the location_info_tool tool exactly once with no arguments, "
                  + "then reply in one short line."),
         ]
         func matchesTool(_ activities: [String], _ tool: String) -> Bool {

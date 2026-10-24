@@ -334,8 +334,13 @@ public struct DeterministicToolSelector: Sendable {
                 score += 300
             }
         }
-        if ["current_location", "location"].contains(name) {
-            if ["位置", "定位", "在哪", "当前城市"].contains(where: { lower.contains($0) }) {
+        if ["location_info_tool", "location"].contains(name) {
+            if ["位置", "定位", "在哪", "当前城市", "经纬度", "坐标", "地址"].contains(where: { lower.contains($0) }) {
+                score += 300
+            }
+        }
+        if ["map_kit_tool", "maps", "navigation"].contains(name) {
+            if ["路线", "怎么去", "导航", "去哪", "多久能到", "距离", "附近", "周边", "多远", "公里", "ETA", "驾车", "步行"].contains(where: { lower.contains($0) }) {
                 score += 300
             }
         }

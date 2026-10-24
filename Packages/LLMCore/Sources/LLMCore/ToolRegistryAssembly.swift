@@ -16,7 +16,8 @@ public enum ToolID: String, Sendable, Codable, Hashable, CaseIterable {
     case recall
     case calendarEvent        = "calendar_event_tool"
     case reminderTask         = "reminder_task_tool"
-    case currentLocation      = "current_location"
+    case locationInfo         = "location_info_tool"
+    case mapKit               = "map_kit_tool"
     case shortcutAutomation   = "shortcut_automation_tool"
 }
 
@@ -45,7 +46,7 @@ public extension ToolRegistry {
     /// Build the built-in tool set from a config plus injected stores/seams (additive alongside
     /// `.standard` / `.builtIn` / `.build`). A tool is included only when it's enabled AND its dependency
     /// is available — so `remember`/`recall` need a `memoryStore`, the calendar/reminder tools need an
-    /// `eventStore`, and `current_location` needs a `locationProvider`. The privacy-free tools
+    /// `eventStore`, and `location_info_tool` needs a `locationProvider`. The privacy-free tools
     /// (calculator, clock, wikipedia, web_search, fetch_webpage) need nothing injected.
     ///
     /// MCP tools are layered separately (see `ToolRegistry.build`); this assembles only the on-device
@@ -54,6 +55,7 @@ public extension ToolRegistry {
                          memoryStore: (any MemoryStoring)? = nil,
                          eventStore: (any EventStoring)? = nil,
                          locationProvider: (any LocationProviding)? = nil,
+                         mapKitProvider: (any MapKitProviding)? = nil,
                          shortcutExecutor: (any ShortcutAutomationExecuting)? = nil,
                          session: URLSession = .shared) -> ToolRegistry {
         var tools: [Tool] = []
@@ -73,8 +75,11 @@ public extension ToolRegistry {
             if on(.calendarEvent) { tools.append(CalendarEventTool(store: eventStore)) }
             if on(.reminderTask)  { tools.append(ReminderTaskTool(store: eventStore)) }
         }
-        if let locationProvider, on(.currentLocation) {
-            tools.append(CurrentLocationTool(provider: locationProvider))
+        if let locationProvider, on(.locationInfo) {
+            tools.append(LocationInfoTool(provider: locationProvider))
+        }
+        if let mapKitProvider, on(.mapKit) {
+            tools.append(MapKitTool(provider: mapKitProvider))
         }
         if let shortcutExecutor, on(.shortcutAutomation) {
             tools.append(ShortcutAutomationTool(executor: shortcutExecutor))

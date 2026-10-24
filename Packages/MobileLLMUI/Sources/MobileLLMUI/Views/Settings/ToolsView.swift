@@ -294,7 +294,7 @@ struct BuiltInToolRow: Identifiable {
         switch id {
         case "calendar": return await eventStore?.requestPermission(for: .events)
         case "reminders": return await eventStore?.requestPermission(for: .reminders)
-        case "location": return await locationProvider?.requestPermission()
+        case "location", "map_kit": return await locationProvider?.requestPermission()
         case "shortcut_automation": return await shortcutExecutor?.requestPermission()
         default: return nil
         }
@@ -331,8 +331,11 @@ struct BuiltInToolRow: Identifiable {
               subtitle: "Manage reminders and to-do lists in the Reminders app.",
               icon: "checklist", toolIDs: [.reminderTask], privacy: true),
         .init(id: "location", title: "Location",
-              subtitle: "Use your approximate (city-level) location.",
-              icon: "location", toolIDs: [.currentLocation], privacy: true),
+              subtitle: "Get device location and geocode addresses.",
+              icon: "location", toolIDs: [.locationInfo], privacy: true),
+        .init(id: "map_kit", title: "Maps & Directions",
+              subtitle: "Search nearby places, plan routes and check ETA with Apple Maps.",
+              icon: "map", toolIDs: [.mapKit], privacy: true),
         .init(id: "shortcut_automation", title: "Shortcuts",
               subtitle: "Run iOS Shortcuts automations via notification triggers and file exchange.",
               icon: "command", toolIDs: [.shortcutAutomation], privacy: true),

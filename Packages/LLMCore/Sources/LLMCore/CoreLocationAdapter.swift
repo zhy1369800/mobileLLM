@@ -6,7 +6,7 @@ import CoreLocation
 
 /// The real, on-device `LocationProviding` backed by `CLLocationManager`. A one-shot request at ~100 m
 /// accuracy, plus a best-effort reverse-geocode for a place name. Not unit-tested — device behavior only;
-/// LLMCore's tests drive `CurrentLocationTool` through a fake `LocationProviding`.
+/// LLMCore's tests drive `LocationInfoTool` through a fake `LocationProviding`.
 ///
 /// Timeout discipline (learned on device): the fix timeout must NOT run while the system permission
 /// dialog is up — the user's dialog-reading time was burning the whole budget, so the very first
@@ -30,11 +30,52 @@ public final class CoreLocationProvider: LocationProviding, @unchecked Sendable 
                 OneShotLocationDelegate(continuation: cont, fixTimeout: timeout).start()
             }
         }
-        let locality = (try? await CLGeocoder().reverseGeocodeLocation(location))?.first?.locality
-        return LocationFix(latitude: location.coordinate.latitude,
-                           longitude: location.coordinate.longitude,
-                           accuracy: location.horizontalAccuracy,
-                           locality: locality)
+        var placemarkInfo: PlacemarkInfo? = nil
+        if let placemark = (try? await CLGeocoder().reverseGeocodeLocation(location))?.first {
+            var parts: [String] = []
+            if let c = placemark.country, !c.isEmpty { parts.append(c) }
+            if let s = placemark.administrativeArea, !s.isEmpty, s != placemark.country { parts.append(s) }
+            if let city = placemark.locality, !city.isEmpty, city != placemark.administrativeArea { parts.append(city) }
+            if let sub = placemark.subLocality, !sub.isEmpty { parts.append(sub) }
+            if let thoroughfare = placemark.thoroughfare, !thoroughfare.isEmpty { parts.append(thoroughfare) }
+            if let subThoroughfare = placemark.subThoroughfare, !subThoroughfare.isEmpty { parts.append(subThoroughfare) }
+
+            let formatted = parts.isEmpty ? (placemark.name ?? "") : parts.joined(separator: " ")
+            placemarkInfo = PlacemarkInfo(
+                name: placemark.name,
+                country: placemark.country,
+                administrativeArea: placemark.administrativeArea,
+                locality: placemark.locality,
+                subLocality: placemark.subLocality,
+                thoroughfare: placemark.thoroughfare,
+                subThoroughfare: placemark.subThoroughfare,
+                postalCode: placemark.postalCode,
+                formattedAddress: formatted
+            )
+        }
+        return LocationFix(
+            latitude: location.coordinate.latitude,
+            longitude: location.coordinate.longitude,
+            altitude: location.altitude,
+            accuracy: location.horizontalAccuracy,
+            speed: location.speed >= 0 ? location.speed : nil,
+            heading: location.course >= 0 ? location.course : nil,
+            locality: placemarkInfo?.locality,
+            placemark: placemarkInfo
+        )
+    }
+
+    public func geocode(address: String) async throws -> [GeocodedCoordinate] {
+        let placemarks = try await CLGeocoder().geocodeAddressString(address)
+        return placemarks.compactMap { p in
+            guard let loc = p.location else { return nil }
+            let name = p.name ?? [p.locality, p.thoroughfare].compactMap { $0 }.joined(separator: " ")
+            return GeocodedCoordinate(
+                latitude: loc.coordinate.latitude,
+                longitude: loc.coordinate.longitude,
+                displayName: name.isEmpty ? nil : name
+            )
+        }
     }
 
     public func permissionState() async -> ToolPermission {

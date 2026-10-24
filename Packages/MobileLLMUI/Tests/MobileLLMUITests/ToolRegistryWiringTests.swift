@@ -67,10 +67,10 @@ final class ToolRegistryWiringTests: XCTestCase {
     /// enabled — so the calendar/location tools never surface there.
     func testAssembleWithoutSeamsOmitsInjectedTools() {
         var config = BuiltInToolConfig()
-        config.enabled.formUnion([.calendarEvent, .currentLocation])
+        config.enabled.formUnion([.calendarEvent, .locationInfo])
         let n = names(ToolRegistry.assemble(config: config))
         XCTAssertFalse(n.contains("calendar_event_tool"))
-        XCTAssertFalse(n.contains("current_location"))
+        XCTAssertFalse(n.contains("location_info_tool"))
         XCTAssertFalse(n.contains("remember"))
         XCTAssertTrue(n.contains("calculator"), "privacy-free tools need nothing injected")
     }

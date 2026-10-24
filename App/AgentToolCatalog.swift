@@ -112,7 +112,8 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         let systemDataTools: [(name: String, schema: ToolSchema, seam: Bool)] = [
             ("calendar_event_tool", CalendarEventTool.schema, eventSeamAvailable),
             ("reminder_task_tool", ReminderTaskTool.schema, eventSeamAvailable),
-            ("current_location", CurrentLocationTool.schema, locationSeamAvailable),
+            ("location_info_tool", LocationInfoTool.schema, locationSeamAvailable),
+            ("map_kit_tool", MapKitTool.schema, locationSeamAvailable),
             ("shortcut_automation_tool", ShortcutAutomationTool.schema, shortcutSeamAvailable),
         ]
         for entry in systemDataTools {
@@ -162,6 +163,7 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         memoryStore: (any MemoryStoring)?,
         eventStore: (any EventStoring)?,
         locationProvider: (any LocationProviding)?,
+        mapKitProvider: (any MapKitProviding)? = nil,
         shortcutExecutor: (any ShortcutAutomationExecuting)? = nil,
         mcpCache: MCPDiscoveryCache,
         session: URLSession = .shared
@@ -225,15 +227,31 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
                 timeoutMilliseconds: 10_000
             ))
         }
-        if enabled.contains("current_location"), let locationProvider {
+        if enabled.contains("location_info_tool"), let locationProvider {
             try register(AppSystemDataToolAdapter(
-                tool: CurrentLocationTool(provider: locationProvider),
+                tool: LocationInfoTool(provider: locationProvider),
                 effects: [.localRead],
                 destinationIdentity: "mobilellm.location",
                 dataCategory: "user.location",
-                userPreview: "Get the user's approximate current location",
+                userPreview: "Get device location and geocode addresses",
                 trustRevision: "builtin.v1",
                 timeoutMilliseconds: 15_000
+            ))
+        }
+        #if canImport(MapKit)
+        let actualMapKit = mapKitProvider ?? MapKitProvider()
+        #else
+        let actualMapKit = mapKitProvider
+        #endif
+        if enabled.contains("map_kit_tool"), let actualMapKit {
+            try register(AppSystemDataToolAdapter(
+                tool: MapKitTool(provider: actualMapKit),
+                effects: [.networkRead, .localRead],
+                destinationIdentity: "mobilellm.maps",
+                dataCategory: "maps.apple",
+                userPreview: "Search places and routes with Apple Maps",
+                trustRevision: "builtin.v1",
+                timeoutMilliseconds: 25_000
             ))
         }
         if enabled.contains("shortcut_automation_tool"), let shortcutExecutor {
@@ -279,7 +297,8 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         case "remember": [.localWrite]
         case "recall": [.localRead]
         case "calendar_event_tool", "reminder_task_tool": [.localRead, .localWrite]
-        case "current_location": [.localRead]
+        case "location_info_tool": [.localRead]
+        case "map_kit_tool": [.networkRead, .localRead]
         case "shortcut_automation_tool": [.localWrite, .unknownExternal]
         default: [.localPure]
         }
@@ -298,7 +317,8 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
     private static func timeoutMilliseconds(for name: String) -> UInt64 {
         switch name {
         case "web_search", "wikipedia", "fetch_webpage", "shortcut_automation_tool": 30_000
-        case "current_location": 15_000
+        case "map_kit_tool": 25_000
+        case "location_info_tool": 15_000
         case "reminder_task_tool", "calendar_event_tool": 10_000
         default: 5_000
         }

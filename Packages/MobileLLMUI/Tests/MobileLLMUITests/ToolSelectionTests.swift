@@ -33,7 +33,7 @@ final class ToolSelectionTests: XCTestCase {
         settings.disabledBuiltInTools = [
             ToolID.webSearch.rawValue,
             ToolID.wikipedia.rawValue,
-            ToolID.currentLocation.rawValue,
+            ToolID.locationInfo.rawValue,
         ]
         let selection = settings.disabledBuiltInTools
 

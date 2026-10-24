@@ -82,10 +82,10 @@ final class SettingsPersistenceTests: XCTestCase {
     /// The new tool fields survive a save/reload.
     func testToolToggleFieldsRoundTrip() {
         let settings = AppSettings(defaults: defaults)
-        settings.disabledBuiltInTools = ["web_search", "current_location"]
+        settings.disabledBuiltInTools = ["web_search", "location_info_tool"]
         settings.searchEngines = [.bing]
         let reloaded = AppSettings(defaults: defaults)
-        XCTAssertEqual(reloaded.disabledBuiltInTools, ["web_search", "current_location"])
+        XCTAssertEqual(reloaded.disabledBuiltInTools, ["web_search", "location_info_tool"])
         XCTAssertEqual(reloaded.searchEngines, [.bing])
     }
 

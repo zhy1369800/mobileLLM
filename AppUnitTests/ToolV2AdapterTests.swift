@@ -452,7 +452,7 @@ final class ToolV2AdapterTests: XCTestCase {
                 "Created reminder"
             ),
             (
-                CurrentLocationTool(provider: location),
+                LocationInfoTool(provider: location),
                 [.localRead],
                 "mobilellm.location",
                 "user.location",

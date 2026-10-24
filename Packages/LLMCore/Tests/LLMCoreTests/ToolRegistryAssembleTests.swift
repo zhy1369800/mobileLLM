@@ -21,7 +21,8 @@ final class ToolRegistryAssembleTests: XCTestCase {
         XCTAssertFalse(n.contains("recall"))
         // Privacy-sensitive tools are off by default.
         XCTAssertFalse(n.contains("calendar_event_tool"))
-        XCTAssertFalse(n.contains("current_location"))
+        XCTAssertFalse(n.contains("location_info_tool"))
+        XCTAssertFalse(n.contains("map_kit_tool"))
     }
 
     func testMemoryToolsAppearOnlyWithStore() {
@@ -41,13 +42,16 @@ final class ToolRegistryAssembleTests: XCTestCase {
     }
 
     func testLocationToolNeedsEnableAndProvider() {
-        let cfg = BuiltInToolConfig(enabled: BuiltInToolConfig.defaultEnabled.union([.currentLocation]))
+        let cfg = BuiltInToolConfig(enabled: BuiltInToolConfig.defaultEnabled.union([.locationInfo, .mapKit]))
         // Enabled but no provider → absent.
-        XCTAssertFalse(names(ToolRegistry.assemble(config: cfg)).contains("current_location"))
+        XCTAssertFalse(names(ToolRegistry.assemble(config: cfg)).contains("location_info_tool"))
+        XCTAssertFalse(names(ToolRegistry.assemble(config: cfg)).contains("map_kit_tool"))
         // Enabled + provider → present.
         let n = names(ToolRegistry.assemble(config: cfg,
-                                            locationProvider: FakeLocationProvider(result: .failure(.denied))))
-        XCTAssertTrue(n.contains("current_location"))
+                                            locationProvider: FakeLocationProvider(result: .failure(.denied)),
+                                            mapKitProvider: FakeMapKitProvider()))
+        XCTAssertTrue(n.contains("location_info_tool"))
+        XCTAssertTrue(n.contains("map_kit_tool"))
     }
 
     func testDisablingToolRemovesIt() {

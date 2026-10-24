@@ -935,7 +935,24 @@ extension AgentRunStore {
                 return act.replacingOccurrences(of: "_", with: " ").capitalized
             }
             return fallback
-        case "current_datetime", "current_location":
+        case "location_info_tool":
+            if let addr = value(["address"]) {
+                return "Geocode: \(addr)"
+            }
+            return "Get location"
+        case "map_kit_tool":
+            if let q = value(["query"]) {
+                return "Search places: \(q)"
+            }
+            if let to = value(["to_address"]) {
+                let from = value(["from_address"]).map { "from \($0) " } ?? ""
+                return "Route: \(from)to \(to)"
+            }
+            if let act = value(["action"]), !act.isEmpty {
+                return act.replacingOccurrences(of: "_", with: " ").capitalized
+            }
+            return fallback
+        case "current_datetime":
             return ""
         default:
             return fallback

@@ -615,12 +615,21 @@ struct AppFrozenInputBuilder: Sendable {
                 ceilingDataCategories.append(try AgentDataCategory(rawValue: "user.reminders"))
             }
         }
-        if snapshot.locationSeamAvailable, enabledTools.contains("current_location") {
-            ceilingDestinations.append(try ExternalDestination(
-                kind: .privateDataStore,
-                normalizedIdentity: "mobilellm.location"
-            ))
-            ceilingDataCategories.append(try AgentDataCategory(rawValue: "user.location"))
+        if snapshot.locationSeamAvailable {
+            if enabledTools.contains("location_info_tool") {
+                ceilingDestinations.append(try ExternalDestination(
+                    kind: .privateDataStore,
+                    normalizedIdentity: "mobilellm.location"
+                ))
+                ceilingDataCategories.append(try AgentDataCategory(rawValue: "user.location"))
+            }
+            if enabledTools.contains("map_kit_tool") {
+                ceilingDestinations.append(try ExternalDestination(
+                    kind: .networkEndpoint,
+                    normalizedIdentity: "maps.apple.com"
+                ))
+                ceilingDataCategories.append(try AgentDataCategory(rawValue: "maps.apple"))
+            }
         }
         if snapshot.shortcutSeamAvailable, enabledTools.contains("shortcut_automation_tool") {
             ceilingDestinations.append(try ExternalDestination(

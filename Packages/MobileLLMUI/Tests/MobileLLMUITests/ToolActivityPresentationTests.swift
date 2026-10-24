@@ -88,7 +88,7 @@ final class ToolActivityPresentationTests: XCTestCase {
     func testPermissionAndBuiltInNetworkFailuresArePresentedAsFailures() {
         for (name, result) in [
             ("calendar_event_tool", "Calendar access is off — enable it in Settings to access events."),
-            ("current_location", "Location is unavailable right now."),
+            ("location_info_tool", "Location is unavailable right now."),
             ("wikipedia", "Search failed — couldn't reach Wikipedia."),
         ] {
             let presentation = ToolActivityPresentation(
