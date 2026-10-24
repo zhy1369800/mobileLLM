@@ -104,8 +104,16 @@ struct AttachmentThumbnail: View {
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous).strokeBorder(Theme.hairline))
         .task(id: ref.id) {
-            if image == nil, let data = await load(ref), let decoded = Image(attachmentData: data) {
-                image = decoded
+            guard image == nil else { return }
+            // Asynchronous disk write may take 10-50ms after the turn is appended to the message list.
+            // Retry with a short backoff so the freshly sent image renders as soon as it lands on disk.
+            for attempt in 0..<15 {
+                if let data = await load(ref), let decoded = Image(attachmentData: data) {
+                    image = decoded
+                    break
+                }
+                if Task.isCancelled { break }
+                try? await Task.sleep(nanoseconds: attempt == 0 ? 50_000_000 : 100_000_000)
             }
         }
         .accessibilityLabel("attached image")
