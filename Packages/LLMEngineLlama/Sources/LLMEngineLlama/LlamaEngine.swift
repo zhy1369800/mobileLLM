@@ -455,6 +455,7 @@ public actor LlamaEngine: LLMEngine {
             // 1. Prefix of `kept` exactly matches `sessionCache.turns`
             // 2. One or more new turns added (e.g. a new user query, or parallel tool results)
             // 3. Physical KV cache has sufficient headroom for suffix + answer reserve
+            // 4. The new query carries no images (image turns must always perform full multimodal evaluation)
             let previousCount = sessionCache.turns.count
             let newTurns = (previousCount > 0 && kept.count > previousCount)
                 ? Array(kept[previousCount...])
@@ -493,11 +494,14 @@ public actor LlamaEngine: LLMEngine {
                     NSLog("[LlamaEngine] Incremental continuation skipped: KV cache headroom exceeded or empty tokens (used=%d, suffix=%d, reserve=%d, cap=%d). Falling back to full evaluation.",
                           Int32(sessionCache.tokenCount), Int32(tokens.count), Int32(incrementalReserve), Int32(contextCap))
                 }
+            } else if previousCount > 0 {
                 let countOk = kept.count > previousCount
                 let prefixOk = countOk && Array(kept.prefix(previousCount)) == sessionCache.turns
-                NSLog("[LlamaEngine] Incremental continuation rejected: kept.count=%d (cached %d), prefixMatch=%@",
+                let noImg = !newTurnsCarryImages
+                NSLog("[LlamaEngine] Incremental continuation rejected: kept.count=%d (cached %d), prefixMatch=%@, noImages=%@",
                       Int32(kept.count), Int32(previousCount),
-                      prefixOk ? "true" : "false")
+                      prefixOk ? "true" : "false",
+                      noImg ? "true" : "false")
             }
 
             var prefilledPromptTokens: [llama_token]? = nil
@@ -536,10 +540,11 @@ public actor LlamaEngine: LLMEngine {
                 // Note: conversationTokens for speculative n-gram lookup is built lazily below,
                 // only when speculative mode is active and prompt lookup is actually in use.
             } else if hasImages {
-                // Multimodal full evaluation: first image turn or conversation diverged
+                // Multimodal full evaluation: image turn or conversation diverged
                 sessionCache.reset(context: context)
+                let safeVisionBatch = min(nBatch, 512)
                 promptTokenCount = try await mtmdPrefill(kept: kept, context: context,
-                                                         renderPrompt: renderPrompt, nBatch: nBatch,
+                                                         renderPrompt: renderPrompt, nBatch: safeVisionBatch,
                                                          governance: governance)
             } else {
                 // Pure text evaluation: Prefix Rollback optimization with clean slate fallback
@@ -1163,19 +1168,15 @@ public actor LlamaEngine: LLMEngine {
     }
 
     /// Multimodal prefill: render the kept turns with a media marker injected per attached image, split the
-    /// text + images into mtmd chunks, and evaluate them chunk-by-chunk into the live context's KV cache
-    /// (image encode → decode for image chunks, plain decode for text) so the ordinary decode loop can
-    /// continue from the end of the prefill. Returns the total prefilled token count (text + image tokens)
-    /// for the stats line. Cancellation-checked and yields between chunks (chunk-level granularity is
-    /// acceptable), bailing via the reentrancy guard if a concurrent reload swaps the context out.
+    /// Prefill multimodal messages (text + images) using llama.cpp's `mtmd` helper. Prepares images, splits
+    /// the rendered prompt around media markers, and feeds chunks through the vision encoder into the KV cache.
+    /// Returns the prefilled token count for the stats line.
     private func mtmdPrefill(kept: [ChatTurn], context: OpaquePointer,
                              renderPrompt: ([ChatTurn]) -> String, nBatch: Int,
-                             startPos: llama_pos = 0,
                              governance: GenerationGovernance) async throws -> Int {
         guard let mtmdCtx = mtmdContext else { throw EngineError.visionUnavailable }
         let marker = String(cString: mtmd_default_marker())
-        let rawPrompt = renderPrompt(Self.injectMediaMarkers(kept, marker: marker))
-        let promptText = (startPos > 0 && !rawPrompt.hasPrefix("\n")) ? ("\n" + rawPrompt) : rawPrompt
+        let promptText = renderPrompt(Self.injectMediaMarkers(kept, marker: marker))
 
         // Decode each attached image (encoded JPEG/PNG bytes) into an mtmd bitmap, in prompt order.
         var bitmaps: [OpaquePointer?] = []
@@ -1200,7 +1201,7 @@ public actor LlamaEngine: LLMEngine {
         let tokenizeRC: Int32 = promptText.withCString { cText -> Int32 in
             // text_len in BYTES (matches the text path's `utf8.count`), robust to any embedded null.
             var input = mtmd_input_text(text: cText, text_len: promptText.utf8.count,
-                                        add_special: startPos == 0, parse_special: true)
+                                        add_special: true, parse_special: true)
             var bmpArray = bitmaps
             return bmpArray.withUnsafeMutableBufferPointer { buf in
                 mtmd_tokenize(mtmdCtx, chunks, &input, buf.baseAddress, bitmaps.count)
@@ -1210,7 +1211,7 @@ public actor LlamaEngine: LLMEngine {
 
         // Evaluate chunk-by-chunk into the KV cache; only the last chunk needs logits (for the first sample).
         let nChunks = mtmd_input_chunks_size(chunks)
-        var nPast: llama_pos = startPos
+        var nPast: llama_pos = 0
         for idx in 0..<nChunks {
             try await governance.checkpoint()
             guard self.context == context else { throw CancellationError() }
@@ -1224,7 +1225,7 @@ public actor LlamaEngine: LLMEngine {
             if Task.isCancelled || governance.isCancelled { throw CancellationError() }
             guard self.context == context else { throw CancellationError() }   // reentrant teardown
         }
-        return Int(nPast - startPos)
+        return Int(mtmd_helper_get_n_tokens(chunks))
     }
 
     /// Downsample large input images (e.g. 12MP/48MP camera shots) to an optimal max dimension

@@ -290,7 +290,8 @@ private enum LocalModelGeneration {
             // error (or simply close) when their producer task is cancelled. Cancellation
             // is an attempt interruption, never an engine failure eligible for retry.
             if Task.isCancelled { throw CancellationError() }
-            return try await fail(engineFailure(), responseBytes: 0, emitter: emitter)
+            NSLog("[LocalModelProvider] Local model execution failed: %@", String(describing: error))
+            return try await fail(engineFailure(error), responseBytes: 0, emitter: emitter)
         }
 
         try Task.checkCancellation()
@@ -807,8 +808,12 @@ private enum LocalModelGeneration {
         )
     }
 
-    private static func engineFailure() -> AgentFailure {
-        try! AgentFailure(
+    private static func engineFailure(_ error: Error? = nil) -> AgentFailure {
+        var details: [String: String] = [:]
+        if let error {
+            details["reason"] = String(describing: error)
+        }
+        return try! AgentFailure(
             code: "model.local.engine-failure",
             classification: .transient,
             safeMessage: "The local model engine stopped before completing this attempt.",
@@ -818,6 +823,7 @@ private enum LocalModelGeneration {
             ),
             externalEffect: .confirmedNone,
             requiredUserAction: .none,
+            details: details,
             redaction: RedactionMetadata(classification: .internalMetadata, policyVersion: 1)
         )
     }
