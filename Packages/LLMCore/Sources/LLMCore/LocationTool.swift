@@ -495,3 +495,14 @@ public struct MapKitTool: Tool {
         }
     }
 }
+
+// MARK: - Helpers
+
+private func errorText(_ error: Error) -> String {
+    if case MapKitError.searchFailed(let m) = error { return m }
+    if case MapKitError.routeFailed(let m) = error { return m }
+    if case MapKitError.etaFailed(let m) = error { return m }
+    if case MapKitError.invalidParameters(let m) = error { return m }
+    if case LocationError.unavailable(let m) = error { return m }
+    return error.localizedDescription.isEmpty ? "\(error)" : error.localizedDescription
+}
