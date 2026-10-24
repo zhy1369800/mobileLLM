@@ -370,6 +370,7 @@ public actor LlamaEngine: LLMEngine {
         let initialCachedSessionTokensCount = sessionCache.tokens.count
         let initialCachedSessionTokenCount = sessionCache.tokenCount
         var isIncrementalContinuation = false
+        var hasImages = false
         do {
             // Handles cancellation that won the race before this actor task started.
             try await governance.cooperativeCheckpoint()
@@ -447,7 +448,7 @@ public actor LlamaEngine: LLMEngine {
             var promptTokenCount: Int = 0
             var cachedRollbackTokensCount: Int = 0
             var rollbackDiagnosticMessage: String? = nil
-            let hasImages = kept.contains { !$0.images.isEmpty }
+            hasImages = kept.contains { !$0.images.isEmpty }
 
             // Check if this turn is an incremental continuation of the cached session:
             // Condition:
