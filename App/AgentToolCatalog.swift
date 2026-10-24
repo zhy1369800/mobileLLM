@@ -238,10 +238,11 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
                 timeoutMilliseconds: 15_000
             ))
         }
+        let actualMapKit: (any MapKitProviding)?
         #if canImport(MapKit)
-        let actualMapKit = mapKitProvider ?? MapKitProvider()
+        actualMapKit = mapKitProvider ?? MapKitProvider()
         #else
-        let actualMapKit = mapKitProvider
+        actualMapKit = mapKitProvider
         #endif
         if enabled.contains("map_kit_tool"), let actualMapKit {
             try register(AppSystemDataToolAdapter(
