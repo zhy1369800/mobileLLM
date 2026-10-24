@@ -540,7 +540,7 @@ struct SettingsView: View {
                     Text("Off generates one token at a time (standard). Prompt Lookup drafts tokens using repeated patterns. Native MTP prioritizes built-in MTP layers when available, falling back to Prompt Lookup.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                     HStack {
-                        Text("Prefill batch (n_batch / n_ubatch)").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                        Text("Prefill Batch").font(.subheadline).foregroundStyle(Theme.textSecondary)
                         Spacer()
                         Menu {
                             ForEach([256, 512, 1_024], id: \.self) { value in

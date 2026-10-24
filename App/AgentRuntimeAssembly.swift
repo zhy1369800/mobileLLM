@@ -778,6 +778,24 @@ public final class AgentRuntimeAssembly {
                         }
                         return .off
                     },
+                    currentThinkingBudget: {
+                        if let data = UserDefaults.standard.data(forKey: AppConfigurationKeys.settingsStorageKey),
+                           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                           let budget = json["thinkingBudget"] as? Int,
+                           budget >= 0 {
+                            return budget
+                        }
+                        return 512
+                    },
+                    currentPrefillBatchSize: {
+                        if let data = UserDefaults.standard.data(forKey: AppConfigurationKeys.settingsStorageKey),
+                           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                           let batch = json["prefillBatchSize"] as? Int,
+                           batch >= 128 {
+                            return batch
+                        }
+                        return 512
+                    },
                     recordDiagnostic: { code, metadata in
                         await diagnosticLogger.record(code: code, metadata: metadata)
                     }

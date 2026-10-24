@@ -319,6 +319,8 @@ struct LocalModelLogDetailView: View {
                 metricRow("Temperature", value: String(format: "%.2f", entry.sampling.temperature))
                 metricRow("Top P / Top K", value: "\(entry.sampling.topP) / \(entry.sampling.topK)")
                 metricRow("Max Tokens", value: "\(entry.sampling.maxTokens)")
+                metricRow("Thinking Budget", value: entry.sampling.thinkingBudget == 0 ? "Auto" : "\(entry.sampling.thinkingBudget)")
+                metricRow("Prefill Batch", value: "\(entry.sampling.prefillBatchSize)")
                 metricRow("Speculative Mode", value: entry.sampling.speculativeMode.displayName)
                 if let stats = entry.stats {
                     Divider().background(Theme.hairline)

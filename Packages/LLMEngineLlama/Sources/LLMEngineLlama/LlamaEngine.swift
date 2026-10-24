@@ -316,7 +316,8 @@ public actor LlamaEngine: LLMEngine {
             if ctx == nil && kvBits != 0 {
                 var safeCp = llama_context_default_params()
                 safeCp.n_ctx = UInt32(target)
-                safeCp.n_batch = 512
+                safeCp.n_batch = UInt32(targetBatch)
+                safeCp.n_ubatch = UInt32(targetBatch)
                 safeCp.n_threads = nThreads
                 safeCp.n_threads_batch = nThreads
                 ctx = llama_init_from_model(model, safeCp)
@@ -1189,7 +1190,7 @@ public actor LlamaEngine: LLMEngine {
                                                    Int32(nBatch), /*logits_last*/ isLast, &newNPast)
             guard rc == 0 else { throw EngineError.decodeFailed }
             nPast = newNPast
-            await Task.yield()
+            if Task.isCancelled || governance.isCancelled { throw CancellationError() }
             guard self.context == context else { throw CancellationError() }   // reentrant teardown
         }
         return Int(mtmd_helper_get_n_tokens(chunks))

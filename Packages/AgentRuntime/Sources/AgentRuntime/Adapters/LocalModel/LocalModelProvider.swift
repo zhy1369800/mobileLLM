@@ -17,6 +17,10 @@ public struct LocalModelAdapterConfiguration: Sendable {
     public let currentKVBits: (@Sendable () -> Int)?
     /// Dynamic accessor for the user's configured speculative decoding mode. Defaults to reading AppSettings snapshot if unprovided.
     public let currentSpeculativeMode: (@Sendable () -> SpeculativeMode)?
+    /// Dynamic accessor for the user's configured thinking budget. Defaults to reading AppSettings snapshot if unprovided.
+    public let currentThinkingBudget: (@Sendable () -> Int)?
+    /// Dynamic accessor for the user's configured prefill batch size. Defaults to reading AppSettings snapshot if unprovided.
+    public let currentPrefillBatchSize: (@Sendable () -> Int)?
 
     public init(
         maximumImageBytes: UInt64 = 32 * 1_024 * 1_024,
@@ -27,6 +31,8 @@ public struct LocalModelAdapterConfiguration: Sendable {
         },
         currentKVBits: (@Sendable () -> Int)? = nil,
         currentSpeculativeMode: (@Sendable () -> SpeculativeMode)? = nil,
+        currentThinkingBudget: (@Sendable () -> Int)? = nil,
+        currentPrefillBatchSize: (@Sendable () -> Int)? = nil,
         recordDiagnostic: @escaping @Sendable (String, [String: String]) async -> Void = { _, _ in }
     ) throws {
         guard maximumImageBytes > 0,
@@ -39,6 +45,8 @@ public struct LocalModelAdapterConfiguration: Sendable {
         self.nowMilliseconds = nowMilliseconds
         self.currentKVBits = currentKVBits
         self.currentSpeculativeMode = currentSpeculativeMode
+        self.currentThinkingBudget = currentThinkingBudget
+        self.currentPrefillBatchSize = currentPrefillBatchSize
         self.recordDiagnostic = recordDiagnostic
     }
 }
@@ -547,7 +555,10 @@ private enum LocalModelGeneration {
         return .off
     }
 
-    private static func resolvedThinkingBudget() -> Int {
+    private static func resolvedThinkingBudget(configuration: LocalModelAdapterConfiguration) -> Int {
+        if let custom = configuration.currentThinkingBudget {
+            return custom()
+        }
         if let data = UserDefaults.standard.data(forKey: AppConfigurationKeys.settingsStorageKey),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let budget = json["thinkingBudget"] as? Int, budget >= 0 {
@@ -556,7 +567,10 @@ private enum LocalModelGeneration {
         return 512
     }
 
-    private static func resolvedPrefillBatchSize() -> Int {
+    private static func resolvedPrefillBatchSize(configuration: LocalModelAdapterConfiguration) -> Int {
+        if let custom = configuration.currentPrefillBatchSize {
+            return custom()
+        }
         if let data = UserDefaults.standard.data(forKey: AppConfigurationKeys.settingsStorageKey),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let batch = json["prefillBatchSize"] as? Int, batch >= 128 {
@@ -587,8 +601,8 @@ private enum LocalModelGeneration {
             quantizedKVStart: 256,
             seed: parameters.seed,
             speculativeMode: resolvedSpeculativeMode(configuration: configuration),
-            thinkingBudget: resolvedThinkingBudget(),
-            prefillBatchSize: resolvedPrefillBatchSize()
+            thinkingBudget: resolvedThinkingBudget(configuration: configuration),
+            prefillBatchSize: resolvedPrefillBatchSize(configuration: configuration)
         )
     }
 
