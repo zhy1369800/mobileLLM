@@ -542,9 +542,9 @@ public actor LlamaEngine: LLMEngine {
             } else if hasImages {
                 // Multimodal full evaluation: image turn or conversation diverged
                 sessionCache.reset(context: context)
-                let safeVisionBatch = min(nBatch, 512)
+                // let safeVisionBatch = min(nBatch, 512)
                 promptTokenCount = try await mtmdPrefill(kept: kept, context: context,
-                                                         renderPrompt: renderPrompt, nBatch: safeVisionBatch,
+                                                         renderPrompt: renderPrompt, nBatch: nBatch,
                                                          governance: governance)
             } else {
                 // Pure text evaluation: Prefix Rollback optimization with clean slate fallback
