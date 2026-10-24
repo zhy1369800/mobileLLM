@@ -33,7 +33,7 @@ final class AgentRunStepPresentationTests: XCTestCase {
             "Fetch: https://example.com"
         )
         XCTAssertEqual(
-            AgentRunStore.actionPreview(toolName: "create_reminder", argumentsJSON: #"{"title":"Water plants"}"#),
+            AgentRunStore.actionPreview(toolName: "reminder_task_tool", argumentsJSON: #"{"title":"Water plants"}"#),
             "Remind: Water plants"
         )
     }

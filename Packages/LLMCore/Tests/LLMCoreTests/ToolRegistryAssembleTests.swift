@@ -35,9 +35,9 @@ final class ToolRegistryAssembleTests: XCTestCase {
         // A store alone isn't enough — calendar ids are off by default.
         XCTAssertFalse(names(ToolRegistry.assemble(eventStore: FakeEventStore())).contains("create_calendar_event"))
         let cfg = BuiltInToolConfig(enabled: BuiltInToolConfig.defaultEnabled
-            .union([.createCalendarEvent, .listCalendarEvents, .createReminder]))
+            .union([.createCalendarEvent, .listCalendarEvents, .reminderTask]))
         let n = names(ToolRegistry.assemble(config: cfg, eventStore: FakeEventStore()))
-        XCTAssertTrue(n.isSuperset(of: ["create_calendar_event", "list_calendar_events", "create_reminder"]))
+        XCTAssertTrue(n.isSuperset(of: ["create_calendar_event", "list_calendar_events", "reminder_task_tool"]))
     }
 
     func testLocationToolNeedsEnableAndProvider() {

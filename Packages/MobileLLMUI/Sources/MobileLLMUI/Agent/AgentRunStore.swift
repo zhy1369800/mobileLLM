@@ -915,8 +915,17 @@ extension AgentRunStore {
             return value(["url", "address"]).map { "Fetch: \($0)" } ?? fallback
         case "create_calendar_event":
             return value(["title"]).map { "Add event: \($0)" } ?? fallback
-        case "create_reminder":
-            return value(["title"]).map { "Remind: \($0)" } ?? fallback
+        case "reminder_task_tool":
+            if let title = value(["title"]) {
+                if let act = value(["action"]), !act.isEmpty {
+                    return "\(act.replacingOccurrences(of: "_", with: " ").capitalized): \(title)"
+                }
+                return "Remind: \(title)"
+            }
+            if let act = value(["action"]), !act.isEmpty {
+                return act.replacingOccurrences(of: "_", with: " ").capitalized
+            }
+            return fallback
         case "list_calendar_events":
             return value(["daysAhead"]).map { "List events: next \($0) day(s)" } ?? "List upcoming events"
         case "current_datetime", "current_location":

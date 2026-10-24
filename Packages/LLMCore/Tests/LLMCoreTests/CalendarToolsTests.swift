@@ -99,38 +99,6 @@ final class CalendarToolsTests: XCTestCase {
         XCTAssertTrue(out.contains("Calendar access is off"), out)
     }
 
-    // MARK: create_reminder
-
-    func testCreateReminderWithDue() async {
-        let store = FakeEventStore()
-        let out = await CreateReminderTool(store: store)
-            .execute(argumentsJSON: #"{"title":"Call mom","due":"2026-07-20T09:00:00Z"}"#)
-        XCTAssertTrue(out.contains("Reminder set"), out)
-        let created = await store.createdReminders
-        XCTAssertEqual(created.first?.title, "Call mom")
-        XCTAssertNotNil(created.first?.due)
-    }
-
-    func testCreateReminderNoDue() async {
-        let store = FakeEventStore()
-        let out = await CreateReminderTool(store: store).execute(argumentsJSON: #"{"title":"Buy milk"}"#)
-        XCTAssertTrue(out.contains("Reminder set"), out)
-        let created = await store.createdReminders
-        XCTAssertNil(created.first?.due)
-    }
-
-    func testCreateReminderBadDue() async {
-        let out = await CreateReminderTool(store: FakeEventStore())
-            .execute(argumentsJSON: #"{"title":"X","due":"soon"}"#)
-        XCTAssertTrue(out.hasPrefix("Error"), out)
-    }
-
-    func testCreateReminderAccessDenied() async {
-        let out = await CreateReminderTool(store: FakeEventStore(denyReminders: true))
-            .execute(argumentsJSON: #"{"title":"X"}"#)
-        XCTAssertTrue(out.contains("Reminders access is off"), out)
-    }
-
     // MARK: ISO 8601 parsing
 
     func testISO8601ParsingAcceptsCommonFormsRejectsGarbage() {
@@ -173,11 +141,11 @@ final class CalendarToolsTests: XCTestCase {
     }
 
     /// End-to-end: the reminder tool accepts the exact string the device model emitted.
-    func testCreateReminderAcceptsRelativeDue() async {
+    func testReminderTaskToolAcceptsRelativeDue() async {
         let store = FakeEventStore()
-        let tool = CreateReminderTool(store: store)
-        let out = await tool.execute(argumentsJSON: #"{"title":"闹钟提醒","due":"now + 1 hour"}"#)
-        XCTAssertFalse(out.hasPrefix("Error"), "relative due must parse, got: \(out)")
+        let tool = ReminderTaskTool(store: store)
+        let out = await tool.execute(argumentsJSON: #"{"title":"闹钟提醒","due_date":"now + 1 hour"}"#)
+        XCTAssertTrue(out.contains("Created reminder"), "relative due must parse, got: \(out)")
         let created = await store.createdReminders
         XCTAssertEqual(created.count, 1)
         if let due = created.first?.due {

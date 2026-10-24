@@ -193,12 +193,12 @@ final class MalformedToolCallRecoveryTests: XCTestCase {
 
     func testMalformedBodyIsReportedNotDropped() {
         var p = ToolCallProcessor()
-        var events = p.feed("<tool_call>{\"name\": \"create_reminder\", \"arguments\": {oops}</tool_call>")
+        var events = p.feed("<tool_call>{\"name\": \"reminder_task_tool\", \"arguments\": {oops}</tool_call>")
         events += p.finish()
         guard case .malformed(let body)? = events.first else {
             return XCTFail("a malformed body must surface, got \(events)")
         }
-        XCTAssertTrue(body.contains("create_reminder"), "the raw body rides along so the model sees its mistake")
+        XCTAssertTrue(body.contains("reminder_task_tool"), "the raw body rides along so the model sees its mistake")
     }
 
     func testUnterminatedMalformedCallAtStreamEndIsReported() {

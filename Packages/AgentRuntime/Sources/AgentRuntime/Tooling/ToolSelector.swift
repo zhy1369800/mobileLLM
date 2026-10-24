@@ -329,8 +329,8 @@ public struct DeterministicToolSelector: Sendable {
                 score += 300
             }
         }
-        if ["create_reminder", "reminders"].contains(name) {
-            if ["提醒", "备忘", "别忘"].contains(where: { lower.contains($0) }) {
+        if ["reminder_task_tool", "reminders"].contains(name) {
+            if ["提醒", "备忘", "别忘", "待办"].contains(where: { lower.contains($0) }) {
                 score += 300
             }
         }

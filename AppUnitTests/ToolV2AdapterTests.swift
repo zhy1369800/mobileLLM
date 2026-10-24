@@ -449,15 +449,6 @@ final class ToolV2AdapterTests: XCTestCase {
                 "Events in the next"
             ),
             (
-                CreateReminderTool(store: store),
-                [.localWrite],
-                "mobilellm.reminders",
-                "user.reminders",
-                ["title": .string("Water plants"),
-                 "due": .string("2026-08-10T09:00:00")],
-                "Reminder set"
-            ),
-            (
                 ReminderTaskTool(store: store),
                 [.localWrite],
                 "mobilellm.reminders",

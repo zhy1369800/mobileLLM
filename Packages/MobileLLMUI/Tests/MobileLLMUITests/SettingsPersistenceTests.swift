@@ -268,8 +268,7 @@ final class SettingsPersistenceTests: XCTestCase {
     /// every other built-in on.
     func testFreshInstallDisablesOnlyPrivacyTools() {
         let settings = AppSettings(defaults: defaults)
-        XCTAssertEqual(settings.disabledBuiltInTools,
-                       ["create_calendar_event", "list_calendar_events", "create_reminder", "current_location"])
+        XCTAssertEqual(settings.disabledBuiltInTools, AppSettings.defaultDisabledBuiltInTools)
         XCTAssertEqual(settings.builtInToolConfig.enabled, BuiltInToolConfig.defaultEnabled)
     }
 

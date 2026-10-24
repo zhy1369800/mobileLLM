@@ -1518,8 +1518,8 @@ final class PhysicalDeviceFullStackUITests: DeviceE2ETestCase {
             ("list_calendar_events",
              "\(marker)\nCall the list_calendar_events tool exactly once with daysAhead 7, "
                  + "then reply in one short line."),
-            ("create_reminder",
-             "\(marker)\nCall the create_reminder tool exactly once with title \"E2E \(marker) "
+            ("reminder_task_tool",
+             "\(marker)\nCall the reminder_task_tool tool exactly once with action \"create_reminder\", title \"E2E \(marker) "
                  + "reminder\" and no due time, then reply in one short line."),
             ("current_location",
              "\(marker)\nCall the current_location tool exactly once with no arguments, "

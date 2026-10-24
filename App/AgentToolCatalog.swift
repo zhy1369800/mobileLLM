@@ -112,7 +112,6 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         let systemDataTools: [(name: String, schema: ToolSchema, seam: Bool)] = [
             ("create_calendar_event", CreateCalendarEventTool.schema, eventSeamAvailable),
             ("list_calendar_events", ListCalendarEventsTool.schema, eventSeamAvailable),
-            ("create_reminder", CreateReminderTool.schema, eventSeamAvailable),
             ("reminder_task_tool", ReminderTaskTool.schema, eventSeamAvailable),
             ("current_location", CurrentLocationTool.schema, locationSeamAvailable),
             ("shortcut_automation_tool", ShortcutAutomationTool.schema, shortcutSeamAvailable),
@@ -227,17 +226,6 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
                 timeoutMilliseconds: 5_000
             ))
         }
-        if enabled.contains("create_reminder"), let eventStore {
-            try register(AppSystemDataToolAdapter(
-                tool: CreateReminderTool(store: eventStore),
-                effects: [.localWrite],
-                destinationIdentity: "mobilellm.reminders",
-                dataCategory: "user.reminders",
-                userPreview: "Create a reminder for the user",
-                trustRevision: "builtin.v1",
-                timeoutMilliseconds: 5_000
-            ))
-        }
         if enabled.contains("reminder_task_tool"), let eventStore {
             try register(AppSystemDataToolAdapter(
                 tool: ReminderTaskTool(store: eventStore),
@@ -302,7 +290,7 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         case "wikipedia", "fetch_webpage": [.networkRead]
         case "remember": [.localWrite]
         case "recall": [.localRead]
-        case "create_calendar_event", "create_reminder", "reminder_task_tool": [.localWrite]
+        case "create_calendar_event", "reminder_task_tool": [.localWrite]
         case "list_calendar_events", "current_location": [.localRead]
         case "shortcut_automation_tool": [.localWrite, .unknownExternal]
         default: [.localPure]
@@ -315,7 +303,7 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
 
     private static func idempotency(for name: String) -> ExternalIdempotency {
         // A write tool cannot declare pure-read idempotency (descriptor semantics validation).
-        name == "remember" || name == "create_calendar_event" || name == "create_reminder" || name == "reminder_task_tool" || name == "shortcut_automation_tool"
+        name == "remember" || name == "create_calendar_event" || name == "reminder_task_tool" || name == "shortcut_automation_tool"
             ? .nonIdempotent : .pureRead
     }
 

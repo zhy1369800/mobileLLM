@@ -609,7 +609,7 @@ struct AppFrozenInputBuilder: Sendable {
                 ))
                 ceilingDataCategories.append(try AgentDataCategory(rawValue: "user.calendar"))
             }
-            if enabledTools.contains("create_reminder") {
+            if enabledTools.contains("reminder_task_tool") {
                 ceilingDestinations.append(try ExternalDestination(
                     kind: .privateDataStore,
                     normalizedIdentity: "mobilellm.reminders"

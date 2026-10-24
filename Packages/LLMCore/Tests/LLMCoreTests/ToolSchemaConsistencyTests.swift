@@ -22,10 +22,6 @@ final class ToolSchemaConsistencyTests: XCTestCase {
             ListCalendarEventsTool(store: FakeEventStore()).schema
         )
         XCTAssertEqual(
-            CreateReminderTool.schema,
-            CreateReminderTool(store: FakeEventStore()).schema
-        )
-        XCTAssertEqual(
             ReminderTaskTool.schema,
             ReminderTaskTool(store: FakeEventStore()).schema
         )

@@ -329,7 +329,7 @@ struct BuiltInToolRow: Identifiable {
               icon: "calendar", toolIDs: [.createCalendarEvent, .listCalendarEvents], privacy: true),
         .init(id: "reminders", title: "Reminders",
               subtitle: "Manage reminders and to-do lists in the Reminders app.",
-              icon: "checklist", toolIDs: [.createReminder, .reminderTask], privacy: true),
+              icon: "checklist", toolIDs: [.reminderTask], privacy: true),
         .init(id: "location", title: "Location",
               subtitle: "Use your approximate (city-level) location.",
               icon: "location", toolIDs: [.currentLocation], privacy: true),

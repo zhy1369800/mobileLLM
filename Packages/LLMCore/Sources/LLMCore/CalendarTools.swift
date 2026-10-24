@@ -417,50 +417,6 @@ public struct ListCalendarEventsTool: Tool {
     }
 }
 
-/// Create a reminder for the user.
-public struct CreateReminderTool: Tool {
-    private let store: any EventStoring
-    public init(store: any EventStoring) { self.store = store }
-
-    /// Schema without a store instance (see `RememberTool.schema`).
-    public static let schema: ToolSchema = ToolSchema(name: "create_reminder",
-                   description: "Create a reminder in the user's Reminders. Use when the user asks to be "
-                              + "reminded to do something, optionally by a due time.",
-                   parameters: [
-                       ToolParam(name: "title", kind: .string, description: "What to be reminded of"),
-                       ToolParam(name: "due", kind: .string,
-                                 description: "Due time — ISO 8601 (2026-07-20T09:00) or relative "
-                                            + "(\"now + 1 hour\", \"明天 09:00\") (optional)", required: false),
-                       ToolParam(name: "notes", kind: .string, description: "Optional notes", required: false),
-                   ])
-
-    public var schema: ToolSchema { Self.schema }
-
-    public func execute(argumentsJSON: String) async -> String {
-        let call = ToolCall(name: "create_reminder", argumentsJSON: argumentsJSON)
-        guard let title = call.arg("title")?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
-            return "Error: missing reminder 'title'."
-        }
-        var due: Date?
-        if let dueRaw = call.arg("due"), !dueRaw.trimmingCharacters(in: .whitespaces).isEmpty {
-            guard let parsed = ISO8601Parsing.date(from: dueRaw) else {
-                return "Error: couldn't read 'due' as a date/time — use ISO 8601 (2026-07-20T09:00) or a relative time like \"now + 1 hour\"."
-            }
-            due = parsed
-        }
-        let draft = ReminderDraft(title: title, due: due, notes: call.arg("notes"))
-        do {
-            _ = try await store.createReminder(draft)
-            if let due { return "Reminder set: \"\(title)\" for \(ISO8601Parsing.display(due))." }
-            return "Reminder set: \"\(title)\"."
-        } catch EventStoreError.reminderAccessDenied {
-            return "Reminders access is off — enable it in Settings to add reminders."
-        } catch {
-            return "Couldn't set the reminder: \(errorText(error))."
-        }
-    }
-}
-
 /// Unified tool for managing reminders and to-do lists (queries, creation, updates, completion, deletion).
 public struct ReminderTaskTool: Tool {
     private let store: any EventStoring
