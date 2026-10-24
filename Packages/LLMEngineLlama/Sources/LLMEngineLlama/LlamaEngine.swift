@@ -465,7 +465,6 @@ public actor LlamaEngine: LLMEngine {
             let incrementalReserve = min(reserve, 256)
 
             var incrementalSuffixTokens: [llama_token]? = nil
-            var canAttemptIncrementalMultimodal = false
             if prefixMatched && !newTurnsCarryImages {
                 let suffixText: String
                 if !hasImages, let m = model,
@@ -494,19 +493,6 @@ public actor LlamaEngine: LLMEngine {
                     NSLog("[LlamaEngine] Incremental continuation skipped: KV cache headroom exceeded or empty tokens (used=%d, suffix=%d, reserve=%d, cap=%d). Falling back to full evaluation.",
                           Int32(sessionCache.tokenCount), Int32(tokens.count), Int32(incrementalReserve), Int32(contextCap))
                 }
-            } else if prefixMatched && newTurnsCarryImages {
-                let fallback = Self.buildPrompt(messages: newTurns, template: promptTemplate,
-                                                reasoning: reasoningStyle, thinking: wantThinking)
-                let suffixText = fallback.hasPrefix("\n") ? fallback : ("\n" + fallback)
-                let textTokens = Self.tokenize(vocab: vocab, text: suffixText, addSpecial: false)
-                let estimatedTokens = textTokens.count + Self.imageTokenCount(newTurns)
-                if sessionCache.tokenCount + estimatedTokens + incrementalReserve <= contextCap {
-                    canAttemptIncrementalMultimodal = true
-                } else {
-                    NSLog("[LlamaEngine] Incremental multimodal continuation skipped: KV cache headroom exceeded (used=%d, estimatedSuffix=%d, reserve=%d, cap=%d). Falling back to full evaluation.",
-                          Int32(sessionCache.tokenCount), Int32(estimatedTokens), Int32(incrementalReserve), Int32(contextCap))
-                }
-            } else if previousCount > 0 {
                 let countOk = kept.count > previousCount
                 let prefixOk = countOk && Array(kept.prefix(previousCount)) == sessionCache.turns
                 NSLog("[LlamaEngine] Incremental continuation rejected: kept.count=%d (cached %d), prefixMatch=%@",
@@ -549,14 +535,6 @@ public actor LlamaEngine: LLMEngine {
                 promptTokenCount = suffixTokens.count
                 // Note: conversationTokens for speculative n-gram lookup is built lazily below,
                 // only when speculative mode is active and prompt lookup is actually in use.
-            } else if canAttemptIncrementalMultimodal {
-                isIncrementalContinuation = true
-                NSLog("[LlamaEngine] Incremental multimodal continuation matched! New turns: %d, cached pos: %d",
-                      Int32(newTurns.count), Int32(sessionCache.tokenCount))
-                promptTokenCount = try await mtmdPrefill(kept: newTurns, context: context,
-                                                         renderPrompt: renderPrompt, nBatch: nBatch,
-                                                         startPos: Int32(sessionCache.tokenCount),
-                                                         governance: governance)
             } else if hasImages {
                 // Multimodal full evaluation: first image turn or conversation diverged
                 sessionCache.reset(context: context)
