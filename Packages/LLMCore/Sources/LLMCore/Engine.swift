@@ -86,6 +86,8 @@ public struct Stats: Sendable, Equatable, Codable {
     public var backend: String?
     /// Diagnostic summary of KV cache prefix rollback evaluation and execution.
     public var rollbackDiagnostic: String?
+    /// Actual effective n_batch / n_ubatch allocated on the live context (may be 512 if Attempt 3 fallback triggered).
+    public var effectiveBatchSize: Int?
 
     /// Cache hit rate (0.0 ... 1.0) of prompt tokens.
     public var cacheHitRate: Double {
@@ -101,7 +103,8 @@ public struct Stats: Sendable, Equatable, Codable {
                 cachedPromptTokens: Int? = nil,
                 gpuLayers: Int? = nil,
                 backend: String? = nil,
-                rollbackDiagnostic: String? = nil) {
+                rollbackDiagnostic: String? = nil,
+                effectiveBatchSize: Int? = nil) {
         self.promptTokens = promptTokens
         self.genTokens = genTokens
         self.promptTPS = promptTPS
@@ -114,11 +117,12 @@ public struct Stats: Sendable, Equatable, Codable {
         self.gpuLayers = gpuLayers
         self.backend = backend
         self.rollbackDiagnostic = rollbackDiagnostic
+        self.effectiveBatchSize = effectiveBatchSize
     }
 
     enum CodingKeys: String, CodingKey {
         case promptTokens, genTokens, promptTPS, tokensPerSecond, peakMemoryBytes, stopReason, speculativeStats
-        case ttftSeconds, cachedPromptTokens, gpuLayers, backend, rollbackDiagnostic
+        case ttftSeconds, cachedPromptTokens, gpuLayers, backend, rollbackDiagnostic, effectiveBatchSize
     }
 
     public init(from decoder: Decoder) throws {
@@ -135,6 +139,7 @@ public struct Stats: Sendable, Equatable, Codable {
         gpuLayers = try container.decodeIfPresent(Int.self, forKey: .gpuLayers)
         backend = try container.decodeIfPresent(String.self, forKey: .backend)
         rollbackDiagnostic = try container.decodeIfPresent(String.self, forKey: .rollbackDiagnostic)
+        effectiveBatchSize = try container.decodeIfPresent(Int.self, forKey: .effectiveBatchSize)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -151,6 +156,7 @@ public struct Stats: Sendable, Equatable, Codable {
         try container.encodeIfPresent(gpuLayers, forKey: .gpuLayers)
         try container.encodeIfPresent(backend, forKey: .backend)
         try container.encodeIfPresent(rollbackDiagnostic, forKey: .rollbackDiagnostic)
+        try container.encodeIfPresent(effectiveBatchSize, forKey: .effectiveBatchSize)
     }
 }
 

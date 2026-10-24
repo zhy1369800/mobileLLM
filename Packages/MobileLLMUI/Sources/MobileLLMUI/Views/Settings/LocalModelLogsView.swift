@@ -320,7 +320,10 @@ struct LocalModelLogDetailView: View {
                 metricRow("Top P / Top K", value: "\(entry.sampling.topP) / \(entry.sampling.topK)")
                 metricRow("Max Tokens", value: "\(entry.sampling.maxTokens)")
                 metricRow("Thinking Budget", value: entry.sampling.thinkingBudget == 0 ? "Auto" : "\(entry.sampling.thinkingBudget)")
-                metricRow("Prefill Batch", value: "\(entry.sampling.prefillBatchSize)")
+                let reqBatch = entry.sampling.prefillBatchSize
+                let actBatch = entry.stats?.effectiveBatchSize ?? reqBatch
+                let batchText = actBatch == reqBatch ? "\(actBatch)" : "\(actBatch) (回退自 \(reqBatch))"
+                metricRow("Prefill Batch", value: batchText)
                 metricRow("Speculative Mode", value: entry.sampling.speculativeMode.displayName)
                 if let stats = entry.stats {
                     Divider().background(Theme.hairline)

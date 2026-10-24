@@ -80,7 +80,8 @@ public actor LlamaEngine: LLMEngine {
     private var projectorPath: String?
     private var contextCap: Int = 0          // the n_ctx the live context was built with
     private var contextKVBits: Int = -1      // the Sampling.kvBits the live context's KV cache was built for
-    private var contextBatchSize: Int = 0    // the n_batch / n_ubatch the live context was built with
+    private var contextBatchSize: Int = 0    // the actual effective n_batch / n_ubatch the live context was built with
+    private var contextRequestedBatchSize: Int = 0
     private var sessionCache = SessionCacheState()
     private var loadedID: String?
     private var thinkingCapable = true
@@ -173,7 +174,7 @@ public actor LlamaEngine: LLMEngine {
         supportsPartialTrim = true
         NSLog("[LlamaEngine] Model loaded: id=%@, MTP supported=%d, gpu_layers=%d",
               modelSpec.id, hasMtpSupport ? 1 : 0, loadedGpuLayers)
-        context = nil; contextCap = 0; contextKVBits = -1; contextBatchSize = 0
+        context = nil; contextCap = 0; contextKVBits = -1; contextBatchSize = 0; contextRequestedBatchSize = 0
 
         // Vision: RESOLVE the projector now, LOAD it on first use. Bringing the vision encoder up here
         // cost every text-only chat the whole mmproj resident — ~940 MB for Gemma 4 E2B, on a phone whose
@@ -237,7 +238,7 @@ public actor LlamaEngine: LLMEngine {
         if let model { llama_model_free(model) }
         mtmdContext = nil
         projectorPath = nil
-        context = nil; model = nil; vocab = nil; loadedID = nil; contextCap = 0; contextKVBits = -1; contextBatchSize = 0
+        context = nil; model = nil; vocab = nil; loadedID = nil; contextCap = 0; contextKVBits = -1; contextBatchSize = 0; contextRequestedBatchSize = 0
         loadedGpuLayers = 0
         hasMtpSupport = false
         supportsPartialTrim = true
@@ -251,7 +252,7 @@ public actor LlamaEngine: LLMEngine {
     private func ensureContext(cap: Int, kvBits: Int, batchSize: Int = 512) throws {
         let target = max(512, cap)
         let targetBatch = max(128, min(batchSize, target))
-        if context != nil, contextCap == target, contextKVBits == kvBits, contextBatchSize == targetBatch {
+        if context != nil, contextCap == target, contextKVBits == kvBits, contextRequestedBatchSize == targetBatch {
             // Keep KV cache resident for prefix reuse; prefill will clear if history diverges
             return
         }
@@ -260,7 +261,8 @@ public actor LlamaEngine: LLMEngine {
         // Reset BEFORE the fallible init below: if llama_init_from_model throws out of this function,
         // `context` must not keep pointing at the freed allocation (a retry would double-free, and the
         // reuse branch above would llama_memory_clear freed memory — a user-reachable UAF via kvBits).
-        context = nil; contextCap = 0; contextKVBits = -1; contextBatchSize = 0
+        context = nil; contextCap = 0; contextKVBits = -1; contextBatchSize = 0; contextRequestedBatchSize = 0
+        var effectiveBatch = targetBatch
         var cp = llama_context_default_params()
         cp.n_ctx = UInt32(target)
         cp.n_batch = UInt32(targetBatch)
@@ -314,13 +316,20 @@ public actor LlamaEngine: LLMEngine {
 
             // Attempt 3: if quantized KV cache itself was too memory-heavy or refused, retry base f16 default
             if ctx == nil && kvBits != 0 {
+                let safeBatch = min(targetBatch, 512)
                 var safeCp = llama_context_default_params()
                 safeCp.n_ctx = UInt32(target)
-                safeCp.n_batch = UInt32(targetBatch)
-                safeCp.n_ubatch = UInt32(targetBatch)
+                safeCp.n_batch = UInt32(safeBatch)
+                safeCp.n_ubatch = UInt32(safeBatch)
                 safeCp.n_threads = nThreads
                 safeCp.n_threads_batch = nThreads
+                #if !targetEnvironment(simulator)
+                safeCp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO
+                #endif
                 ctx = llama_init_from_model(model, safeCp)
+                if ctx != nil {
+                    effectiveBatch = safeBatch
+                }
             }
         }
 
@@ -330,7 +339,10 @@ public actor LlamaEngine: LLMEngine {
         context = ctx
         contextCap = target
         contextKVBits = kvBits
-        contextBatchSize = targetBatch
+        contextBatchSize = effectiveBatch
+        contextRequestedBatchSize = targetBatch
+        NSLog("[LlamaEngine] Context initialized: n_ctx=%d, effective_batch=%d (requested=%d), kvBits=%d",
+              Int32(target), Int32(effectiveBatch), Int32(targetBatch), Int32(kvBits))
     }
 
     // MARK: - Generation
@@ -1087,7 +1099,8 @@ public actor LlamaEngine: LLMEngine {
                 cachedPromptTokens: cachedPromptTokensCount,
                 gpuLayers: Int(loadedGpuLayers),
                 backend: loadedGpuLayers > 0 ? "Metal GPU" : "CPU",
-                rollbackDiagnostic: rollbackDiagnosticMessage)))
+                rollbackDiagnostic: rollbackDiagnosticMessage,
+                effectiveBatchSize: nBatch)))
 
             // Multi-turn and multimodal reuse: record valid conversational turn on natural EOS completion.
             // If KV rollback failed during speculative decoding, the physical KV cache is dirty and must not be reused.
