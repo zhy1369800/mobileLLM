@@ -543,7 +543,7 @@ struct SettingsView: View {
                         Text("Prefill batch (n_batch / n_ubatch)").font(.subheadline).foregroundStyle(Theme.textSecondary)
                         Spacer()
                         Menu {
-                            ForEach([256, 512, 1_024, 2_048], id: \.self) { value in
+                            ForEach([256, 512, 1_024], id: \.self) { value in
                                 Button("\(value)") { settings.prefillBatchSize = value }
                             }
                         } label: {
