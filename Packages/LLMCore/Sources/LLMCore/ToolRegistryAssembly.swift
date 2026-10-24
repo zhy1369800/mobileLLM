@@ -17,6 +17,7 @@ public enum ToolID: String, Sendable, Codable, Hashable, CaseIterable {
     case createCalendarEvent  = "create_calendar_event"
     case listCalendarEvents   = "list_calendar_events"
     case createReminder       = "create_reminder"
+    case reminderTask         = "reminder_task_tool"
     case currentLocation      = "current_location"
     case shortcutAutomation   = "shortcut_automation_tool"
 }
@@ -74,6 +75,7 @@ public extension ToolRegistry {
             if on(.createCalendarEvent) { tools.append(CreateCalendarEventTool(store: eventStore)) }
             if on(.listCalendarEvents)  { tools.append(ListCalendarEventsTool(store: eventStore)) }
             if on(.createReminder)      { tools.append(CreateReminderTool(store: eventStore)) }
+            if on(.reminderTask)        { tools.append(ReminderTaskTool(store: eventStore)) }
         }
         if let locationProvider, on(.currentLocation) {
             tools.append(CurrentLocationTool(provider: locationProvider))

@@ -458,6 +458,16 @@ final class ToolV2AdapterTests: XCTestCase {
                 "Reminder set"
             ),
             (
+                ReminderTaskTool(store: store),
+                [.localWrite],
+                "mobilellm.reminders",
+                "user.reminders",
+                ["action": .string("create_reminder"),
+                 "title": .string("Water plants"),
+                 "due_date": .string("2026-08-10T09:00:00")],
+                "Created reminder"
+            ),
+            (
                 CurrentLocationTool(provider: location),
                 [.localRead],
                 "mobilellm.location",

@@ -26,6 +26,10 @@ final class ToolSchemaConsistencyTests: XCTestCase {
             CreateReminderTool(store: FakeEventStore()).schema
         )
         XCTAssertEqual(
+            ReminderTaskTool.schema,
+            ReminderTaskTool(store: FakeEventStore()).schema
+        )
+        XCTAssertEqual(
             CurrentLocationTool.schema,
             CurrentLocationTool(provider: FakeLocationProvider(
                 result: .success(LocationFix(latitude: 1, longitude: 2, accuracy: 3))

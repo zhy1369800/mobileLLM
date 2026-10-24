@@ -47,13 +47,26 @@ actor FakeMemoryStore: MemoryStoring {
 actor FakeEventStore: EventStoring {
     private(set) var createdEvents: [CalendarEventDraft] = []
     private(set) var createdReminders: [ReminderDraft] = []
+    private(set) var updatedReminders: [ReminderUpdateDraft] = []
+    private(set) var completedReminderIDs: [(id: String, completed: Bool)] = []
+    private(set) var deletedReminderIDs: [String] = []
     private(set) var lastDaysAhead: Int?
     private let toReturn: [CalendarEventInfo]
+    private let remindersToReturn: [ReminderInfo]
+    private let listsToReturn: [ReminderListInfo]
     private let denyCalendar: Bool
     private let denyReminders: Bool
 
-    init(events: [CalendarEventInfo] = [], denyCalendar: Bool = false, denyReminders: Bool = false) {
-        toReturn = events; self.denyCalendar = denyCalendar; self.denyReminders = denyReminders
+    init(events: [CalendarEventInfo] = [],
+         reminders: [ReminderInfo] = [],
+         lists: [ReminderListInfo] = [],
+         denyCalendar: Bool = false,
+         denyReminders: Bool = false) {
+        toReturn = events
+        remindersToReturn = reminders
+        listsToReturn = lists
+        self.denyCalendar = denyCalendar
+        self.denyReminders = denyReminders
     }
 
     func createEvent(_ draft: CalendarEventDraft) throws -> String {
@@ -66,7 +79,40 @@ actor FakeEventStore: EventStoring {
     }
     func createReminder(_ draft: ReminderDraft) throws -> String {
         if denyReminders { throw EventStoreError.reminderAccessDenied }
-        createdReminders.append(draft); return draft.title
+        createdReminders.append(draft); return "rem-id-\(createdReminders.count)"
+    }
+    func reminders(listName: String?, includeCompleted: Bool, limit: Int?) throws -> [ReminderInfo] {
+        if denyReminders { throw EventStoreError.reminderAccessDenied }
+        var res = remindersToReturn
+        if let listName, !listName.isEmpty {
+            res = res.filter { $0.listName?.lowercased() == listName.lowercased() }
+        }
+        if !includeCompleted {
+            res = res.filter { !$0.isCompleted }
+        }
+        if let limit {
+            res = Array(res.prefix(limit))
+        }
+        return res
+    }
+    func updateReminder(_ draft: ReminderUpdateDraft) throws -> String {
+        if denyReminders { throw EventStoreError.reminderAccessDenied }
+        updatedReminders.append(draft)
+        return draft.title ?? draft.id
+    }
+    func completeReminder(id: String, completed: Bool) throws -> Bool {
+        if denyReminders { throw EventStoreError.reminderAccessDenied }
+        completedReminderIDs.append((id: id, completed: completed))
+        return true
+    }
+    func deleteReminder(id: String) throws -> Bool {
+        if denyReminders { throw EventStoreError.reminderAccessDenied }
+        deletedReminderIDs.append(id)
+        return true
+    }
+    func reminderLists() throws -> [ReminderListInfo] {
+        if denyReminders { throw EventStoreError.reminderAccessDenied }
+        return listsToReturn
     }
 }
 
