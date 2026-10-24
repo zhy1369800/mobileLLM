@@ -9,20 +9,135 @@ public struct CalendarEventDraft: Sendable, Equatable {
     public var title: String
     public var start: Date
     public var end: Date?
+    public var location: String?
     public var notes: String?
-    public init(title: String, start: Date, end: Date? = nil, notes: String? = nil) {
-        self.title = title; self.start = start; self.end = end; self.notes = notes
+    public var alarmMinutes: Int?
+    public var calendarName: String?
+
+    public init(
+        title: String,
+        start: Date,
+        end: Date? = nil,
+        location: String? = nil,
+        notes: String? = nil,
+        alarmMinutes: Int? = nil,
+        calendarName: String? = nil
+    ) {
+        self.title = title
+        self.start = start
+        self.end = end
+        self.location = location
+        self.notes = notes
+        self.alarmMinutes = alarmMinutes
+        self.calendarName = calendarName
     }
 }
 
-/// A calendar event read back for listing.
+/// A calendar event read back for listing or searching.
 public struct CalendarEventInfo: Sendable, Equatable {
+    public var id: String
     public var title: String
     public var start: Date
     public var end: Date?
+    public var isAllDay: Bool
+    public var location: String?
+    public var notes: String?
     public var calendar: String?
-    public init(title: String, start: Date, end: Date? = nil, calendar: String? = nil) {
-        self.title = title; self.start = start; self.end = end; self.calendar = calendar
+
+    public init(
+        id: String = "",
+        title: String,
+        start: Date,
+        end: Date? = nil,
+        isAllDay: Bool = false,
+        location: String? = nil,
+        notes: String? = nil,
+        calendar: String? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.start = start
+        self.end = end
+        self.isAllDay = isAllDay
+        self.location = location
+        self.notes = notes
+        self.calendar = calendar
+    }
+}
+
+/// A draft for updating an existing calendar event.
+public struct CalendarEventUpdateDraft: Sendable, Equatable {
+    public var id: String
+    public var title: String?
+    public var start: Date?
+    public var end: Date?
+    public var location: String?
+    public var notes: String?
+    public var alarmMinutes: Int?
+    public var calendarName: String?
+    public var span: String?
+
+    public init(
+        id: String,
+        title: String? = nil,
+        start: Date? = nil,
+        end: Date? = nil,
+        location: String? = nil,
+        notes: String? = nil,
+        alarmMinutes: Int? = nil,
+        calendarName: String? = nil,
+        span: String? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.start = start
+        self.end = end
+        self.location = location
+        self.notes = notes
+        self.alarmMinutes = alarmMinutes
+        self.calendarName = calendarName
+        self.span = span
+    }
+}
+
+/// Information about a system calendar.
+public struct CalendarInfo: Sendable, Equatable {
+    public var id: String
+    public var title: String
+    public var allowsContentModifications: Bool
+
+    public init(id: String, title: String, allowsContentModifications: Bool = true) {
+        self.id = id
+        self.title = title
+        self.allowsContentModifications = allowsContentModifications
+    }
+}
+
+/// A time slot for free/busy scheduling analysis.
+public struct FreeBusySlot: Sendable, Equatable {
+    public var title: String?
+    public var start: Date
+    public var end: Date
+
+    public init(title: String? = nil, start: Date, end: Date) {
+        self.title = title
+        self.start = start
+        self.end = end
+    }
+}
+
+/// Free/busy analysis result containing occupied and open intervals.
+public struct FreeBusyResult: Sendable, Equatable {
+    public var start: Date
+    public var end: Date
+    public var busySlots: [FreeBusySlot]
+    public var freeSlots: [FreeBusySlot]
+
+    public init(start: Date, end: Date, busySlots: [FreeBusySlot] = [], freeSlots: [FreeBusySlot] = []) {
+        self.start = start
+        self.end = end
+        self.busySlots = busySlots
+        self.freeSlots = freeSlots
     }
 }
 
@@ -207,8 +322,19 @@ public enum EventStoreError: Error, Sendable, Equatable {
 public protocol EventStoring: Sendable {
     /// Create an event; returns a short human label on success.
     func createEvent(_ draft: CalendarEventDraft) async throws -> String
-    /// Events starting within the next `daysAhead` days, soonest first.
-    func events(daysAhead: Int) async throws -> [CalendarEventInfo]
+    /// Events starting within the next `daysAhead` days, soonest first, with optional calendar filter.
+    func events(daysAhead: Int, calendarName: String?) async throws -> [CalendarEventInfo]
+    /// Search events matching query across past 7 days to next `daysAhead` days.
+    func searchEvents(query: String, daysAhead: Int) async throws -> [CalendarEventInfo]
+    /// Update an existing calendar event.
+    func updateEvent(_ draft: CalendarEventUpdateDraft) async throws -> String
+    /// Delete a calendar event by identifier.
+    func deleteEvent(id: String, span: String?) async throws -> Bool
+    /// List available calendar accounts/lists.
+    func calendars() async throws -> [CalendarInfo]
+    /// Analyze free and busy intervals in a date range.
+    func freebusy(start: Date, end: Date) async throws -> FreeBusyResult
+
     /// Create a reminder; returns a short human label on success.
     func createReminder(_ draft: ReminderDraft) async throws -> String
     /// List reminders with optional list filtering, completed inclusion, and limit.
@@ -234,6 +360,15 @@ public enum EventDomain: Sendable { case events, reminders }
 public extension EventStoring {
     func permissionState(for domain: EventDomain) async -> ToolPermission { .granted }
     func requestPermission(for domain: EventDomain) async -> ToolPermission { .granted }
+    func events(daysAhead: Int) async throws -> [CalendarEventInfo] {
+        try await events(daysAhead: daysAhead, calendarName: nil)
+    }
+    func events(daysAhead: Int, calendarName: String?) async throws -> [CalendarEventInfo] { [] }
+    func searchEvents(query: String, daysAhead: Int) async throws -> [CalendarEventInfo] { [] }
+    func updateEvent(_ draft: CalendarEventUpdateDraft) async throws -> String { draft.title ?? draft.id }
+    func deleteEvent(id: String, span: String?) async throws -> Bool { true }
+    func calendars() async throws -> [CalendarInfo] { [] }
+    func freebusy(start: Date, end: Date) async throws -> FreeBusyResult { FreeBusyResult(start: start, end: end) }
     func reminders(listName: String?, includeCompleted: Bool, limit: Int?) async throws -> [ReminderInfo] { [] }
     func updateReminder(_ draft: ReminderUpdateDraft) async throws -> String { draft.title ?? draft.id }
     func completeReminder(id: String, completed: Bool) async throws -> Bool { true }
@@ -336,83 +471,222 @@ enum ISO8601Parsing {
 
 // MARK: - Tools
 
-/// Add an event to the user's calendar.
-public struct CreateCalendarEventTool: Tool {
+/// Unified tool for managing calendar events (queries, keyword search, creation, updates, deletion, calendar lists, and free/busy analysis).
+public struct CalendarEventTool: Tool {
     private let store: any EventStoring
     public init(store: any EventStoring) { self.store = store }
 
-    /// Schema without a store instance (see `RememberTool.schema`).
-    public static let schema: ToolSchema = ToolSchema(name: "create_calendar_event",
-                   description: "Add an event to the user's calendar. Use when the user asks to schedule, "
-                              + "book, or add something at a specific date/time.",
-                   parameters: [
-                       ToolParam(name: "title", kind: .string, description: "Event title"),
-                       ToolParam(name: "start", kind: .string,
-                                 description: "Start — ISO 8601 (2026-07-20T15:00) or relative (\"now + 1 hour\", \"tomorrow 09:00\")"),
-                       ToolParam(name: "end", kind: .string,
-                                 description: "End — same formats (optional; defaults to one hour after start)", required: false),
-                       ToolParam(name: "notes", kind: .string, description: "Optional notes", required: false),
-                   ])
+    public static let schema: ToolSchema = ToolSchema(
+        name: "calendar_event_tool",
+        description: "Manage calendar events: query upcoming events, search events by keyword, create events with start/end time, location, notes, alarm reminder and target calendar, update existing events, delete events, list calendars, and analyze free/busy time slots for scheduling.",
+        parameters: [
+            ToolParam(name: "action", kind: .string,
+                      description: "Action to perform: list_events, search_events, create_event, update_event, delete_event, list_calendars, freebusy"),
+            ToolParam(name: "days", kind: .number,
+                      description: "Number of days to look ahead for list_events (default 7), search_events (default 30), or freebusy (default 1)", required: false),
+            ToolParam(name: "query", kind: .string,
+                      description: "Keyword query for search_events", required: false),
+            ToolParam(name: "title", kind: .string,
+                      description: "Title of the event (required for create_event)", required: false),
+            ToolParam(name: "start", kind: .string,
+                      description: "Start datetime in ISO 8601 or relative format (e.g. \"2026-07-20T15:00\", \"tomorrow 09:00\", \"now + 1 hour\")", required: false),
+            ToolParam(name: "end", kind: .string,
+                      description: "End datetime in ISO 8601 or relative format (optional; defaults to 1 hour after start)", required: false),
+            ToolParam(name: "location", kind: .string,
+                      description: "Location of the event", required: false),
+            ToolParam(name: "notes", kind: .string,
+                      description: "Notes or description of the event", required: false),
+            ToolParam(name: "alarm_minutes", kind: .number,
+                      description: "Alarm alert offset in minutes before event start (e.g. 15 for 15 minutes before)", required: false),
+            ToolParam(name: "calendar_name", kind: .string,
+                      description: "Target calendar name (e.g. \"Work\", \"Personal\")", required: false),
+            ToolParam(name: "id", kind: .string,
+                      description: "Calendar event ID (required for update_event and delete_event)", required: false),
+            ToolParam(name: "span", kind: .string,
+                      description: "\"this\" (default) or \"future\"/\"all\" for recurring event update/deletion", required: false),
+        ]
+    )
 
     public var schema: ToolSchema { Self.schema }
 
     public func execute(argumentsJSON: String) async -> String {
-        let call = ToolCall(name: "create_calendar_event", argumentsJSON: argumentsJSON)
-        guard let title = call.arg("title")?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
-            return "Error: missing event 'title'."
+        let call = ToolCall(name: "calendar_event_tool", argumentsJSON: argumentsJSON)
+        guard let action = call.arg("action")?.trimmingCharacters(in: .whitespacesAndNewlines), !action.isEmpty else {
+            return "Error: missing 'action' parameter. Supported actions: list_events, search_events, create_event, update_event, delete_event, list_calendars, freebusy."
         }
-        guard let startRaw = call.arg("start"), let start = ISO8601Parsing.date(from: startRaw) else {
-            return "Error: couldn't read 'start' as a date/time — use ISO 8601 (2026-07-20T15:00) or a relative time like \"now + 1 hour\"."
-        }
-        var end: Date?
-        if let endRaw = call.arg("end"), !endRaw.trimmingCharacters(in: .whitespaces).isEmpty {
-            guard let parsed = ISO8601Parsing.date(from: endRaw) else {
-                return "Error: couldn't read 'end' as a date/time — use ISO 8601 (2026-07-20T16:00) or a relative time like \"now + 2 hours\"."
-            }
-            end = parsed
-        }
-        let draft = CalendarEventDraft(title: title, start: start, end: end, notes: call.arg("notes"))
+
         do {
-            _ = try await store.createEvent(draft)
-            return "Added \"\(title)\" to your calendar on \(ISO8601Parsing.display(start))."
-        } catch EventStoreError.calendarAccessDenied {
-            return "Calendar access is off — enable it in Settings to add events."
-        } catch {
-            return "Couldn't add the event: \(errorText(error))."
-        }
-    }
-}
+            switch action {
+            case "list_events":
+                let days = call.arg("days").flatMap { Int(Double($0) ?? -1) } ?? 7
+                let calName = call.arg("calendar_name")?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let events = try await store.events(daysAhead: max(1, days), calendarName: (calName?.isEmpty == false ? calName : nil))
+                guard !events.isEmpty else {
+                    return "No events in the next \(days) day\(days == 1 ? \"\" : \"s\")\(calName != nil ? \" in calendar '\(calName!)'\" : \"\")."
+                }
+                let lines = events.sorted { $0.start < $1.start }.map { e -> String in
+                    var locStr = ""
+                    if let loc = e.location, !loc.isEmpty { locStr = " at \(loc)" }
+                    var calStr = ""
+                    if let cal = e.calendar, !cal.isEmpty { calStr = " [\(cal)]" }
+                    var idStr = ""
+                    if !e.id.isEmpty { idStr = " (id: \(e.id))" }
+                    return "• \(e.title) — \(ISO8601Parsing.display(e.start))\(locStr)\(calStr)\(idStr)"
+                }
+                return "Events in the next \(days) day\(days == 1 ? \"\" : \"s\"):\n" + lines.joined(separator: "\n")
 
-/// List the user's upcoming calendar events.
-public struct ListCalendarEventsTool: Tool {
-    private let store: any EventStoring
-    public init(store: any EventStoring) { self.store = store }
+            case "search_events":
+                guard let query = call.arg("query")?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty else {
+                    return "Error: missing 'query' parameter for search_events."
+                }
+                let days = call.arg("days").flatMap { Int(Double($0) ?? -1) } ?? 30
+                let events = try await store.searchEvents(query: query, daysAhead: max(1, days))
+                guard !events.isEmpty else {
+                    return "No events found matching \"\(query)\"."
+                }
+                let lines = events.sorted { $0.start < $1.start }.map { e -> String in
+                    var locStr = ""
+                    if let loc = e.location, !loc.isEmpty { locStr = " at \(loc)" }
+                    var calStr = ""
+                    if let cal = e.calendar, !cal.isEmpty { calStr = " [\(cal)]" }
+                    var idStr = ""
+                    if !e.id.isEmpty { idStr = " (id: \(e.id))" }
+                    return "• \(e.title) — \(ISO8601Parsing.display(e.start))\(locStr)\(calStr)\(idStr)"
+                }
+                return "Found \(events.count) event\(events.count == 1 ? \"\" : \"s\") matching \"\(query)\":\n" + lines.joined(separator: "\n")
 
-    /// Schema without a store instance (see `RememberTool.schema`).
-    public static let schema: ToolSchema = ToolSchema(name: "list_calendar_events",
-                   description: "List the user's upcoming calendar events. Use when asked what's on their "
-                              + "schedule or if they're free.",
-                   parameters: [ToolParam(name: "daysAhead", kind: .number,
-                                          description: "How many days ahead to look (1–14, default 7)",
-                                          required: false)])
+            case "create_event":
+                guard let title = call.arg("title")?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
+                    return "Error: missing event 'title'."
+                }
+                guard let startRaw = call.arg("start"), let start = ISO8601Parsing.date(from: startRaw) else {
+                    return "Error: couldn't read 'start' as a date/time — use ISO 8601 (2026-07-20T15:00) or a relative time like \"now + 1 hour\", \"tomorrow 09:00\"."
+                }
+                var end: Date?
+                if let endRaw = call.arg("end"), !endRaw.trimmingCharacters(in: .whitespaces).isEmpty {
+                    guard let parsed = ISO8601Parsing.date(from: endRaw) else {
+                        return "Error: couldn't read 'end' as a date/time — use ISO 8601 (2026-07-20T16:00) or a relative time like \"now + 2 hours\"."
+                    }
+                    end = parsed
+                }
+                let location = call.arg("location")?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let notes = call.arg("notes")?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let alarmMinutes = call.arg("alarm_minutes").flatMap { Int(Double($0) ?? -1) }
+                let calendarName = call.arg("calendar_name")?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-    public var schema: ToolSchema { Self.schema }
+                let draft = CalendarEventDraft(
+                    title: title,
+                    start: start,
+                    end: end,
+                    location: location?.isEmpty == false ? location : nil,
+                    notes: notes?.isEmpty == false ? notes : nil,
+                    alarmMinutes: alarmMinutes != nil && alarmMinutes! >= 0 ? alarmMinutes : nil,
+                    calendarName: calendarName?.isEmpty == false ? calendarName : nil
+                )
+                let label = try await store.createEvent(draft)
+                return "Added \"\(label)\" to your calendar on \(ISO8601Parsing.display(start))."
 
-    public func execute(argumentsJSON: String) async -> String {
-        let call = ToolCall(name: "list_calendar_events", argumentsJSON: argumentsJSON)
-        let requested = call.arg("daysAhead").flatMap { Int(Double($0) ?? -1) } ?? 7
-        let days = min(14, max(1, requested))   // clamp to the documented window
-        do {
-            let events = try await store.events(daysAhead: days)
-            guard !events.isEmpty else { return "No events in the next \(days) day\(days == 1 ? "" : "s")." }
-            let lines = events.sorted { $0.start < $1.start }.map { e -> String in
-                "• \(e.title) — \(ISO8601Parsing.display(e.start))"
+            case "update_event":
+                guard let id = call.arg("id")?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty else {
+                    return "Error: missing event 'id' for update_event."
+                }
+                let title = call.arg("title")?.trimmingCharacters(in: .whitespacesAndNewlines)
+                var start: Date?
+                if let startRaw = call.arg("start"), !startRaw.trimmingCharacters(in: .whitespaces).isEmpty {
+                    guard let parsed = ISO8601Parsing.date(from: startRaw) else {
+                        return "Error: couldn't read 'start' as date/time."
+                    }
+                    start = parsed
+                }
+                var end: Date?
+                if let endRaw = call.arg("end"), !endRaw.trimmingCharacters(in: .whitespaces).isEmpty {
+                    guard let parsed = ISO8601Parsing.date(from: endRaw) else {
+                        return "Error: couldn't read 'end' as date/time."
+                    }
+                    end = parsed
+                }
+                let location = call.arg("location")?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let notes = call.arg("notes")?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let alarmMinutes = call.arg("alarm_minutes").flatMap { Int(Double($0) ?? -1) }
+                let calendarName = call.arg("calendar_name")?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let span = call.arg("span")?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                let updateDraft = CalendarEventUpdateDraft(
+                    id: id,
+                    title: title?.isEmpty == false ? title : nil,
+                    start: start,
+                    end: end,
+                    location: location?.isEmpty == false ? location : nil,
+                    notes: notes?.isEmpty == false ? notes : nil,
+                    alarmMinutes: alarmMinutes,
+                    calendarName: calendarName?.isEmpty == false ? calendarName : nil,
+                    span: span?.isEmpty == false ? span : nil
+                )
+                let label = try await store.updateEvent(updateDraft)
+                return "Updated event \"\(label)\"."
+
+            case "delete_event":
+                guard let id = call.arg("id")?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty else {
+                    return "Error: missing event 'id' for delete_event."
+                }
+                let span = call.arg("span")?.trimmingCharacters(in: .whitespacesAndNewlines)
+                _ = try await store.deleteEvent(id: id, span: span)
+                return "Deleted calendar event with ID '\(id)'."
+
+            case "list_calendars":
+                let cals = try await store.calendars()
+                guard !cals.isEmpty else { return "No calendar accounts found." }
+                let lines = cals.map { "• \($0.title) (\($0.allowsContentModifications ? \"writable\" : \"read-only\"), id: \($0.id))" }
+                return "Calendars (\(cals.count)):\n" + lines.joined(separator: "\n")
+
+            case "freebusy":
+                let days = call.arg("days").flatMap { Int(Double($0) ?? -1) } ?? 1
+                let now = Date()
+                let start: Date
+                if let startRaw = call.arg("start"), let parsed = ISO8601Parsing.date(from: startRaw) {
+                    start = parsed
+                } else {
+                    start = Calendar.current.startOfDay(for: now)
+                }
+                let end: Date
+                if let endRaw = call.arg("end"), let parsed = ISO8601Parsing.date(from: endRaw) {
+                    end = parsed
+                } else {
+                    end = Calendar.current.date(byAdding: .day, value: max(1, days), to: start) ?? start.addingTimeInterval(TimeInterval(days * 86400))
+                }
+
+                let result = try await store.freebusy(start: start, end: end)
+                var sections: [String] = []
+                sections.append("Free/Busy schedule from \(ISO8601Parsing.display(start)) to \(ISO8601Parsing.display(end)):")
+
+                if result.busySlots.isEmpty {
+                    sections.append("\nBusy slots: None")
+                } else {
+                    let busyLines = result.busySlots.map { slot in
+                        let titlePart = slot.title.map { " (\($0))" } ?? ""
+                        return "• \(ISO8601Parsing.display(slot.start)) - \(ISO8601Parsing.display(slot.end))\(titlePart)"
+                    }
+                    sections.append("\nBusy slots (\(result.busySlots.count)):\n" + busyLines.joined(separator: "\n"))
+                }
+
+                if result.freeSlots.isEmpty {
+                    sections.append("\nFree slots: None")
+                } else {
+                    let freeLines = result.freeSlots.map { slot in
+                        "• \(ISO8601Parsing.display(slot.start)) - \(ISO8601Parsing.display(slot.end))"
+                    }
+                    sections.append("\nFree slots (\(result.freeSlots.count)):\n" + freeLines.joined(separator: "\n"))
+                }
+
+                return sections.joined(separator: "\n")
+
+            default:
+                return "Error: unknown action '\(action)'. Supported actions: list_events, search_events, create_event, update_event, delete_event, list_calendars, freebusy."
             }
-            return "Events in the next \(days) day\(days == 1 ? "" : "s"):\n" + lines.joined(separator: "\n")
         } catch EventStoreError.calendarAccessDenied {
-            return "Calendar access is off — enable it in Settings to see events."
+            return "Calendar access is off — enable it in Settings to access events."
         } catch {
-            return "Couldn't read the calendar: \(errorText(error))."
+            return "Calendar operation failed: \(errorText(error))."
         }
     }
 }

@@ -281,7 +281,7 @@ final class SettingsPersistenceTests: XCTestCase {
         let config = settings.builtInToolConfig
         XCTAssertFalse(config.enabled.contains(.webSearch))
         XCTAssertTrue(config.enabled.contains(.calculator))
-        XCTAssertTrue(config.enabled.contains(.createCalendarEvent), "not in the disabled set → enabled")
+        XCTAssertTrue(config.enabled.contains(.calendarEvent), "not in the disabled set → enabled")
         XCTAssertEqual(config.searchEngines, [.bing, .duckduckgo], "engine priority order is preserved")
     }
 

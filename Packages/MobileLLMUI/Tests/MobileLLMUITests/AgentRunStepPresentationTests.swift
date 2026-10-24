@@ -11,7 +11,7 @@ final class AgentRunStepPresentationTests: XCTestCase {
 
     func testReadableToolNamePrettifiesIdentifiers() {
         XCTAssertEqual(AgentRunStore.readableToolName("web_search"), "Web search")
-        XCTAssertEqual(AgentRunStore.readableToolName("create_calendar_event"), "Create calendar event")
+        XCTAssertEqual(AgentRunStore.readableToolName("calendar_event_tool"), "Calendar event tool")
         XCTAssertEqual(AgentRunStore.readableToolName("calculator"), "Calculator")
     }
 
@@ -31,6 +31,10 @@ final class AgentRunStepPresentationTests: XCTestCase {
         XCTAssertEqual(
             AgentRunStore.actionPreview(toolName: "fetch_webpage", argumentsJSON: #"{"url":"https://example.com"}"#),
             "Fetch: https://example.com"
+        )
+        XCTAssertEqual(
+            AgentRunStore.actionPreview(toolName: "calendar_event_tool", argumentsJSON: #"{"title":"Team sync"}"#),
+            "Event: Team sync"
         )
         XCTAssertEqual(
             AgentRunStore.actionPreview(toolName: "reminder_task_tool", argumentsJSON: #"{"title":"Water plants"}"#),

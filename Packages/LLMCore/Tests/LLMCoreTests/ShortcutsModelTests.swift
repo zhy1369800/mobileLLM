@@ -28,12 +28,12 @@ final class ShortcutsModelTests: XCTestCase {
     func testBuildMessageWithTools() {
         let msg = ShortcutsModelPromptBuilder.buildMessage(
             systemPrompt: "你是一个助手",
-            toolDescriptions: "- create_calendar_event(title: String): 创建日程",
+            toolDescriptions: "- calendar_event_tool(action: String, title: String): 管理日程",
             history: [],
             currentPrompt: "帮我定个明早9点的会"
         )
         XCTAssertTrue(msg.contains("【可用工具说明】"))
-        XCTAssertTrue(msg.contains("create_calendar_event"))
+        XCTAssertTrue(msg.contains("calendar_event_tool"))
         XCTAssertTrue(msg.contains("【工具调用格式规范】"))
         XCTAssertTrue(msg.contains("重要重要！！！当需要用客户端工具时，你不需要考虑执行，只需要决策返回相应的工具格式就好"))
     }
@@ -77,13 +77,13 @@ final class ShortcutsModelTests: XCTestCase {
         let response = """
         好的，正在为您创建日程：
         ```tool_call
-        {"tool": "create_calendar_event", "arguments": {"title": "团队周会", "time": "2026-10-12 10:00"}}
+        {"tool": "calendar_event_tool", "arguments": {"action": "create_event", "title": "团队周会", "start": "2026-10-12 10:00"}}
         ```
         请稍候。
         """
         let parsed = ShortcutsModelPromptBuilder.parseToolCall(from: response)
         XCTAssertNotNil(parsed)
-        XCTAssertEqual(parsed?.tool, "create_calendar_event")
+        XCTAssertEqual(parsed?.tool, "calendar_event_tool")
         XCTAssertEqual(parsed?.arguments["title"] as? String, "团队周会")
     }
 

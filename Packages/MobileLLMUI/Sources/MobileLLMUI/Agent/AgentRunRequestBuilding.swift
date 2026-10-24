@@ -80,7 +80,7 @@ public enum AppLocalToolIDs {
     /// "descriptor missing" and never advertised.
     public static let names = [
         "calculator", "current_datetime", "wikipedia", "web_search", "fetch_webpage",
-        "remember", "recall", "create_calendar_event", "list_calendar_events",
+        "remember", "recall", "calendar_event_tool",
         "reminder_task_tool", "current_location", "shortcut_automation_tool",
     ]
 

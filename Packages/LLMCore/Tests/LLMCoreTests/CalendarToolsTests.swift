@@ -8,94 +8,161 @@ import XCTest
 /// returning instructive strings (never a throw/crash).
 final class CalendarToolsTests: XCTestCase {
 
-    // MARK: create_calendar_event
+    // MARK: - CalendarEventTool (Unified / Aggregated)
 
-    func testCreateEventSuccess() async {
+    func testCalendarEventToolCreateSuccess() async {
         let store = FakeEventStore()
-        let out = await CreateCalendarEventTool(store: store)
-            .execute(argumentsJSON: #"{"title":"Dentist","start":"2026-07-20T15:00:00Z","notes":"molar"}"#)
+        let tool = CalendarEventTool(store: store)
+        let json = """
+        {
+            "action": "create_event",
+            "title": "Dentist",
+            "start": "2026-07-20T15:00:00Z",
+            "end": "2026-07-20T16:00:00Z",
+            "location": "Dental Clinic",
+            "notes": "molar",
+            "alarm_minutes": 15,
+            "calendar_name": "Personal"
+        }
+        """
+        let out = await tool.execute(argumentsJSON: json)
         XCTAssertTrue(out.contains("Added"), out)
+        XCTAssertTrue(out.contains("Dentist"), out)
+
         let created = await store.createdEvents
         XCTAssertEqual(created.count, 1)
         XCTAssertEqual(created.first?.title, "Dentist")
+        XCTAssertEqual(created.first?.location, "Dental Clinic")
         XCTAssertEqual(created.first?.notes, "molar")
-    }
-
-    func testCreateEventParsesEnd() async {
-        let store = FakeEventStore()
-        _ = await CreateCalendarEventTool(store: store)
-            .execute(argumentsJSON: #"{"title":"Mtg","start":"2026-07-20T15:00","end":"2026-07-20T16:00"}"#)
-        let created = await store.createdEvents
+        XCTAssertEqual(created.first?.alarmMinutes, 15)
+        XCTAssertEqual(created.first?.calendarName, "Personal")
         XCTAssertNotNil(created.first?.end)
     }
 
-    func testCreateEventBadStartRejectedBeforeStore() async {
+    func testCalendarEventToolCreateWithRelativeStart() async {
         let store = FakeEventStore()
-        let out = await CreateCalendarEventTool(store: store)
-            .execute(argumentsJSON: #"{"title":"X","start":"whenever"}"#)
+        let tool = CalendarEventTool(store: store)
+        let out = await tool.execute(argumentsJSON: #"{"action":"create_event","title":"Quick Sync","start":"now + 1 hour"}"#)
+        XCTAssertTrue(out.contains("Added"), out)
+        let created = await store.createdEvents
+        XCTAssertEqual(created.count, 1)
+        XCTAssertEqual(created.first?.title, "Quick Sync")
+    }
+
+    func testCalendarEventToolCreateBadDateRejected() async {
+        let store = FakeEventStore()
+        let tool = CalendarEventTool(store: store)
+        let out = await tool.execute(argumentsJSON: #"{"action":"create_event","title":"X","start":"whenever"}"#)
         XCTAssertTrue(out.hasPrefix("Error"), out)
         let created = await store.createdEvents
-        XCTAssertTrue(created.isEmpty, "store must not be called for an unparseable date")
+        XCTAssertTrue(created.isEmpty)
     }
 
-    func testCreateEventBadEndRejected() async {
-        let out = await CreateCalendarEventTool(store: FakeEventStore())
-            .execute(argumentsJSON: #"{"title":"X","start":"2026-07-20T15:00","end":"nope"}"#)
-        XCTAssertTrue(out.hasPrefix("Error"), out)
-    }
-
-    func testCreateEventMissingTitle() async {
-        let out = await CreateCalendarEventTool(store: FakeEventStore())
-            .execute(argumentsJSON: #"{"start":"2026-07-20T15:00"}"#)
+    func testCalendarEventToolCreateMissingTitle() async {
+        let tool = CalendarEventTool(store: FakeEventStore())
+        let out = await tool.execute(argumentsJSON: #"{"action":"create_event","start":"2026-07-20T15:00"}"#)
         XCTAssertTrue(out.contains("missing"), out)
     }
 
-    func testCreateEventAccessDenied() async {
-        let out = await CreateCalendarEventTool(store: FakeEventStore(denyCalendar: true))
-            .execute(argumentsJSON: #"{"title":"X","start":"2026-07-20T15:00:00Z"}"#)
-        XCTAssertTrue(out.contains("Calendar access is off"), out)
-    }
-
-    // MARK: list_calendar_events
-
-    func testListEventsRendersSortedByStart() async {
+    func testCalendarEventToolListEvents() async {
         let d1 = Date(timeIntervalSince1970: 2_000_000)
         let d2 = Date(timeIntervalSince1970: 1_000_000)
-        let store = FakeEventStore(events: [CalendarEventInfo(title: "Later", start: d1),
-                                            CalendarEventInfo(title: "Sooner", start: d2)])
-        let out = await ListCalendarEventsTool(store: store).execute(argumentsJSON: #"{"daysAhead":3}"#)
-        XCTAssertTrue(out.contains("Sooner"))
-        XCTAssertTrue(out.contains("Later"))
+        let store = FakeEventStore(events: [
+            CalendarEventInfo(id: "e1", title: "Later", start: d1, calendar: "Work"),
+            CalendarEventInfo(id: "e2", title: "Sooner", start: d2, location: "Room A", calendar: "Work")
+        ])
+        let tool = CalendarEventTool(store: store)
+        let out = await tool.execute(argumentsJSON: #"{"action":"list_events","days":5,"calendar_name":"Work"}"#)
+        XCTAssertTrue(out.contains("Sooner"), out)
+        XCTAssertTrue(out.contains("Later"), out)
+        XCTAssertTrue(out.contains("Room A"), out)
         XCTAssertLessThan(out.range(of: "Sooner")!.lowerBound, out.range(of: "Later")!.lowerBound)
+
         let days = await store.lastDaysAhead
-        XCTAssertEqual(days, 3)
+        XCTAssertEqual(days, 5)
+        let cal = await store.lastCalendarName
+        XCTAssertEqual(cal, "Work")
     }
 
-    func testListEventsEmpty() async {
-        let out = await ListCalendarEventsTool(store: FakeEventStore()).execute(argumentsJSON: #"{"daysAhead":5}"#)
-        XCTAssertTrue(out.contains("No events"), out)
+    func testCalendarEventToolSearchEvents() async {
+        let store = FakeEventStore(events: [
+            CalendarEventInfo(id: "e1", title: "Sprint Planning", start: Date(), notes: "discuss Q3 goals"),
+            CalendarEventInfo(id: "e2", title: "Dentist", start: Date(), notes: "teeth cleanup")
+        ])
+        let tool = CalendarEventTool(store: store)
+        let out = await tool.execute(argumentsJSON: #"{"action":"search_events","query":"Sprint"}"#)
+        XCTAssertTrue(out.contains("Sprint Planning"), out)
+        XCTAssertFalse(out.contains("Dentist"), out)
+
+        let outNotes = await tool.execute(argumentsJSON: #"{"action":"search_events","query":"teeth"}"#)
+        XCTAssertTrue(outNotes.contains("Dentist"), outNotes)
+        XCTAssertFalse(outNotes.contains("Sprint"), outNotes)
     }
 
-    func testListEventsClampsDaysAhead() async {
+    func testCalendarEventToolUpdateEvent() async {
         let store = FakeEventStore()
-        _ = await ListCalendarEventsTool(store: store).execute(argumentsJSON: #"{"daysAhead":30}"#)
-        let high = await store.lastDaysAhead
-        XCTAssertEqual(high, 14, "must clamp to the 14-day window")
+        let tool = CalendarEventTool(store: store)
+        let json = """
+        {
+            "action": "update_event",
+            "id": "e_update_1",
+            "title": "Updated Meeting",
+            "location": "Zoom Room 2",
+            "span": "future"
+        }
+        """
+        let out = await tool.execute(argumentsJSON: json)
+        XCTAssertTrue(out.contains("Updated event"), out)
 
-        let store2 = FakeEventStore()
-        _ = await ListCalendarEventsTool(store: store2).execute(argumentsJSON: #"{"daysAhead":0}"#)
-        let low = await store2.lastDaysAhead
-        XCTAssertEqual(low, 1)
-
-        let store3 = FakeEventStore()
-        _ = await ListCalendarEventsTool(store: store3).execute(argumentsJSON: "{}")
-        let unset = await store3.lastDaysAhead
-        XCTAssertEqual(unset, 7, "default window when unspecified")
+        let updated = await store.updatedEvents
+        XCTAssertEqual(updated.count, 1)
+        XCTAssertEqual(updated.first?.id, "e_update_1")
+        XCTAssertEqual(updated.first?.title, "Updated Meeting")
+        XCTAssertEqual(updated.first?.location, "Zoom Room 2")
+        XCTAssertEqual(updated.first?.span, "future")
     }
 
-    func testListEventsAccessDenied() async {
-        let out = await ListCalendarEventsTool(store: FakeEventStore(denyCalendar: true))
-            .execute(argumentsJSON: #"{"daysAhead":3}"#)
+    func testCalendarEventToolDeleteEvent() async {
+        let store = FakeEventStore()
+        let tool = CalendarEventTool(store: store)
+        let out = await tool.execute(argumentsJSON: #"{"action":"delete_event","id":"e_del_99","span":"this"}"#)
+        XCTAssertTrue(out.contains("Deleted calendar event with ID 'e_del_99'"), out)
+
+        let deleted = await store.deletedEventIDs
+        XCTAssertEqual(deleted.count, 1)
+        XCTAssertEqual(deleted.first?.id, "e_del_99")
+        XCTAssertEqual(deleted.first?.span, "this")
+    }
+
+    func testCalendarEventToolListCalendars() async {
+        let cals = [
+            CalendarInfo(id: "c1", title: "Work", allowsContentModifications: true),
+            CalendarInfo(id: "c2", title: "Holidays", allowsContentModifications: false)
+        ]
+        let store = FakeEventStore(calendars: cals)
+        let tool = CalendarEventTool(store: store)
+        let out = await tool.execute(argumentsJSON: #"{"action":"list_calendars"}"#)
+        XCTAssertTrue(out.contains("Work (writable"), out)
+        XCTAssertTrue(out.contains("Holidays (read-only"), out)
+    }
+
+    func testCalendarEventToolFreeBusy() async {
+        let now = Date()
+        let slot1 = FreeBusySlot(title: "Standup", start: now.addingTimeInterval(3600), end: now.addingTimeInterval(5400))
+        let free1 = FreeBusySlot(start: now, end: now.addingTimeInterval(3600))
+        let result = FreeBusyResult(start: now, end: now.addingTimeInterval(86400), busySlots: [slot1], freeSlots: [free1])
+        let store = FakeEventStore(freebusy: result)
+        let tool = CalendarEventTool(store: store)
+        let out = await tool.execute(argumentsJSON: #"{"action":"freebusy","days":1}"#)
+        XCTAssertTrue(out.contains("Busy slots (1):"), out)
+        XCTAssertTrue(out.contains("Standup"), out)
+        XCTAssertTrue(out.contains("Free slots (1):"), out)
+    }
+
+    func testCalendarEventToolAccessDenied() async {
+        let store = FakeEventStore(denyCalendar: true)
+        let tool = CalendarEventTool(store: store)
+        let out = await tool.execute(argumentsJSON: #"{"action":"list_events"}"#)
         XCTAssertTrue(out.contains("Calendar access is off"), out)
     }
 

@@ -871,7 +871,7 @@ public final class AgentRunStore {
 
 @MainActor
 extension AgentRunStore {
-    /// "web_search" → "Web search", "create_calendar_event" → "Create calendar event": the exact
+    /// "web_search" → "Web search", "calendar_event_tool" → "Calendar event tool": the exact
     /// user-visible verb used by Codex-style action rows.
     static func readableToolName(_ raw: String) -> String {
         let spaced = raw.replacingOccurrences(of: "_", with: " ")
@@ -913,8 +913,17 @@ extension AgentRunStore {
             return value(["query", "term", "title"]).map { "Look up: \($0)" } ?? fallback
         case "fetch_webpage":
             return value(["url", "address"]).map { "Fetch: \($0)" } ?? fallback
-        case "create_calendar_event":
-            return value(["title"]).map { "Add event: \($0)" } ?? fallback
+        case "calendar_event_tool":
+            if let title = value(["title"]) {
+                if let act = value(["action"]), !act.isEmpty {
+                    return "\(act.replacingOccurrences(of: "_", with: " ").capitalized): \(title)"
+                }
+                return "Event: \(title)"
+            }
+            if let act = value(["action"]), !act.isEmpty {
+                return act.replacingOccurrences(of: "_", with: " ").capitalized
+            }
+            return fallback
         case "reminder_task_tool":
             if let title = value(["title"]) {
                 if let act = value(["action"]), !act.isEmpty {
@@ -926,8 +935,6 @@ extension AgentRunStore {
                 return act.replacingOccurrences(of: "_", with: " ").capitalized
             }
             return fallback
-        case "list_calendar_events":
-            return value(["daysAhead"]).map { "List events: next \($0) day(s)" } ?? "List upcoming events"
         case "current_datetime", "current_location":
             return ""
         default:

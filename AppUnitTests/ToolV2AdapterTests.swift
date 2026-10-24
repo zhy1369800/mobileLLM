@@ -432,21 +432,14 @@ final class ToolV2AdapterTests: XCTestCase {
         let cases: [(tool: any LLMCore.Tool, effects: [AgentEffect], destination: String, category: String,
                      arguments: [String: JSONValue], expected: String)] = [
             (
-                CreateCalendarEventTool(store: store),
-                [.localWrite],
+                CalendarEventTool(store: store),
+                [.localRead, .localWrite],
                 "mobilellm.calendar",
                 "user.calendar",
-                ["title": .string("Review"),
+                ["action": .string("create_event"),
+                 "title": .string("Review"),
                  "start": .string("2026-08-10T10:00:00")],
                 "Added"
-            ),
-            (
-                ListCalendarEventsTool(store: store),
-                [.localRead],
-                "mobilellm.calendar",
-                "user.calendar",
-                ["daysAhead": .integer(7)],
-                "Events in the next"
             ),
             (
                 ReminderTaskTool(store: store),
@@ -795,7 +788,7 @@ final class ToolV2AdapterTests: XCTestCase {
     func testFrozenHistoryReplaysExactRecordedToolTurns() throws {
         let userID = UUID()
         let currentID = UUID()
-        let exactCall = "好嘞，咱来查查你的日程安排。\n\n<tool_call>{\"name\":\"list_calendar_events\",\"arguments\":{}}</tool_call>"
+        let exactCall = "好嘞，咱来查查你的日程安排。\n\n<tool_call>{\"name\":\"calendar_event_tool\",\"arguments\":{}}</tool_call>"
         let exactResponse = ToolDialect.qwen.frameResult(
             "{\"kind\":\"untrustedToolResult\",\"payload\":\"Events in the next 7 days:\\n• 霜降\"}",
             name: "external_data"
@@ -806,7 +799,7 @@ final class ToolV2AdapterTests: XCTestCase {
                 role: .assistant,
                 answer: "接下来一周只有一条日程安排：霜降。",
                 toolRuns: [ToolRun(
-                    name: "list_calendar_events",
+                    name: "calendar_event_tool",
                     arguments: "{}",
                     result: "Events in the next 7 days: • 霜降",
                     rawCallText: exactCall,
@@ -827,7 +820,7 @@ final class ToolV2AdapterTests: XCTestCase {
     }
 
     func testToolRunReplayCallTextUsesExactRawCallTextWithoutFallback() {
-        XCTAssertNil(ToolRun(name: "list_calendar_events", arguments: "{}").replayCallText)
+        XCTAssertNil(ToolRun(name: "calendar_event_tool", arguments: "{}").replayCallText)
         XCTAssertNil(ToolRun(name: "b", arguments: "{}", rawCallText: "").replayCallText)
         XCTAssertEqual(
             ToolRun(name: "a", arguments: "{}", rawCallText: "prose\n<tool_call>x</tool_call>").replayCallText,

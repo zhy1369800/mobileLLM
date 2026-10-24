@@ -1515,8 +1515,8 @@ final class PhysicalDeviceFullStackUITests: DeviceE2ETestCase {
             ("fetch_webpage",
              "\(marker)\nCall the fetch_webpage tool exactly once with url \"https://example.com\", "
                  + "then reply in one short line."),
-            ("list_calendar_events",
-             "\(marker)\nCall the list_calendar_events tool exactly once with daysAhead 7, "
+            ("calendar_event_tool",
+             "\(marker)\nCall the calendar_event_tool tool exactly once with action \"list_events\", days 7, "
                  + "then reply in one short line."),
             ("reminder_task_tool",
              "\(marker)\nCall the reminder_task_tool tool exactly once with action \"create_reminder\", title \"E2E \(marker) "

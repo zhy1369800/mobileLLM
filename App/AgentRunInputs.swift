@@ -600,9 +600,7 @@ struct AppFrozenInputBuilder: Sendable {
             ceilingDataCategories.append(try AgentDataCategory(rawValue: "web.page"))
         }
         if snapshot.eventSeamAvailable {
-            if enabledTools.contains("create_calendar_event")
-                || enabledTools.contains("list_calendar_events")
-            {
+            if enabledTools.contains("calendar_event_tool") {
                 ceilingDestinations.append(try ExternalDestination(
                     kind: .privateDataStore,
                     normalizedIdentity: "mobilellm.calendar"

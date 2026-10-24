@@ -20,7 +20,7 @@ final class ToolRegistryAssembleTests: XCTestCase {
         XCTAssertFalse(n.contains("remember"))
         XCTAssertFalse(n.contains("recall"))
         // Privacy-sensitive tools are off by default.
-        XCTAssertFalse(n.contains("create_calendar_event"))
+        XCTAssertFalse(n.contains("calendar_event_tool"))
         XCTAssertFalse(n.contains("current_location"))
     }
 
@@ -33,11 +33,11 @@ final class ToolRegistryAssembleTests: XCTestCase {
 
     func testCalendarToolsNeedEnableAndStore() {
         // A store alone isn't enough — calendar ids are off by default.
-        XCTAssertFalse(names(ToolRegistry.assemble(eventStore: FakeEventStore())).contains("create_calendar_event"))
+        XCTAssertFalse(names(ToolRegistry.assemble(eventStore: FakeEventStore())).contains("calendar_event_tool"))
         let cfg = BuiltInToolConfig(enabled: BuiltInToolConfig.defaultEnabled
-            .union([.createCalendarEvent, .listCalendarEvents, .reminderTask]))
+            .union([.calendarEvent, .reminderTask]))
         let n = names(ToolRegistry.assemble(config: cfg, eventStore: FakeEventStore()))
-        XCTAssertTrue(n.isSuperset(of: ["create_calendar_event", "list_calendar_events", "reminder_task_tool"]))
+        XCTAssertTrue(n.isSuperset(of: ["calendar_event_tool", "reminder_task_tool"]))
     }
 
     func testLocationToolNeedsEnableAndProvider() {

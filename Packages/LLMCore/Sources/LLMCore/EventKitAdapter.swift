@@ -49,31 +49,200 @@ public final class EventKitStore: EventStoring, @unchecked Sendable {
         return granted ? .granted : .denied
     }
 
+    private func findCalendar(named name: String) -> EKCalendar? {
+        let calendars = store.calendars(for: .event)
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return calendars.first(where: {
+            $0.title.lowercased() == n || $0.title.localizedCaseInsensitiveContains(n)
+        })
+    }
+
+    private func formatCalendarEvent(_ ev: EKEvent) -> CalendarEventInfo {
+        CalendarEventInfo(
+            id: ev.eventIdentifier ?? "",
+            title: ev.title ?? "(untitled)",
+            start: ev.startDate ?? Date(),
+            end: ev.endDate,
+            isAllDay: ev.isAllDay,
+            location: ev.location,
+            notes: ev.notes,
+            calendar: ev.calendar?.title
+        )
+    }
+
     public func createEvent(_ draft: CalendarEventDraft) async throws -> String {
         try await ensureEventAccess()
-        guard let calendar = store.defaultCalendarForNewEvents else {
+        let calendar: EKCalendar
+        if let calName = draft.calendarName, !calName.isEmpty, let matched = findCalendar(named: calName) {
+            calendar = matched
+        } else if let def = store.defaultCalendarForNewEvents {
+            calendar = def
+        } else if let first = store.calendars(for: .event).first {
+            calendar = first
+        } else {
             throw EventStoreError.failed("no writable calendar")
         }
+
         let event = EKEvent(eventStore: store)
         event.title = draft.title
         event.startDate = draft.start
         event.endDate = draft.end ?? draft.start.addingTimeInterval(3600)
+        event.location = draft.location
         event.notes = draft.notes
         event.calendar = calendar
-        do { try store.save(event, span: .thisEvent) }
-        catch { throw EventStoreError.failed(error.localizedDescription) }
+
+        if let alarmMinutes = draft.alarmMinutes, alarmMinutes >= 0 {
+            let alarm = EKAlarm(relativeOffset: -Double(alarmMinutes * 60))
+            event.addAlarm(alarm)
+        }
+
+        do {
+            try store.save(event, span: .thisEvent)
+        } catch {
+            throw EventStoreError.failed(error.localizedDescription)
+        }
         return draft.title
     }
 
     public func events(daysAhead: Int) async throws -> [CalendarEventInfo] {
+        try await events(daysAhead: daysAhead, calendarName: nil)
+    }
+
+    public func events(daysAhead: Int, calendarName: String?) async throws -> [CalendarEventInfo] {
         try await ensureEventAccess()
         let now = Date()
-        let end = Calendar.current.date(byAdding: .day, value: max(1, daysAhead), to: now) ?? now
-        let predicate = store.predicateForEvents(withStart: now, end: end, calendars: nil)
-        return store.events(matching: predicate).map { ev in
-            CalendarEventInfo(title: ev.title ?? "(untitled)", start: ev.startDate,
-                              end: ev.endDate, calendar: ev.calendar?.title)
+        let startDate = Calendar.current.startOfDay(for: now)
+        let endDate = Calendar.current.date(byAdding: .day, value: max(1, daysAhead), to: startDate) ?? startDate.addingTimeInterval(TimeInterval(daysAhead * 86400))
+
+        var targetCalendars: [EKCalendar]? = nil
+        if let calName = calendarName, !calName.isEmpty, let matched = findCalendar(named: calName) {
+            targetCalendars = [matched]
         }
+
+        let predicate = store.predicateForEvents(withStart: startDate, end: endDate, calendars: targetCalendars)
+        let events = store.events(matching: predicate).sorted {
+            ($0.startDate ?? Date.distantPast) < ($1.startDate ?? Date.distantPast)
+        }
+        return events.map { formatCalendarEvent($0) }
+    }
+
+    public func searchEvents(query: String, daysAhead: Int) async throws -> [CalendarEventInfo] {
+        try await ensureEventAccess()
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let now = Date()
+        let startDate = Calendar.current.date(byAdding: .day, value: -7, to: now) ?? now.addingTimeInterval(-7 * 86400)
+        let endDate = Calendar.current.date(byAdding: .day, value: max(1, daysAhead), to: now) ?? now.addingTimeInterval(TimeInterval(daysAhead * 86400))
+
+        let predicate = store.predicateForEvents(withStart: startDate, end: endDate, calendars: nil)
+        let events = store.events(matching: predicate).sorted {
+            ($0.startDate ?? Date.distantPast) < ($1.startDate ?? Date.distantPast)
+        }
+
+        return events.compactMap { ev -> CalendarEventInfo? in
+            if q.isEmpty { return formatCalendarEvent(ev) }
+            let titleMatch = (ev.title ?? "").localizedCaseInsensitiveContains(q)
+            let notesMatch = (ev.notes ?? "").localizedCaseInsensitiveContains(q)
+            let locMatch = (ev.location ?? "").localizedCaseInsensitiveContains(q)
+            if titleMatch || notesMatch || locMatch {
+                return formatCalendarEvent(ev)
+            }
+            return nil
+        }
+    }
+
+    public func updateEvent(_ draft: CalendarEventUpdateDraft) async throws -> String {
+        try await ensureEventAccess()
+        guard let event = store.event(withIdentifier: draft.id) else {
+            throw EventStoreError.failed("Calendar event '\(draft.id)' not found")
+        }
+
+        if let title = draft.title { event.title = title }
+        if let start = draft.start { event.startDate = start }
+        if let end = draft.end { event.endDate = end }
+        if let location = draft.location { event.location = location }
+        if let notes = draft.notes { event.notes = notes }
+        if let calName = draft.calendarName, let cal = findCalendar(named: calName) {
+            event.calendar = cal
+        }
+        if let alarmMinutes = draft.alarmMinutes {
+            if let existingAlarms = event.alarms {
+                for a in existingAlarms { event.removeAlarm(a) }
+            }
+            if alarmMinutes >= 0 {
+                event.addAlarm(EKAlarm(relativeOffset: -Double(alarmMinutes * 60)))
+            }
+        }
+
+        let spanStr = draft.span?.lowercased() ?? "this"
+        let span: EKSpan = (spanStr == "future" || spanStr == "all") ? .futureEvents : .thisEvent
+
+        do {
+            try store.save(event, span: span)
+            return event.title ?? draft.id
+        } catch {
+            throw EventStoreError.failed(error.localizedDescription)
+        }
+    }
+
+    public func deleteEvent(id: String, span: String?) async throws -> Bool {
+        try await ensureEventAccess()
+        guard let event = store.event(withIdentifier: id) else {
+            throw EventStoreError.failed("Calendar event '\(id)' not found")
+        }
+
+        let spanStr = span?.lowercased() ?? "this"
+        let ekSpan: EKSpan = (spanStr == "future" || spanStr == "all") ? .futureEvents : .thisEvent
+
+        do {
+            try store.remove(event, span: ekSpan)
+            return true
+        } catch {
+            throw EventStoreError.failed(error.localizedDescription)
+        }
+    }
+
+    public func calendars() async throws -> [CalendarInfo] {
+        try await ensureEventAccess()
+        let cals = store.calendars(for: .event)
+        return cals.map {
+            CalendarInfo(id: $0.calendarIdentifier, title: $0.title, allowsContentModifications: $0.allowsContentModifications)
+        }
+    }
+
+    public func freebusy(start: Date, end: Date) async throws -> FreeBusyResult {
+        try await ensureEventAccess()
+        let predicate = store.predicateForEvents(withStart: start, end: end, calendars: nil)
+        let events = store.events(matching: predicate).sorted {
+            ($0.startDate ?? Date.distantPast) < ($1.startDate ?? Date.distantPast)
+        }
+
+        var busySlots: [FreeBusySlot] = []
+        var freeSlots: [FreeBusySlot] = []
+        var lastEnd = start
+
+        for ev in events {
+            if ev.isAllDay { continue }
+            guard let evStart = ev.startDate, let evEnd = ev.endDate else { continue }
+            let s = max(evStart, start)
+            let e = min(evEnd, end)
+            if s >= e { continue }
+
+            if s > lastEnd {
+                freeSlots.append(FreeBusySlot(start: lastEnd, end: s))
+            }
+
+            busySlots.append(FreeBusySlot(title: ev.title, start: s, end: e))
+
+            if e > lastEnd {
+                lastEnd = e
+            }
+        }
+
+        if lastEnd < end {
+            freeSlots.append(FreeBusySlot(start: lastEnd, end: end))
+        }
+
+        return FreeBusyResult(start: start, end: end, busySlots: busySlots, freeSlots: freeSlots)
     }
 
     public func createReminder(_ draft: ReminderDraft) async throws -> String {

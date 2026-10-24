@@ -46,23 +46,32 @@ actor FakeMemoryStore: MemoryStoring {
 /// An `EventStoring` that records drafts and can simulate access denial. Reads happen via actor awaits.
 actor FakeEventStore: EventStoring {
     private(set) var createdEvents: [CalendarEventDraft] = []
+    private(set) var updatedEvents: [CalendarEventUpdateDraft] = []
+    private(set) var deletedEventIDs: [(id: String, span: String?)] = []
     private(set) var createdReminders: [ReminderDraft] = []
     private(set) var updatedReminders: [ReminderUpdateDraft] = []
     private(set) var completedReminderIDs: [(id: String, completed: Bool)] = []
     private(set) var deletedReminderIDs: [String] = []
     private(set) var lastDaysAhead: Int?
+    private(set) var lastCalendarName: String?
     private let toReturn: [CalendarEventInfo]
+    private let calendarsToReturn: [CalendarInfo]
+    private let freeBusyToReturn: FreeBusyResult?
     private let remindersToReturn: [ReminderInfo]
     private let listsToReturn: [ReminderListInfo]
     private let denyCalendar: Bool
     private let denyReminders: Bool
 
     init(events: [CalendarEventInfo] = [],
+         calendars: [CalendarInfo] = [],
+         freebusy: FreeBusyResult? = nil,
          reminders: [ReminderInfo] = [],
          lists: [ReminderListInfo] = [],
          denyCalendar: Bool = false,
          denyReminders: Bool = false) {
         toReturn = events
+        calendarsToReturn = calendars
+        freeBusyToReturn = freebusy
         remindersToReturn = reminders
         listsToReturn = lists
         self.denyCalendar = denyCalendar
@@ -73,9 +82,40 @@ actor FakeEventStore: EventStoring {
         if denyCalendar { throw EventStoreError.calendarAccessDenied }
         createdEvents.append(draft); return draft.title
     }
-    func events(daysAhead: Int) throws -> [CalendarEventInfo] {
+    func events(daysAhead: Int, calendarName: String?) throws -> [CalendarEventInfo] {
         if denyCalendar { throw EventStoreError.calendarAccessDenied }
-        lastDaysAhead = daysAhead; return toReturn
+        lastDaysAhead = daysAhead
+        lastCalendarName = calendarName
+        if let cal = calendarName, !cal.isEmpty {
+            return toReturn.filter { $0.calendar?.lowercased() == cal.lowercased() }
+        }
+        return toReturn
+    }
+    func searchEvents(query: String, daysAhead: Int) throws -> [CalendarEventInfo] {
+        if denyCalendar { throw EventStoreError.calendarAccessDenied }
+        return toReturn.filter {
+            $0.title.localizedCaseInsensitiveContains(query) ||
+            ($0.notes ?? "").localizedCaseInsensitiveContains(query) ||
+            ($0.location ?? "").localizedCaseInsensitiveContains(query)
+        }
+    }
+    func updateEvent(_ draft: CalendarEventUpdateDraft) throws -> String {
+        if denyCalendar { throw EventStoreError.calendarAccessDenied }
+        updatedEvents.append(draft)
+        return draft.title ?? draft.id
+    }
+    func deleteEvent(id: String, span: String?) throws -> Bool {
+        if denyCalendar { throw EventStoreError.calendarAccessDenied }
+        deletedEventIDs.append((id: id, span: span))
+        return true
+    }
+    func calendars() throws -> [CalendarInfo] {
+        if denyCalendar { throw EventStoreError.calendarAccessDenied }
+        return calendarsToReturn
+    }
+    func freebusy(start: Date, end: Date) throws -> FreeBusyResult {
+        if denyCalendar { throw EventStoreError.calendarAccessDenied }
+        return freeBusyToReturn ?? FreeBusyResult(start: start, end: end)
     }
     func createReminder(_ draft: ReminderDraft) throws -> String {
         if denyReminders { throw EventStoreError.reminderAccessDenied }

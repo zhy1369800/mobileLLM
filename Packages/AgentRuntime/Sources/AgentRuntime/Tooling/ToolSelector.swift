@@ -324,8 +324,8 @@ public struct DeterministicToolSelector: Sendable {
                 score += 300
             }
         }
-        if ["calendar", "create_calendar_event", "list_calendar_events"].contains(name) {
-            if ["日历", "日程", "安排", "会议"].contains(where: { lower.contains($0) }) {
+        if ["calendar", "calendar_event_tool"].contains(name) {
+            if ["日历", "日程", "安排", "会议", "空闲", "排期", "是否有空"].contains(where: { lower.contains($0) }) {
                 score += 300
             }
         }

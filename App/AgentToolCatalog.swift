@@ -110,8 +110,7 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         // Calendar, reminders and location are also opt-in system seams (EventKit / CoreLocation),
         // absent from `ToolRegistry.standard`; advertise them exactly when their seam is available.
         let systemDataTools: [(name: String, schema: ToolSchema, seam: Bool)] = [
-            ("create_calendar_event", CreateCalendarEventTool.schema, eventSeamAvailable),
-            ("list_calendar_events", ListCalendarEventsTool.schema, eventSeamAvailable),
+            ("calendar_event_tool", CalendarEventTool.schema, eventSeamAvailable),
             ("reminder_task_tool", ReminderTaskTool.schema, eventSeamAvailable),
             ("current_location", CurrentLocationTool.schema, locationSeamAvailable),
             ("shortcut_automation_tool", ShortcutAutomationTool.schema, shortcutSeamAvailable),
@@ -204,26 +203,15 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
                 trustRevision: "builtin.v1"
             ))
         }
-        if enabled.contains("create_calendar_event"), let eventStore {
+        if enabled.contains("calendar_event_tool"), let eventStore {
             try register(AppSystemDataToolAdapter(
-                tool: CreateCalendarEventTool(store: eventStore),
-                effects: [.localWrite],
+                tool: CalendarEventTool(store: eventStore),
+                effects: [.localRead, .localWrite],
                 destinationIdentity: "mobilellm.calendar",
                 dataCategory: "user.calendar",
-                userPreview: "Add an event to the user's calendar",
+                userPreview: "Manage calendar events and schedule",
                 trustRevision: "builtin.v1",
-                timeoutMilliseconds: 5_000
-            ))
-        }
-        if enabled.contains("list_calendar_events"), let eventStore {
-            try register(AppSystemDataToolAdapter(
-                tool: ListCalendarEventsTool(store: eventStore),
-                effects: [.localRead],
-                destinationIdentity: "mobilellm.calendar",
-                dataCategory: "user.calendar",
-                userPreview: "List the user's upcoming calendar events",
-                trustRevision: "builtin.v1",
-                timeoutMilliseconds: 5_000
+                timeoutMilliseconds: 10_000
             ))
         }
         if enabled.contains("reminder_task_tool"), let eventStore {
@@ -290,8 +278,8 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         case "wikipedia", "fetch_webpage": [.networkRead]
         case "remember": [.localWrite]
         case "recall": [.localRead]
-        case "create_calendar_event", "reminder_task_tool": [.localWrite]
-        case "list_calendar_events", "current_location": [.localRead]
+        case "calendar_event_tool", "reminder_task_tool": [.localRead, .localWrite]
+        case "current_location": [.localRead]
         case "shortcut_automation_tool": [.localWrite, .unknownExternal]
         default: [.localPure]
         }
@@ -303,7 +291,7 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
 
     private static func idempotency(for name: String) -> ExternalIdempotency {
         // A write tool cannot declare pure-read idempotency (descriptor semantics validation).
-        name == "remember" || name == "create_calendar_event" || name == "reminder_task_tool" || name == "shortcut_automation_tool"
+        name == "remember" || name == "calendar_event_tool" || name == "reminder_task_tool" || name == "shortcut_automation_tool"
             ? .nonIdempotent : .pureRead
     }
 
@@ -311,7 +299,7 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         switch name {
         case "web_search", "wikipedia", "fetch_webpage", "shortcut_automation_tool": 30_000
         case "current_location": 15_000
-        case "reminder_task_tool": 10_000
+        case "reminder_task_tool", "calendar_event_tool": 10_000
         default: 5_000
         }
     }

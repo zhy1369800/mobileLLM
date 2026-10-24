@@ -51,14 +51,14 @@ final class ToolRegistryWiringTests: XCTestCase {
     func testAssembleRespectsDisabledSetAndInjectedSeams() {
         var config = BuiltInToolConfig()
         config.enabled.remove(.webSearch)
-        config.enabled.formUnion([.createCalendarEvent, .listCalendarEvents])
+        config.enabled.formUnion([.calendarEvent])
         let registry = ToolRegistry.assemble(config: config,
                                              memoryStore: FakeMemoryStoreUI(),
                                              eventStore: FakeEventStoreUI(),
                                              locationProvider: FakeLocationProviderUI())
         let n = names(registry)
         XCTAssertFalse(n.contains("web_search"), "a disabled tool is dropped")
-        XCTAssertTrue(n.isSuperset(of: ["create_calendar_event", "list_calendar_events"]),
+        XCTAssertTrue(n.contains("calendar_event_tool"),
                       "enabled + injected store → present")
         XCTAssertTrue(n.isSuperset(of: ["remember", "recall"]), "memory store injected + enabled by default")
     }
@@ -67,9 +67,9 @@ final class ToolRegistryWiringTests: XCTestCase {
     /// enabled — so the calendar/location tools never surface there.
     func testAssembleWithoutSeamsOmitsInjectedTools() {
         var config = BuiltInToolConfig()
-        config.enabled.formUnion([.createCalendarEvent, .currentLocation])
+        config.enabled.formUnion([.calendarEvent, .currentLocation])
         let n = names(ToolRegistry.assemble(config: config))
-        XCTAssertFalse(n.contains("create_calendar_event"))
+        XCTAssertFalse(n.contains("calendar_event_tool"))
         XCTAssertFalse(n.contains("current_location"))
         XCTAssertFalse(n.contains("remember"))
         XCTAssertTrue(n.contains("calculator"), "privacy-free tools need nothing injected")
