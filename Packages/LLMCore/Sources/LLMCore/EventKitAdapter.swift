@@ -81,11 +81,13 @@ public final class EventKitStore: EventStoring, @unchecked Sendable {
         let calendar: EKCalendar
         if let listName = draft.listName?.trimmingCharacters(in: .whitespacesAndNewlines), !listName.isEmpty {
             let calendars = store.calendars(for: .reminder)
-            calendar = calendars.first(where: {
+            if let matched = calendars.first(where: {
                 $0.title.lowercased() == listName.lowercased() || $0.title.localizedCaseInsensitiveContains(listName)
-            }) ?? store.defaultCalendarForNewReminders() ?? calendars.first ?? {
+            }) ?? store.defaultCalendarForNewReminders() ?? calendars.first {
+                calendar = matched
+            } else {
                 throw EventStoreError.failed("no writable reminders list")
-            }()
+            }
         } else {
             guard let def = store.defaultCalendarForNewReminders() else {
                 throw EventStoreError.failed("no writable reminders list")
