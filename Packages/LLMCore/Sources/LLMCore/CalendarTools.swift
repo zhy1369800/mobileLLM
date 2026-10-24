@@ -521,8 +521,10 @@ public struct CalendarEventTool: Tool {
                 let days = call.arg("days").flatMap { Int(Double($0) ?? -1) } ?? 7
                 let calName = call.arg("calendar_name")?.trimmingCharacters(in: .whitespacesAndNewlines)
                 let events = try await store.events(daysAhead: max(1, days), calendarName: (calName?.isEmpty == false ? calName : nil))
+                let daySuffix = days == 1 ? "" : "s"
                 guard !events.isEmpty else {
-                    return "No events in the next \(days) day\(days == 1 ? \"\" : \"s\")\(calName != nil ? \" in calendar '\(calName!)'\" : \"\")."
+                    let calSuffix = (calName?.isEmpty == false) ? " in calendar '\(calName!)'" : ""
+                    return "No events in the next \(days) day\(daySuffix)\(calSuffix)."
                 }
                 let lines = events.sorted { $0.start < $1.start }.map { e -> String in
                     var locStr = ""
@@ -533,7 +535,7 @@ public struct CalendarEventTool: Tool {
                     if !e.id.isEmpty { idStr = " (id: \(e.id))" }
                     return "• \(e.title) — \(ISO8601Parsing.display(e.start))\(locStr)\(calStr)\(idStr)"
                 }
-                return "Events in the next \(days) day\(days == 1 ? \"\" : \"s\"):\n" + lines.joined(separator: "\n")
+                return "Events in the next \(days) day\(daySuffix):\n" + lines.joined(separator: "\n")
 
             case "search_events":
                 guard let query = call.arg("query")?.trimmingCharacters(in: .whitespacesAndNewlines), !query.isEmpty else {
@@ -553,7 +555,8 @@ public struct CalendarEventTool: Tool {
                     if !e.id.isEmpty { idStr = " (id: \(e.id))" }
                     return "• \(e.title) — \(ISO8601Parsing.display(e.start))\(locStr)\(calStr)\(idStr)"
                 }
-                return "Found \(events.count) event\(events.count == 1 ? \"\" : \"s\") matching \"\(query)\":\n" + lines.joined(separator: "\n")
+                let eventSuffix = events.count == 1 ? "" : "s"
+                return "Found \(events.count) event\(eventSuffix) matching \"\(query)\":\n" + lines.joined(separator: "\n")
 
             case "create_event":
                 guard let title = call.arg("title")?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else {
@@ -636,7 +639,10 @@ public struct CalendarEventTool: Tool {
             case "list_calendars":
                 let cals = try await store.calendars()
                 guard !cals.isEmpty else { return "No calendar accounts found." }
-                let lines = cals.map { "• \($0.title) (\($0.allowsContentModifications ? \"writable\" : \"read-only\"), id: \($0.id))" }
+                let lines = cals.map { cal in
+                    let mod = cal.allowsContentModifications ? "writable" : "read-only"
+                    return "• \(cal.title) (\(mod), id: \(cal.id))"
+                }
                 return "Calendars (\(cals.count)):\n" + lines.joined(separator: "\n")
 
             case "freebusy":
