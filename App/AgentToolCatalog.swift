@@ -219,7 +219,7 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         if enabled.contains("reminder_task_tool"), let eventStore {
             try register(AppSystemDataToolAdapter(
                 tool: ReminderTaskTool(store: eventStore),
-                effects: [.localWrite],
+                effects: [.localRead, .localWrite],
                 destinationIdentity: "mobilellm.reminders",
                 dataCategory: "user.reminders",
                 userPreview: "Manage reminders and to-do lists for the user",

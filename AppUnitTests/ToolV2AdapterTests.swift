@@ -426,6 +426,34 @@ final class ToolV2AdapterTests: XCTestCase {
 
     // MARK: - System data (calendar / reminders / location)
 
+    
+    func testAllSystemDataToolsDescriptorsMatchLiveAdapters() async throws {
+        let store = FakeEventStore()
+        let location = FakeLocationProvider()
+        let mapKit = FakeMapKitProvider()
+        let memory = FakeMemoryStore()
+        let catalog = try AppToolCatalog.catalog(
+            enabledToolNames: AppToolCatalog.adaptedToolNames,
+            memoryAvailable: true,
+            eventSeamAvailable: true,
+            locationSeamAvailable: true
+        )
+        let live = try AppToolCatalog(
+            enabledToolNames: AppToolCatalog.adaptedToolNames,
+            memoryStore: memory,
+            eventStore: store,
+            locationProvider: location,
+            mapKitProvider: mapKit,
+            mcpCache: MCPDiscoveryCache()
+        )
+        for descriptor in catalog.descriptors {
+            guard descriptor.id.logicalID.providerID == "builtin" else { continue }
+            let tool = try await live.tool(for: descriptor.id)
+            XCTAssertNotNil(tool, "Tool for \(descriptor.id) must be registered in live catalog")
+            XCTAssertEqual(tool?.descriptor, descriptor, "Descriptor mismatch for \(descriptor.id.logicalID.name)")
+        }
+    }
+
     func testSystemDataAdaptersPrepareAndExecuteAllFourTools() async throws {
         let store = FakeEventStore()
         let location = FakeLocationProvider()
@@ -443,7 +471,7 @@ final class ToolV2AdapterTests: XCTestCase {
             ),
             (
                 ReminderTaskTool(store: store),
-                [.localWrite],
+                [.localRead, .localWrite],
                 "mobilellm.reminders",
                 "user.reminders",
                 ["action": .string("create_reminder"),
