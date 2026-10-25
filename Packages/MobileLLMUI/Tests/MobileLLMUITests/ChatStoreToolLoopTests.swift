@@ -456,6 +456,35 @@ final class ChatStoreToolLoopTests: XCTestCase {
         XCTAssertEqual(preparedTurns[3].content, "The answer is 42.")
     }
 
+    func testChatTurnsDeduplicatesSharedRawCallTextForConcurrentToolRuns() throws {
+        let sharedCall = #"<tool_call>{"name":"delete","arguments":{"id":1}}</tool_call><tool_call>{"name":"delete","arguments":{"id":2}}</tool_call>"#
+        let run1 = ToolRun(name: "delete", arguments: "{\"id\":1}", result: "deleted 1", rawCallText: sharedCall, rawResponseText: "ok 1")
+        let run2 = ToolRun(name: "delete", arguments: "{\"id\":2}", result: "deleted 2", rawCallText: sharedCall, rawResponseText: "ok 2")
+        let message = Message(
+            role: .assistant,
+            answer: "All deleted.",
+            toolRuns: [run1, run2]
+        )
+        let userMessage = Message(role: .user, answer: "Delete all")
+        let preparedTurns = ChatStore.chatTurns(
+            messages: [userMessage, message],
+            systemPrompt: nil,
+            cap: 4096
+        )
+        // Expected:
+        // [0] User: "Delete all"
+        // [1] Assistant: sharedCall (ONLY ONCE!)
+        // [2] User: "ok 1"
+        // [3] User: "ok 2"
+        // [4] Assistant: "All deleted."
+        XCTAssertEqual(preparedTurns.count, 5)
+        XCTAssertEqual(preparedTurns.map(\.role), [.user, .assistant, .user, .user, .assistant])
+        XCTAssertEqual(preparedTurns[1].content, sharedCall)
+        XCTAssertEqual(preparedTurns[2].content, "ok 1")
+        XCTAssertEqual(preparedTurns[3].content, "ok 2")
+        XCTAssertEqual(preparedTurns[4].content, "All deleted.")
+    }
+
     private func settle() async throws {
         for _ in 0..<8 { await Task.yield() }
         try await Task.sleep(nanoseconds: 30_000_000)

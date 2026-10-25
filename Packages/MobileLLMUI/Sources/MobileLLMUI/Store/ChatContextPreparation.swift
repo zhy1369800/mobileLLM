@@ -66,16 +66,26 @@ extension ChatStore {
             let role: ChatTurn.Role = message.role == .assistant ? .assistant : .user
             let turnImages = role == .user ? images(message) : []
             if message.role == .assistant, let runs = message.toolRuns, !runs.isEmpty {
-                if !message.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    kept.append(ChatTurn(role: .assistant, content: message.answer))
-                }
-                for run in runs.reversed() {
-                    if let responseContent = run.rawResponseText, !responseContent.isEmpty {
-                        kept.append(ChatTurn(role: .user, content: responseContent))
-                    }
+                var messageTurns: [ChatTurn] = []
+                var lastCallText: String? = nil
+                for run in runs {
                     if let callContent = run.replayCallText {
-                        kept.append(ChatTurn(role: .assistant, content: callContent))
+                        if callContent != lastCallText {
+                            lastCallText = callContent
+                            messageTurns.append(ChatTurn(role: .assistant, content: callContent))
+                        }
+                    } else {
+                        lastCallText = nil
                     }
+                    if let responseContent = run.rawResponseText, !responseContent.isEmpty {
+                        messageTurns.append(ChatTurn(role: .user, content: responseContent))
+                    }
+                }
+                if !message.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    messageTurns.append(ChatTurn(role: .assistant, content: message.answer))
+                }
+                for turn in messageTurns.reversed() {
+                    kept.append(turn)
                 }
             } else {
                 kept.append(ChatTurn(role: role, content: message.answer, images: turnImages))
