@@ -17,7 +17,7 @@ final class CriticalFailClosedWireTests: XCTestCase {
         )
 
         XCTAssertEqual(budget.limits[.modelAttempts], 6)
-        XCTAssertEqual(budget.limits[.toolInvocations], 3)
+        XCTAssertEqual(budget.limits[.toolInvocations], 10)
         XCTAssertEqual(budget.limits[.structuredRepairs], 1)
         XCTAssertEqual(budget.limits[.repeatedCallsPerFingerprint], 1)
         XCTAssertEqual(budget.limits[.consecutiveNoProgressActions], 2)

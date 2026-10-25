@@ -275,7 +275,7 @@ public struct AgentBudget: Hashable, Codable, Sendable {
         guard !outputOverflow else { throw AgentContractError.arithmeticOverflow(dimension: .outputTokens) }
         let limits: [BudgetDimension: UInt64] = [
             .modelAttempts: 6,
-            .toolInvocations: 3,
+            .toolInvocations: 10,
             .structuredRepairs: 1,
             .repeatedCallsPerFingerprint: 1,
             .consecutiveNoProgressActions: 2,
