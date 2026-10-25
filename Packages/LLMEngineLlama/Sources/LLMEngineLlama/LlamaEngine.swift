@@ -566,17 +566,18 @@ public actor LlamaEngine: LLMEngine {
                 }
 
                 // 识别会话重发（Regenerate）：
-                // 1. 语义级别：本次 turns 恰好等于上一轮会话去掉最后的 assistant 回复
-                // 2. Token 级别：LCP 匹配达到了 promptTokens.count
-                let isRegenerateTurn = sessionCache.turns.count > 1 &&
-                    kept.count == sessionCache.turns.count - 1 &&
-                    kept == Array(sessionCache.turns.dropLast())
-                let isFullPromptMatch = isRegenerateTurn || (commonCount >= promptTokens.count)
+                // 1. 语义级别：无论是重发最后一轮，还是重发更早历史中的任意一轮，
+                //    本次 kept 均为显存中已驻留轮次的严格前缀（Array(sessionCache.turns.prefix(kept.count)) == kept）
+                // 2. Token 级别：LCP 匹配达到了 promptTokens.count（或仅末尾存在微小分词边界差异）
+                let isHistoricalPrefixTurn = kept.count < sessionCache.turns.count &&
+                    Array(sessionCache.turns.prefix(kept.count)) == kept
+                let isFullPromptMatch = isHistoricalPrefixTurn || (commonCount >= promptTokens.count)
 
-                // When resident tokens fully cover the new prompt (e.g. regenerate), roll back by 1 token
-                // and re-evaluate only the prompt's final token to refresh logits, achieving near 100% KV reuse.
+                // 确定安全的回滚点：
+                // 如果是全匹配重发，若 commonCount 已覆盖整个 prompt，则退回 1 个 token 刷新 logits；
+                // 若末尾因分词合并有轻微差异（commonCount < promptTokens.count），则从 commonCount 处快速解码最后几个 token。
                 let effectiveCommon = isFullPromptMatch
-                    ? (commonCount >= promptTokens.count ? max(0, promptTokens.count - 1) : commonCount)
+                    ? min(commonCount, max(0, promptTokens.count - 1))
                     : commonCount
 
                 let incrementalReserve = min(reserve, 256)
