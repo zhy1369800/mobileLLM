@@ -25,20 +25,33 @@ public struct RichContentWebView: View {
     }
 
     public var body: some View {
-        RepresentedWebView(
-            htmlString: styledHTML(htmlString, colorScheme: colorScheme),
-            isScrollEnabled: isScrollEnabled,
-            onHeightCalculated: { height in
-                internalHeight = max(100, height)
-                onHeightCalculated?(internalHeight)
+        Group {
+            if isScrollEnabled {
+                // Fullscreen expanded mode: fill entire available viewport, native scrolling without height constraints
+                RepresentedWebView(
+                    htmlString: styledHTML(htmlString, colorScheme: colorScheme, interactive: true),
+                    isScrollEnabled: true,
+                    onHeightCalculated: nil
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // Card preview mode: constrained to measured content height
+                RepresentedWebView(
+                    htmlString: styledHTML(htmlString, colorScheme: colorScheme, interactive: false),
+                    isScrollEnabled: false,
+                    onHeightCalculated: { height in
+                        internalHeight = max(80, height)
+                        onHeightCalculated?(internalHeight)
+                    }
+                )
+                .frame(height: internalHeight)
             }
-        )
-        .frame(minHeight: internalHeight)
+        }
     }
 
     /// Wraps raw HTML with strict Content-Security-Policy (no network hops), responsive viewport,
-    /// and ink-wash palette styles.
-    private func styledHTML(_ raw: String, colorScheme: ColorScheme) -> String {
+    /// card/fullscreen responsive layout, and ink-wash palette styles.
+    private func styledHTML(_ raw: String, colorScheme: ColorScheme, interactive: Bool) -> String {
         let isDark = colorScheme == .dark
         let bgColor = isDark ? "#221B12" : "#F7F1E7"
         let textColor = isDark ? "#EFE6D5" : "#211B12"
@@ -51,81 +64,82 @@ public struct RichContentWebView: View {
         <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:;">
         """
 
+        let safePadding = interactive
+            ? "padding: 20px 16px 80px 16px;"
+            : "padding: 10px 8px;"
+
+        let commonCSS = """
+        :root {
+            --bg-surface: \(bgColor);
+            --text-primary: \(textColor);
+            --text-secondary: \(secondaryColor);
+            --hairline: \(hairlineColor);
+            --accent: \(accentColor);
+        }
+        * { box-sizing: border-box; max-width: 100%; }
+        html, body {
+            width: 100%;
+            margin: 0;
+            background-color: var(--bg-surface);
+            color: var(--text-primary);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            -webkit-text-size-adjust: 100%;
+        }
+        body {
+            \(safePadding)
+            font-size: 14px;
+            line-height: 1.5;
+            word-break: break-word;
+            overflow-x: hidden;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 6px 0;
+            font-size: 13px;
+        }
+        th, td {
+            padding: 6px 10px;
+            border: 1px solid var(--hairline);
+            text-align: left;
+        }
+        th {
+            background-color: rgba(0,0,0,0.04);
+            font-weight: 600;
+        }
+        img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 6px;
+        }
+        pre, code {
+            font-family: ui-monospace, Menlo, Monaco, "Cascadia Mono", monospace;
+            background: rgba(0,0,0,0.05);
+            border-radius: 4px;
+            font-size: 12px;
+        }
+        """
+
         let hasHtmlTag = raw.lowercased().contains("<html") || raw.lowercased().contains("<!doctype")
         if hasHtmlTag {
-            // Raw full HTML document: inject CSP & theme variables into <head>
             let themeInjection = """
             \(cspMeta)
-            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=\(interactive ? "yes" : "no")">
             <style>
-                :root {
-                    --bg-surface: \(bgColor);
-                    --text-primary: \(textColor);
-                    --text-secondary: \(secondaryColor);
-                    --hairline: \(hairlineColor);
-                    --accent: \(accentColor);
-                }
-                body {
-                    margin: 0;
-                    padding: 12px;
-                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-                    background-color: var(--bg-surface);
-                    color: var(--text-primary);
-                }
+                \(commonCSS)
             </style>
             """
             return raw.replacingOccurrences(of: "<head>", with: "<head>\(themeInjection)", options: .caseInsensitive, range: nil)
         } else {
-            // HTML snippet: wrap in standard container with strict CSP
             return """
             <!DOCTYPE html>
             <html>
             <head>
                 <meta charset="utf-8">
                 \(cspMeta)
-                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=yes">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=\(interactive ? "yes" : "no")">
                 <style>
-                    :root {
-                        --bg-surface: \(bgColor);
-                        --text-primary: \(textColor);
-                        --text-secondary: \(secondaryColor);
-                        --hairline: \(hairlineColor);
-                        --accent: \(accentColor);
-                    }
-                    * { box-sizing: border-box; }
-                    body {
-                        margin: 0;
-                        padding: 14px;
-                        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-                        background-color: var(--bg-surface);
-                        color: var(--text-primary);
-                        line-height: 1.5;
-                        word-break: break-word;
-                    }
-                    table {
-                        width: 100%;
-                        border-collapse: collapse;
-                        margin: 8px 0;
-                        font-size: 14px;
-                    }
-                    th, td {
-                        padding: 8px 12px;
-                        border: 1px solid var(--hairline);
-                        text-align: left;
-                    }
-                    th {
-                        background-color: rgba(0,0,0,0.03);
-                        font-weight: 600;
-                    }
-                    img {
-                        max-width: 100%;
-                        height: auto;
-                    }
-                    pre, code {
-                        font-family: ui-monospace, Menlo, Monaco, "Cascadia Mono", monospace;
-                        background: rgba(0,0,0,0.05);
-                        border-radius: 4px;
-                    }
+                    \(commonCSS)
                 </style>
             </head>
             <body>
@@ -143,7 +157,7 @@ public struct RichContentWebView: View {
 private struct RepresentedWebView: UIViewRepresentable {
     let htmlString: String
     let isScrollEnabled: Bool
-    let onHeightCalculated: (CGFloat) -> Void
+    let onHeightCalculated: ((CGFloat) -> Void)?
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -155,12 +169,15 @@ private struct RepresentedWebView: UIViewRepresentable {
         webView.backgroundColor = .clear
         webView.scrollView.backgroundColor = .clear
         webView.scrollView.isScrollEnabled = isScrollEnabled
+        webView.scrollView.alwaysBounceVertical = isScrollEnabled
+        webView.scrollView.contentInsetAdjustmentBehavior = .automatic
         webView.navigationDelegate = context.coordinator
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         webView.scrollView.isScrollEnabled = isScrollEnabled
+        webView.scrollView.alwaysBounceVertical = isScrollEnabled
         context.coordinator.onHeightCalculated = onHeightCalculated
 
         if context.coordinator.currentHTML != htmlString {
@@ -175,24 +192,24 @@ private struct RepresentedWebView: UIViewRepresentable {
 
     class Coordinator: NSObject, WKNavigationDelegate {
         var currentHTML: String = ""
-        var onHeightCalculated: (CGFloat) -> Void
+        var onHeightCalculated: ((CGFloat) -> Void)?
 
-        init(onHeightCalculated: @escaping (CGFloat) -> Void) {
+        init(onHeightCalculated: ((CGFloat) -> Void)?) {
             self.onHeightCalculated = onHeightCalculated
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)") { [weak self] result, _ in
+            guard let onHeightCalculated = onHeightCalculated else { return }
+            webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)") { result, _ in
                 if let height = result as? CGFloat, height > 0 {
                     DispatchQueue.main.async {
-                        self?.onHeightCalculated(height)
+                        onHeightCalculated(height)
                     }
                 }
             }
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            // Strictly block external URL requests to maintain offline security boundary
             if navigationAction.navigationType == .linkActivated {
                 decisionHandler(.cancel)
             } else {
@@ -205,7 +222,7 @@ private struct RepresentedWebView: UIViewRepresentable {
 private struct RepresentedWebView: NSViewRepresentable {
     let htmlString: String
     let isScrollEnabled: Bool
-    let onHeightCalculated: (CGFloat) -> Void
+    let onHeightCalculated: ((CGFloat) -> Void)?
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -233,17 +250,18 @@ private struct RepresentedWebView: NSViewRepresentable {
 
     class Coordinator: NSObject, WKNavigationDelegate {
         var currentHTML: String = ""
-        var onHeightCalculated: (CGFloat) -> Void
+        var onHeightCalculated: ((CGFloat) -> Void)?
 
-        init(onHeightCalculated: @escaping (CGFloat) -> Void) {
+        init(onHeightCalculated: ((CGFloat) -> Void)?) {
             self.onHeightCalculated = onHeightCalculated
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)") { [weak self] result, _ in
+            guard let onHeightCalculated = onHeightCalculated else { return }
+            webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)") { result, _ in
                 if let height = result as? CGFloat, height > 0 {
                     DispatchQueue.main.async {
-                        self?.onHeightCalculated(height)
+                        onHeightCalculated(height)
                     }
                 }
             }

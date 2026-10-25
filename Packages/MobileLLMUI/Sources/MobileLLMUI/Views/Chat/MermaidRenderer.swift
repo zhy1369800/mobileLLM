@@ -31,20 +31,24 @@ public struct MermaidDiagramView: View {
     }
 
     /// Generates a 100% offline, self-contained HTML page that compiles the diagram code
-    /// into native vector SVG with layout, responsive pan/zoom, and ink-wash color tokens.
+    /// into native vector SVG with standard mobile viewport baseline and full scroll range.
     private func generateOfflineMermaidHTML(code: String, colorScheme: ColorScheme, interactive: Bool) -> String {
         let isDark = colorScheme == .dark
         let bgColor = isDark ? "#221B12" : "#F7F1E7"
         let cardBg = isDark ? "#2A2117" : "#FFFFFF"
         let textColor = isDark ? "#EFE6D5" : "#211B12"
         let secondaryColor = isDark ? "#B0A491" : "#5B5245"
-        let hairlineColor = isDark ? "rgba(255,255,255,0.15)" : "rgba(33,20,0,0.15)"
+        let hairlineColor = isDark ? "rgba(255,255,255,0.18)" : "rgba(33,20,0,0.15)"
         let accentColor = isDark ? "#D06450" : "#9F3C2E"
 
         let escapedCode = code
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "`", with: "\\`")
             .replacingOccurrences(of: "</script>", with: "<\\/script>")
+
+        let paddingStyle = interactive
+            ? "padding: 24px 16px 90px 16px;"
+            : "padding: 12px 8px;"
 
         return """
         <!DOCTYPE html>
@@ -63,29 +67,37 @@ public struct MermaidDiagramView: View {
                     --accent: \(accentColor);
                 }
                 * { box-sizing: border-box; }
-                body {
+                html, body {
+                    width: 100%;
+                    min-height: 100%;
                     margin: 0;
-                    padding: \(interactive ? "24px" : "12px");
                     background-color: var(--bg-surface);
                     color: var(--text-primary);
                     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                }
+                body {
+                    \(paddingStyle)
                     display: flex;
                     flex-direction: column;
                     align-items: center;
-                    justify-content: center;
-                    min-height: 100%;
-                    overflow: \(interactive ? "auto" : "hidden");
+                    justify-content: flex-start; /* Do not center vertically to prevent top clipping / data loss on overflow */
+                    overflow-x: \(interactive ? "auto" : "hidden");
+                    overflow-y: \(interactive ? "auto" : "hidden");
+                    -webkit-overflow-scrolling: touch;
                 }
                 #diagram-viewport {
                     width: 100%;
+                    max-width: 100%;
                     display: flex;
                     justify-content: center;
                     align-items: center;
                 }
                 svg {
+                    display: block;
+                    margin: 0 auto;
                     max-width: 100%;
                     height: auto;
-                    filter: drop-shadow(0 2px 5px rgba(0,0,0,0.05));
+                    filter: drop-shadow(0 2px 5px rgba(0,0,0,0.06));
                 }
                 .node-rect {
                     fill: var(--card-bg);
@@ -112,6 +124,7 @@ public struct MermaidDiagramView: View {
                     fill: var(--text-secondary);
                     font-size: 11px;
                     text-anchor: middle;
+                    dominant-baseline: central;
                 }
                 .raw-code-box {
                     background: rgba(0,0,0,0.03);
@@ -130,7 +143,6 @@ public struct MermaidDiagramView: View {
             <div id="diagram-viewport"></div>
 
             <script>
-                // Self-contained offline vector diagram layout engine
                 (function() {
                     const raw = `\(escapedCode)`.trim();
                     const viewport = document.getElementById('diagram-viewport');
@@ -139,7 +151,6 @@ public struct MermaidDiagramView: View {
                         const lines = raw.split('\\n').map(l => l.trim()).filter(l => l.length > 0);
                         const isLR = raw.toLowerCase().includes(' lr');
                         
-                        // Parse node definitions and relationships
                         const nodes = new Map();
                         const edges = [];
 
@@ -152,7 +163,6 @@ public struct MermaidDiagramView: View {
                             return nodes.get(id);
                         }
 
-                        // Regex match for node connections: A[text] -->|label| B[text] or A --> B
                         const arrowPattern = /([\\w\\-]+)(?:\\[(.*?)\\])?\\s*(-->|--|==>)\\s*(?:\\|([^|]+)\\|)?\\s*([\\w\\-]+)(?:\\[(.*?)\\])?/;
 
                         for (const line of lines) {
@@ -169,7 +179,6 @@ public struct MermaidDiagramView: View {
                                 getOrCreateNode(toId, toLabel);
                                 edges.push({ from: fromId, to: toId, label: edgeLabel });
                             } else {
-                                // Single node declaration: A[Label]
                                 const singleMatch = line.match(/([\\w\\-]+)\\[(.*?)\\]/);
                                 if (singleMatch) {
                                     getOrCreateNode(singleMatch[1], singleMatch[2]);
@@ -179,32 +188,46 @@ public struct MermaidDiagramView: View {
 
                         const nodeList = Array.from(nodes.values());
                         if (nodeList.length === 0) {
-                            // Display formatted structured text box if no diagram links were parsed
                             viewport.innerHTML = '<pre class="raw-code-box">' + raw + '</pre>';
                             return;
                         }
 
-                        // Calculate layout positions
-                        const nodeW = 120;
-                        const nodeH = 40;
-                        const gapX = isLR ? 70 : 30;
-                        const gapY = isLR ? 30 : 60;
+                        // Standard mobile canvas coordinate baseline (360 pt)
+                        const baseCanvasW = 360;
+                        let totalW = baseCanvasW;
+                        let totalH = 200;
 
-                        nodeList.forEach((n, idx) => {
-                            if (isLR) {
+                        if (isLR) {
+                            const nodeW = 120;
+                            const nodeH = 42;
+                            const gapX = 40;
+                            nodeList.forEach((n, idx) => {
+                                n.w = nodeW;
+                                n.h = nodeH;
                                 n.x = idx * (nodeW + gapX) + 20;
-                                n.y = 30;
-                            } else {
-                                n.x = 20;
+                                n.y = 40;
+                            });
+                            totalW = Math.max(baseCanvasW, nodeList.length * (nodeW + gapX) + 40);
+                            totalH = 130;
+                        } else {
+                            // Vertical layout (TD / TB)
+                            const nodeW = 220; // Comfortable width for Chinese phrases without squishing
+                            const nodeH = 44;
+                            const gapY = 46;
+                            const startX = Math.round((baseCanvasW - nodeW) / 2); // Center nodes cleanly on 360 canvas
+                            
+                            nodeList.forEach((n, idx) => {
+                                n.w = nodeW;
+                                n.h = nodeH;
+                                n.x = startX;
                                 n.y = idx * (nodeH + gapY) + 20;
-                            }
-                        });
+                            });
+                            totalW = baseCanvasW;
+                            totalH = nodeList.length * (nodeH + gapY) + 30;
+                        }
 
-                        const totalW = isLR ? nodeList.length * (nodeW + gapX) + 40 : nodeW + 40;
-                        const totalH = isLR ? nodeH + 60 : nodeList.length * (nodeH + gapY) + 40;
-
-                        // Build Vector SVG
-                        let svg = `<svg viewBox="0 0 ${totalW} ${totalH}" xmlns="http://www.w3.org/2000/svg">
+                        // Build Vector SVG with standard viewBox
+                        let svg = `<svg viewBox="0 0 ${totalW} ${totalH}" style="width: 100%; max-width: ${interactive ? '100%' : '360px'};" xmlns="http://www.w3.org/2000/svg">
                             <defs>
                                 <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
                                     <path d="M 0 1 L 10 5 L 0 9 z" class="edge-arrow" />
@@ -217,22 +240,25 @@ public struct MermaidDiagramView: View {
                             const t = nodes.get(e.to);
                             if (f && t) {
                                 if (isLR) {
-                                    const x1 = f.x + nodeW;
-                                    const y1 = f.y + nodeH / 2;
+                                    const x1 = f.x + f.w;
+                                    const y1 = f.y + f.h / 2;
                                     const x2 = t.x;
-                                    const y2 = t.y + nodeH / 2;
+                                    const y2 = t.y + t.h / 2;
                                     svg += `<path d="M ${x1} ${y1} L ${x2} ${y2}" class="edge-path" marker-end="url(#arrow)" />`;
                                     if (e.label) {
-                                        svg += `<text x="${(x1 + x2)/2}" y="${y1 - 6}" class="edge-label">${e.label}</text>`;
+                                        svg += `<text x="${(x1 + x2)/2}" y="${y1 - 8}" class="edge-label">${e.label}</text>`;
                                     }
                                 } else {
-                                    const x1 = f.x + nodeW / 2;
-                                    const y1 = f.y + nodeH;
-                                    const x2 = t.x + nodeW / 2;
+                                    const x1 = f.x + f.w / 2;
+                                    const y1 = f.y + f.h;
+                                    const x2 = t.x + t.w / 2;
                                     const y2 = t.y;
                                     svg += `<path d="M ${x1} ${y1} L ${x2} ${y2}" class="edge-path" marker-end="url(#arrow)" />`;
                                     if (e.label) {
-                                        svg += `<text x="${x1 + 8}" y="${(y1 + y2)/2}" class="edge-label" text-anchor="start">${e.label}</text>`;
+                                        // Place label with pleasant background pill
+                                        const midY = (y1 + y2) / 2;
+                                        svg += `<rect x="${x1 - 40}" y="${midY - 9}" width="80" height="18" fill="${bgColor}" rx="4" opacity="0.9" />`;
+                                        svg += `<text x="${x1}" y="${midY}" class="edge-label">${e.label}</text>`;
                                     }
                                 }
                             }
@@ -241,8 +267,8 @@ public struct MermaidDiagramView: View {
                         // Draw nodes
                         nodeList.forEach(n => {
                             svg += `<g>
-                                <rect x="${n.x}" y="${n.y}" width="${nodeW}" height="${nodeH}" class="node-rect" />
-                                <text x="${n.x + nodeW / 2}" y="${n.y + nodeH / 2}" class="node-text">${n.label}</text>
+                                <rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" class="node-rect" />
+                                <text x="${n.x + n.w / 2}" y="${n.y + n.h / 2}" class="node-text">${n.label}</text>
                             </g>`;
                         });
 
