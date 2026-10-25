@@ -63,6 +63,10 @@ public struct MermaidDiagramView: View {
             ? "<script>\(Self.bundledMermaidJS)</script>"
             : "<script src=\"https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js\"></script>"
 
+        let scriptCSP = hasBundledEngine
+            ? "script-src 'unsafe-inline';"
+            : "script-src 'unsafe-inline' https://cdn.jsdelivr.net;"
+
         let cardModeCSS = """
         body {
             padding: 12px 8px;
@@ -113,7 +117,7 @@ public struct MermaidDiagramView: View {
         <html>
         <head>
             <meta charset="utf-8">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' https://cdn.jsdelivr.net; img-src data: blob:; connect-src 'none';">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; \(scriptCSP) img-src data: blob:; connect-src 'none';">
             <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=4.0, user-scalable=\(interactive ? "yes" : "no")">
             <style>
                 :root {
