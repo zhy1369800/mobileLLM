@@ -556,30 +556,40 @@ public actor LlamaEngine: LLMEngine {
                 let residentHadImages = sessionCache.hasImages
 
                 // Calculate Longest Common Prefix (LCP) between resident KV tokens and new prompt tokens.
-                // Only valid if resident session was pure text, has authoritative physical tokens cached,
-                // and the model architecture actually supports partial state rollback.
+                // LCP matching itself is purely textual and independent of backend architecture capabilities.
                 var commonCount = 0
-                if supportsPartialTrim && !residentHadImages && !sessionCache.tokens.isEmpty {
+                if !residentHadImages && !sessionCache.tokens.isEmpty {
                     let maxLcp = min(sessionCache.tokens.count, promptTokens.count)
                     while commonCount < maxLcp && sessionCache.tokens[commonCount] == promptTokens[commonCount] {
                         commonCount += 1
                     }
                 }
 
-                let isFullPromptMatch = commonCount >= promptTokens.count
+                // 识别会话重发（Regenerate）：
+                // 1. 语义级别：本次 turns 恰好等于上一轮会话去掉最后的 assistant 回复
+                // 2. Token 级别：LCP 匹配达到了 promptTokens.count
+                let isRegenerateTurn = sessionCache.turns.count > 1 &&
+                    kept.count == sessionCache.turns.count - 1 &&
+                    kept == Array(sessionCache.turns.dropLast())
+                let isFullPromptMatch = isRegenerateTurn || (commonCount >= promptTokens.count)
+
                 // When resident tokens fully cover the new prompt (e.g. regenerate), roll back by 1 token
                 // and re-evaluate only the prompt's final token to refresh logits, achieving near 100% KV reuse.
-                let effectiveCommon = isFullPromptMatch ? max(0, promptTokens.count - 1) : commonCount
+                let effectiveCommon = isFullPromptMatch
+                    ? (commonCount >= promptTokens.count ? max(0, promptTokens.count - 1) : commonCount)
+                    : commonCount
 
                 let incrementalReserve = min(reserve, 256)
-                let canRollback = supportsPartialTrim &&
+                // 重发场景（isFullPromptMatch）无需强求底层模型架构支持局部 seq_rm，后续将通过自回归覆写进行；
+                // 仅非重发的任意位置历史分叉编辑，才需要 supportsPartialTrim。
+                let canRollback = (supportsPartialTrim || isFullPromptMatch) &&
                                   !residentHadImages &&
                                   !sessionCache.tokens.isEmpty &&
                                   effectiveCommon >= 16 &&
                                   (promptTokens.count + incrementalReserve <= contextCap)
 
                 if !canRollback {
-                    if !supportsPartialTrim {
+                    if !supportsPartialTrim && !isFullPromptMatch {
                         rollbackDiagnosticMessage = "跳过回滚: 当前模型架构不支持局部显存截断 (SSM/Recurrent状态已记录)"
                     } else if residentHadImages {
                         rollbackDiagnosticMessage = "跳过回滚: 包含多模态图片"
