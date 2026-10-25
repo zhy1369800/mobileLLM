@@ -313,6 +313,91 @@ final class LocalModelGenerationTests: XCTestCase {
         assertFailureCode(try await trailing.execute(), "model.local.malformed-action")
     }
 
+    func testSequentialToolCallsPreserveAssistantTurnsInEnginePrompt() async throws {
+        let tool = try ModelFixture.tool(name: "lookup")
+        let call1 = #"<tool_call>{"name":"lookup","arguments":{"q":"first"}}</tool_call>"#
+        let call2 = #"<tool_call>{"name":"lookup","arguments":{"q":"second"}}</tool_call>"#
+
+        let messages = [
+            AgentModelMessage(role: .system, content: "policy", isUntrustedData: false),
+            AgentModelMessage(role: .user, content: "find two things", isUntrustedData: false),
+            AgentModelMessage(role: .tool, content: "result of first", isUntrustedData: true),
+            AgentModelMessage(role: .tool, content: "result of second", isUntrustedData: true),
+        ]
+        let harness = try LocalAdapterHarness.make(
+            tools: [tool],
+            messages: messages,
+            scripts: [
+                LocalEngineScript([
+                    .answer("Done with both"),
+                    .done(localStats()),
+                ]),
+            ],
+            offset: 26
+        )
+        await harness.provider.residencyDriver.appendPendingToolCallResponse(call1, callCount: 1, for: harness.request.runID)
+        await harness.provider.residencyDriver.appendPendingToolCallResponse(call2, callCount: 1, for: harness.request.runID)
+
+        let result = try await harness.execute()
+        guard case .completed(let completion) = result.outcome,
+              case .finalAnswer(let answer) = completion.action
+        else { return XCTFail("expected final answer") }
+        XCTAssertEqual(answer.text, "Done with both")
+
+        let captures = await harness.engine.recordedCaptures()
+        let capture = try XCTUnwrap(captures.first)
+        let roles = capture.messages.map(\.role)
+        XCTAssertEqual(roles, [.system, .user, .assistant, .user, .assistant, .user])
+        XCTAssertEqual(capture.messages[2].content, call1)
+        XCTAssertEqual(capture.messages[4].content, call2)
+
+        let turns = harness.provider.residencyDriver.takeRecordedToolTurns(for: harness.request.runID)
+        XCTAssertEqual(turns.count, 2)
+        XCTAssertEqual(turns[0].rawCallText, call1)
+        XCTAssertEqual(turns[1].rawCallText, call2)
+    }
+
+    func testConcurrentToolCallsShareSingleAssistantTurnInEnginePrompt() async throws {
+        let tool = try ModelFixture.tool(name: "lookup")
+        let concurrentCalls = #"<tool_call>{"name":"lookup","arguments":{"q":"1"}}</tool_call><tool_call>{"name":"lookup","arguments":{"q":"2"}}</tool_call>"#
+
+        let messages = [
+            AgentModelMessage(role: .system, content: "policy", isUntrustedData: false),
+            AgentModelMessage(role: .user, content: "find two things", isUntrustedData: false),
+            AgentModelMessage(role: .tool, content: "result of 1", isUntrustedData: true),
+            AgentModelMessage(role: .tool, content: "result of 2", isUntrustedData: true),
+        ]
+        let harness = try LocalAdapterHarness.make(
+            tools: [tool],
+            messages: messages,
+            scripts: [
+                LocalEngineScript([
+                    .answer("Done with concurrent"),
+                    .done(localStats()),
+                ]),
+            ],
+            offset: 27
+        )
+        await harness.provider.residencyDriver.appendPendingToolCallResponse(concurrentCalls, callCount: 2, for: harness.request.runID)
+
+        let result = try await harness.execute()
+        guard case .completed(let completion) = result.outcome,
+              case .finalAnswer(let answer) = completion.action
+        else { return XCTFail("expected final answer") }
+        XCTAssertEqual(answer.text, "Done with concurrent")
+
+        let captures = await harness.engine.recordedCaptures()
+        let capture = try XCTUnwrap(captures.first)
+        let roles = capture.messages.map(\.role)
+        XCTAssertEqual(roles, [.system, .user, .assistant, .user, .user])
+        XCTAssertEqual(capture.messages[2].content, concurrentCalls)
+
+        let turns = harness.provider.residencyDriver.takeRecordedToolTurns(for: harness.request.runID)
+        XCTAssertEqual(turns.count, 2)
+        XCTAssertEqual(turns[0].rawCallText, concurrentCalls)
+        XCTAssertEqual(turns[1].rawCallText, concurrentCalls)
+    }
+
     func testStructuredOutputCommitsTypedJSONAndRejectsInvalidOrArtifactOnlyOutput() async throws {
         let schema = try JSONSchemaDocument(root: .object([
             "type": .string("object"),

@@ -362,7 +362,7 @@ private enum LocalModelGeneration {
                 )
             }
             if case .callTools(let calls) = action {
-                await residencyDriver?.appendPendingToolCallResponse(rawResponse, for: request.runID)
+                await residencyDriver?.appendPendingToolCallResponse(rawResponse, callCount: calls.count, for: request.runID)
                 shouldRetainToolResponses = true
                 try await emitter.emit(.toolCalls(calls), responseBytes: 0)
             }
@@ -419,8 +419,9 @@ private enum LocalModelGeneration {
         var totalImageBytes: UInt64 = 0
         var policyBlocks: [String] = []
         let priorResponses = await residencyDriver?.pendingToolCallResponses(for: request.runID) ?? []
-        var toolResponseIndex = 0
-        var previousRole: AgentModelMessageRole? = nil
+        var toolGroupIndex = 0
+        var remainingInCurrentGroup = 0
+        var currentRawCallText = ""
         var compiledToolTurns: [RecordedLocalToolTurn] = []
         for message in request.messages {
             if isInternalRunStateMessage(message) {
@@ -446,19 +447,27 @@ private enum LocalModelGeneration {
                 images.append(bytes)
             }
             let isToolMessage = (message.role == .tool && message.isUntrustedData)
-            let isFirstOfToolGroup = isToolMessage && (previousRole != .tool)
-            var rawCallText = ""
-            if isFirstOfToolGroup {
-                if toolResponseIndex < priorResponses.count {
-                    rawCallText = priorResponses[toolResponseIndex]
-                    turns.append(ChatTurn(
-                        role: .assistant,
-                        content: rawCallText
-                    ))
-                    toolResponseIndex += 1
+            if isToolMessage {
+                if remainingInCurrentGroup == 0 {
+                    if toolGroupIndex < priorResponses.count {
+                        let group = priorResponses[toolGroupIndex]
+                        currentRawCallText = group.rawResponse
+                        remainingInCurrentGroup = group.callCount
+                        turns.append(ChatTurn(
+                            role: .assistant,
+                            content: currentRawCallText
+                        ))
+                        toolGroupIndex += 1
+                    } else {
+                        currentRawCallText = ""
+                    }
                 }
+                if remainingInCurrentGroup > 0 {
+                    remainingInCurrentGroup -= 1
+                }
+            } else {
+                remainingInCurrentGroup = 0
             }
-            previousRole = message.role
             let content = message.isUntrustedData
                 ? LocalModelPromptRenderer.frameUntrusted(
                     message.content,
@@ -472,7 +481,7 @@ private enum LocalModelGeneration {
             ))
             if isToolMessage {
                 compiledToolTurns.append(RecordedLocalToolTurn(
-                    rawCallText: rawCallText,
+                    rawCallText: currentRawCallText,
                     rawResponseText: content
                 ))
             }
