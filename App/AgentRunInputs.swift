@@ -625,8 +625,8 @@ struct AppFrozenInputBuilder: Sendable {
             }
             if enabledTools.contains("map_kit_tool") {
                 ceilingDestinations.append(try ExternalDestination(
-                    kind: .networkEndpoint,
-                    normalizedIdentity: "maps.apple.com"
+                    kind: .privateDataStore,
+                    normalizedIdentity: "mobilellm.maps"
                 ))
                 ceilingDataCategories.append(try AgentDataCategory(rawValue: "maps.apple"))
             }

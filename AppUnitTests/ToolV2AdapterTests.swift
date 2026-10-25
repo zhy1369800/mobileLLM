@@ -459,6 +459,16 @@ final class ToolV2AdapterTests: XCTestCase {
                 [:],
                 "Vienna"
             ),
+            (
+                MapKitTool(provider: FakeMapKitProvider()),
+                [.networkRead, .localRead],
+                "mobilellm.maps",
+                "maps.apple",
+                ["action": .string("search_places"),
+                 "query": .string("Shenzhen North")],
+                "Shenzhen North Station"
+            ),
+
         ]
 
         for item in cases {
@@ -900,6 +910,19 @@ private struct FakeLocationProvider: LocationProviding {
         LocationFix(latitude: 48.2082, longitude: 16.3738, accuracy: 100, locality: "Vienna")
     }
 }
+
+private struct FakeMapKitProvider: MapKitProviding {
+    func searchPlaces(query: String, center: (latitude: Double, longitude: Double)?, radiusMeters: Double, limit: Int) async throws -> [MapPlaceItem] {
+        [MapPlaceItem(name: "Shenzhen North Station", latitude: 22.6085, longitude: 114.0298, address: "Minzhi, Longhua, Shenzhen")]
+    }
+    func calculateRoute(fromAddress: String?, fromCoord: (latitude: Double, longitude: Double)?, toAddress: String?, toCoord: (latitude: Double, longitude: Double)?, mode: String?) async throws -> RouteInfo {
+        RouteInfo(distanceKilometers: 10.0, durationMinutes: 15.0)
+    }
+    func calculateEta(fromAddress: String?, fromCoord: (latitude: Double, longitude: Double)?, toAddress: String?, toCoord: (latitude: Double, longitude: Double)?, mode: String?) async throws -> EtaInfo {
+        EtaInfo(distanceKilometers: 10.0, durationMinutes: 15.0, expectedArrival: Date())
+    }
+}
+
 
 private actor FakeMemoryStore: MemoryStoring {
     private var facts: [MemoryFact] = []
