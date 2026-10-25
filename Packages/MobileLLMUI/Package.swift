@@ -28,7 +28,8 @@ let package = Package(
                 .product(name: "LLMCore", package: "LLMCore"),
                 .product(name: "AgentContracts", package: "AgentContracts"),
                 .product(name: "AgentRuntime", package: "AgentRuntime"),
-            ]
+            ],
+            resources: [.copy("Resources")]
         ),
         // The captured live-feed fixture is read source-relative (via #filePath) rather than from a
         // bundle — declare it so SwiftPM doesn't warn about an unhandled file.
