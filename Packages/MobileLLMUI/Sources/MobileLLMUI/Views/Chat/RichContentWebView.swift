@@ -151,7 +151,8 @@ private struct RepresentedWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
-        config.websiteDataStore = .nonPersistent()
+        // Allow disk caching so static engines load in 0ms on subsequent views
+        config.websiteDataStore = .default()
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.isOpaque = false
@@ -216,7 +217,7 @@ private struct RepresentedWebView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
-        config.websiteDataStore = .nonPersistent()
+        config.websiteDataStore = .default()
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
