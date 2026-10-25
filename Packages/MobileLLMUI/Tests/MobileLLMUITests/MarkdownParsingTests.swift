@@ -198,9 +198,29 @@ final class MarkdownParsingTests: XCTestCase {
     }
 
     func testTerminatedHtmlMidStreamPromotesToHtmlKind() {
-        // Once closing fence arrives, it safely promotes to .html
+        // Once closing fence arrives, it safely promotes to .html in non-streaming (finalized) mode
         let text = "```html\n<table><tr><td>streaming</td>\n```"
         let kinds = MarkdownBlock.parse(text).map(\.kind)
         XCTAssertEqual(kinds, [.html("<table><tr><td>streaming</td>")])
+    }
+
+    func testTerminatedHtmlDuringStreamingStaysCodeToPreventThrashing() {
+        // During active streaming, even closed fences remain as lightweight .code to avoid WebKit thrashing
+        let text = "```html\n<table><tr><td>streaming</td>\n```\nmore tokens"
+        let kinds = MarkdownBlock.parse(text, isStreaming: true).map(\.kind)
+        XCTAssertEqual(kinds, [
+            .code(language: "html", code: "<table><tr><td>streaming</td>"),
+            .prose("more tokens")
+        ])
+    }
+
+    func testTerminatedMermaidDuringStreamingStaysCodeToPreventThrashing() {
+        // During active streaming, closed mermaid fences also stay as .code
+        let text = "```mermaid\ngraph TD; A-->B;\n```\nmore tokens"
+        let kinds = MarkdownBlock.parse(text, isStreaming: true).map(\.kind)
+        XCTAssertEqual(kinds, [
+            .code(language: "mermaid", code: "graph TD; A-->B;"),
+            .prose("more tokens")
+        ])
     }
 }

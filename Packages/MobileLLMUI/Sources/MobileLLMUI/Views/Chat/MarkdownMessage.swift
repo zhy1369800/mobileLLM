@@ -35,7 +35,9 @@ struct MarkdownBlock: Identifiable {
     /// Parse assistant text into blocks. A trailing unterminated ``` fence (mid-stream) still renders as
     /// a code block, and a half-typed table stays prose until its delimiter row arrives, so streaming
     /// never flashes broken structure.
-    static func parse(_ text: String) -> [MarkdownBlock] {
+    /// During streaming (`isStreaming == true`), all code blocks (even terminated HTML/Mermaid fences)
+    /// remain as lightweight `CodeCard`s to prevent WebKit instantiation and layout thrashing.
+    static func parse(_ text: String, isStreaming: Bool = false) -> [MarkdownBlock] {
         var blocks: [MarkdownBlock] = []
         var prose: [String] = []
         func flushProse() {
@@ -50,9 +52,9 @@ struct MarkdownBlock: Identifiable {
             let line = lines[i]
 
             // Fenced code — including a trailing UNTERMINATED fence mid-stream.
-            // Stream performance guard: while the fence remains open mid-generation, keep it as lightweight
+            // Stream performance guard: while generating (streaming), keep all fences as lightweight
             // code to prevent WebKit instantiation thrashing on every token. Activate rich rendering only
-            // after the closing fence is received.
+            // after the closing fence is received in the finalized non-streaming message.
             if line.hasPrefix("```") {
                 flushProse()
                 let rawLang = line.dropFirst(3).trimmingCharacters(in: .whitespaces)
@@ -70,9 +72,9 @@ struct MarkdownBlock: Identifiable {
                     i += 1
                 }
                 let codeBody = code.joined(separator: "\n")
-                if isClosed && (lang == "html" || lang == "htm") {
+                if !isStreaming && isClosed && (lang == "html" || lang == "htm") {
                     blocks.append(MarkdownBlock(id: blocks.count, kind: .html(codeBody)))
-                } else if isClosed && lang == "mermaid" {
+                } else if !isStreaming && isClosed && lang == "mermaid" {
                     blocks.append(MarkdownBlock(id: blocks.count, kind: .diagram(type: "mermaid", code: codeBody)))
                 } else {
                     blocks.append(MarkdownBlock(id: blocks.count,
@@ -246,10 +248,11 @@ enum MarkdownInline {
 /// cards (DESIGN §4).
 struct MarkdownMessage: View {
     let text: String
+    var isStreaming: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.md) {
-            ForEach(MarkdownBlock.parse(text)) { block in
+            ForEach(MarkdownBlock.parse(text, isStreaming: isStreaming)) { block in
                 switch block.kind {
                 case .prose(let s): ProseText(s)
                 case let .code(language, code): CodeCard(language: language, code: code)
@@ -275,7 +278,7 @@ struct StreamingMarkdown: View {
     @State private var lastRenderedAt = Date.distantPast
 
     var body: some View {
-        MarkdownMessage(text: shown + "\u{258C}")
+        MarkdownMessage(text: shown + "\u{258C}", isStreaming: true)
             .onChange(of: text) { _, new in
                 let now = Date()
                 // Render on a ~50 ms gate, or immediately when a big chunk arrives so we never fall far behind.
