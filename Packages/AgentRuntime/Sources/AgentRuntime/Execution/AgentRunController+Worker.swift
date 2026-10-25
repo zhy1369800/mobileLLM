@@ -382,13 +382,23 @@ extension AgentRunController {
         if history.repairCount > 0 {
             let lastRepair = history.diagnostics.last { $0.1.code == "execution.structured-repair" }
                 ?? history.diagnostics.last { $0.1.code == "execution.repeated-tool-call" }
-            stateFields["repairInstruction"] = .string(
-                lastRepair?.1.code == "execution.repeated-tool-call"
-                    ? "Your last tool call already executed in this turn. Do NOT call any tool again — "
+                ?? history.diagnostics.last { $0.1.code == "execution.tool-budget-exhausted" }
+            if lastRepair?.1.code == "execution.tool-budget-exhausted" {
+                stateFields["repairInstruction"] = .string(
+                    "Tool invocation budget limit reached for this run. Do NOT call any more tools — "
+                        + "answer the user's request directly with text only summarizing what has been done."
+                )
+            } else if lastRepair?.1.code == "execution.repeated-tool-call" {
+                stateFields["repairInstruction"] = .string(
+                    "Your last tool call already executed in this turn. Do NOT call any tool again — "
                         + "answer the user's request directly with text only."
-                    : "Return exactly one valid action matching the advertised response contract. "
+                )
+            } else {
+                stateFields["repairInstruction"] = .string(
+                    "Return exactly one valid action matching the advertised response contract. "
                         + "Do not include prose outside that action."
-            )
+                )
+            }
         }
         let stateJSON = try CanonicalJSON(.object(stateFields))
         let runState = try RunStateContextSource(

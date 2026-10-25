@@ -220,6 +220,53 @@ extension AgentRunController {
                 return events
             }
             return
+        } catch ToolBatchValidationError.callBudgetExceeded {
+            // When tool calls exceed the remaining invocation budget, do not terminate the entire run.
+            // Intercept gracefully and instruct the model to summarize its completed actions.
+            if history.budgetExhaustedRepairCount > 0 {
+                try await failRun(
+                    runID: facts.projection.runID,
+                    reason: .budgetExceeded,
+                    code: "execution.tool-budget-exhausted",
+                    message: "The run stopped because the tool invocation budget was exhausted."
+                )
+                return
+            }
+            let repair = try AgentFailure(
+                code: "execution.tool-budget-exhausted",
+                classification: .transient,
+                safeMessage: "Tool invocation budget limit reached for this run. Do NOT call any more tools — "
+                    + "answer the user's request directly with text only summarizing what has been done.",
+                retryAdvice: .never,
+                externalEffect: .confirmedNone,
+                requiredUserAction: .none,
+                redaction: Self.publicRedaction
+            )
+            let id = ExecutionStableID.event(
+                runID: facts.projection.runID,
+                key: "tool-budget-repair-\(facts.projection.eventCount + 1)"
+            )
+            _ = try await commitEvents(runID: facts.projection.runID, identity: .outcome(id)) {
+                builder in
+                var events = [try builder.append(
+                    id: id,
+                    event: .diagnostic(repair),
+                    redaction: Self.publicRedaction
+                )]
+                let waiting = try self.status(
+                    after: builder,
+                    state: .waitingForModel,
+                    blockingReason: .modelResource
+                )
+                events.append(try builder.append(
+                    id: self.nextEventID(builder, key: "tool-budget-repair-waiting"),
+                    event: .statusChanged(waiting),
+                    transitionTo: .waitingForModel,
+                    redaction: Self.publicRedaction
+                ))
+                return events
+            }
+            return
         } catch {
             try await failRun(
                 runID: facts.projection.runID,
@@ -908,8 +955,30 @@ extension AgentRunController {
             finalUsage = try finalUsage.adding(AgentUsage(quantities: BudgetQuantities([
                 .toolInvocations: 1,
             ])))
+            var finalOutcome = outcome
+            let toolLimit = facts.submission?.request.payload.budget.limits[.toolInvocations] ?? 10
+            let isLastInvocation = (finalHistory.toolOutcomes.count + 1) >= Int(toolLimit)
+            if !hasMore && isLastInvocation {
+                if case .completed(let collection) = outcome {
+                    var newValues = collection.values
+                    let notice = "\n[Notice: Tool invocation limit reached for this run. Do NOT call any more tools — answer the user's request directly with text only summarizing what has been done.]"
+                    if let lastIndex = newValues.indices.last, case .text(let existingText) = newValues[lastIndex] {
+                        if let combinedText = try? ToolTextResult(existingText.value + notice) {
+                            newValues[lastIndex] = .text(combinedText)
+                            if let newCollection = try? ToolResultCollection(newValues) {
+                                finalOutcome = .completed(newCollection)
+                            }
+                        }
+                    } else {
+                        if let noticeText = try? ToolTextResult(notice),
+                           let newCollection = try? ToolResultCollection(newValues + [.text(noticeText)]) {
+                            finalOutcome = .completed(newCollection)
+                        }
+                    }
+                }
+            }
             try await commitToolOutcome(
-                outcome,
+                finalOutcome,
                 prepared: prepared,
                 reservation: reservation,
                 actualUsage: finalUsage,

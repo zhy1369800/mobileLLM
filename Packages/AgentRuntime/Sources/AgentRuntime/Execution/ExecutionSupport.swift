@@ -413,7 +413,7 @@ struct ExecutionHistory: Sendable {
     }
 
     var repairCount: UInt64 {
-        structuredRepairCount + duplicateRepairCount
+        structuredRepairCount + duplicateRepairCount + budgetExhaustedRepairCount
     }
 
     var structuredRepairCount: UInt64 {
@@ -422,6 +422,10 @@ struct ExecutionHistory: Sendable {
 
     var duplicateRepairCount: UInt64 {
         UInt64(diagnostics.lazy.filter { $0.1.code == "execution.repeated-tool-call" }.count)
+    }
+
+    var budgetExhaustedRepairCount: UInt64 {
+        UInt64(diagnostics.lazy.filter { $0.1.code == "execution.tool-budget-exhausted" }.count)
     }
 
 }
