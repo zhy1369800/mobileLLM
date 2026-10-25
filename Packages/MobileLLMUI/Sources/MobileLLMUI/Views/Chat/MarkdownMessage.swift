@@ -23,6 +23,8 @@ struct MarkdownBlock: Identifiable {
         case list([ListRow])
         case quote([String])
         case table(header: [String], rows: [[String]])
+        case html(String)
+        case diagram(type: String, code: String)
     }
 
     /// Stable position-based id so SwiftUI reuses the block views across streaming re-parses — a random
@@ -47,18 +49,36 @@ struct MarkdownBlock: Identifiable {
         while i < lines.count {
             let line = lines[i]
 
-            // Fenced code — including a trailing UNTERMINATED fence mid-stream (still a code block so it
-            // reads correctly while typing).
+            // Fenced code — including a trailing UNTERMINATED fence mid-stream.
+            // Stream performance guard: while the fence remains open mid-generation, keep it as lightweight
+            // code to prevent WebKit instantiation thrashing on every token. Activate rich rendering only
+            // after the closing fence is received.
             if line.hasPrefix("```") {
                 flushProse()
-                let lang = line.dropFirst(3).trimmingCharacters(in: .whitespaces)
+                let rawLang = line.dropFirst(3).trimmingCharacters(in: .whitespaces)
+                let lang = rawLang.lowercased()
                 var code: [String] = []
                 i += 1
-                while i < lines.count && !lines[i].hasPrefix("```") { code.append(lines[i]); i += 1 }
-                if i < lines.count { i += 1 }   // consume the closing fence
-                blocks.append(MarkdownBlock(id: blocks.count,
-                                            kind: .code(language: lang.isEmpty ? nil : lang,
-                                                        code: code.joined(separator: "\n"))))
+                var isClosed = false
+                while i < lines.count {
+                    if lines[i].hasPrefix("```") {
+                        isClosed = true
+                        i += 1   // consume the closing fence
+                        break
+                    }
+                    code.append(lines[i])
+                    i += 1
+                }
+                let codeBody = code.joined(separator: "\n")
+                if isClosed && (lang == "html" || lang == "htm") {
+                    blocks.append(MarkdownBlock(id: blocks.count, kind: .html(codeBody)))
+                } else if isClosed && lang == "mermaid" {
+                    blocks.append(MarkdownBlock(id: blocks.count, kind: .diagram(type: "mermaid", code: codeBody)))
+                } else {
+                    blocks.append(MarkdownBlock(id: blocks.count,
+                                                kind: .code(language: rawLang.isEmpty ? nil : rawLang,
+                                                            code: codeBody)))
+                }
                 continue
             }
 
@@ -237,6 +257,8 @@ struct MarkdownMessage: View {
                 case let .list(rows): MarkdownList(rows: rows)
                 case let .quote(lines): MarkdownQuote(lines: lines)
                 case let .table(header, rows): MarkdownTable(header: header, rows: rows)
+                case let .html(code): HTMLCardView(code: code)
+                case let .diagram(type, code): DiagramCardView(type: type, code: code)
                 }
             }
         }
@@ -360,8 +382,10 @@ struct MarkdownTable: View {
     /// The table's actual available width, measured from the thread (the GeometryReader lives in the
     /// background so it never greedily expands the card's height).
     @State private var availableWidth: CGFloat = 0
+    @State private var isExpanded: Bool = false
 
     private var columns: Int { max(1, max(header.count, rows.map(\.count).max() ?? 0)) }
+    private var isCollapsible: Bool { rows.count > 3 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
@@ -375,8 +399,35 @@ struct MarkdownTable: View {
                 )
                 tableRow(header, widths: widths, header: true)
                 Divider().overlay(Theme.hairline)
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                let displayRows = (isCollapsible && !isExpanded) ? Array(rows.prefix(3)) : rows
+                ForEach(Array(displayRows.enumerated()), id: \.offset) { _, row in
                     tableRow(row, widths: widths, header: false)
+                }
+
+                if isCollapsible && !isExpanded {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            isExpanded = true
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text("查看完整内容")
+                                .font(.subheadline.weight(.medium))
+                            Image(systemName: "chevron.down")
+                                .font(.caption.weight(.bold))
+                        }
+                        .foregroundStyle(Theme.textSecondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(Theme.surface2.opacity(0.6))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .strokeBorder(Theme.hairline)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 4)
                 }
             }
         }
@@ -512,3 +563,46 @@ struct CodeCard: View {
     .background(Theme.bg)
 }
 #endif
+
+/// HTML block view wrapped in a collapsible preview container
+struct HTMLCardView: View {
+    let code: String
+
+    var body: some View {
+        CollapsibleCardContainer(
+            title: "HTML 页面",
+            iconName: "chevron.left.forwardslash.chevron.right",
+            collapsedHeight: 260,
+            sourceCode: code,
+            content: {
+                RichContentWebView(htmlString: code, isScrollEnabled: false)
+                    .frame(maxWidth: .infinity)
+            },
+            expandedContent: {
+                RichContentWebView(htmlString: code, isScrollEnabled: true)
+            }
+        )
+    }
+}
+
+/// Diagram (Mermaid) block view wrapped in a collapsible preview container
+struct DiagramCardView: View {
+    let type: String
+    let code: String
+
+    var body: some View {
+        CollapsibleCardContainer(
+            title: type == "mermaid" ? "流程架构图 (Mermaid)" : "图表预览",
+            iconName: "point.3.connected.trianglepath.dotted",
+            collapsedHeight: 280,
+            sourceCode: code,
+            content: {
+                MermaidDiagramView(code: code, isInteractiveZoom: false)
+                    .frame(maxWidth: .infinity)
+            },
+            expandedContent: {
+                MermaidDiagramView(code: code, isInteractiveZoom: true)
+            }
+        )
+    }
+}

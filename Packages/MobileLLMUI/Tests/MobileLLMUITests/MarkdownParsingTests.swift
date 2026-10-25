@@ -165,4 +165,42 @@ final class MarkdownParsingTests: XCTestCase {
         XCTAssertGreaterThan(ragged[1], 0)
         XCTAssertGreaterThan(ragged[2], 0)
     }
+
+    // MARK: HTML & Diagram parsing
+
+    func testHtmlCodeBlockParsesAsHtmlKind() {
+        let text = "before\n```html\n<div>Hello World</div>\n```\nafter"
+        let kinds = MarkdownBlock.parse(text).map(\.kind)
+        XCTAssertEqual(kinds, [
+            .prose("before"),
+            .html("<div>Hello World</div>"),
+            .prose("after")
+        ])
+    }
+
+    func testHtmCodeBlockCaseInsensitiveParsesAsHtmlKind() {
+        let text = "```HTM\n<p>Test</p>\n```"
+        let kinds = MarkdownBlock.parse(text).map(\.kind)
+        XCTAssertEqual(kinds, [.html("<p>Test</p>")])
+    }
+
+    func testMermaidCodeBlockParsesAsDiagramKind() {
+        let text = "```mermaid\ngraph TD; A-->B;\n```"
+        let kinds = MarkdownBlock.parse(text).map(\.kind)
+        XCTAssertEqual(kinds, [.diagram(type: "mermaid", code: "graph TD; A-->B;")])
+    }
+
+    func testUnterminatedHtmlMidStreamStaysCodeForPerformance() {
+        // Unterminated code fence mid-stream must stay as plain .code to prevent WebKit thrashing
+        let text = "```html\n<table><tr><td>streaming</td>"
+        let kinds = MarkdownBlock.parse(text).map(\.kind)
+        XCTAssertEqual(kinds, [.code(language: "html", code: "<table><tr><td>streaming</td>")])
+    }
+
+    func testTerminatedHtmlMidStreamPromotesToHtmlKind() {
+        // Once closing fence arrives, it safely promotes to .html
+        let text = "```html\n<table><tr><td>streaming</td>\n```"
+        let kinds = MarkdownBlock.parse(text).map(\.kind)
+        XCTAssertEqual(kinds, [.html("<table><tr><td>streaming</td>")])
+    }
 }
