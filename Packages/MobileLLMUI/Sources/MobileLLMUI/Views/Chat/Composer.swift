@@ -214,7 +214,7 @@ struct Composer: View {
             .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous).strokeBorder(Theme.hairline))
             #if os(macOS)
-            .onSubmit { if chat.canSend { chat.send(); focused = false } }   // ⏎ sends on Mac; ⇧⏎ inserts a newline
+            .onSubmit { if chat.canSend { focused = false; chat.send() } }   // ⏎ sends on Mac; ⇧⏎ inserts a newline
             #endif
             .accessibilityLabel("Message")
             .accessibilityIdentifier("composer.field")   // XCUITest hook (keyboard-geometry regression)
@@ -566,8 +566,8 @@ struct Composer: View {
                 chat.stop()
             } else {
                 dictation.stop()
+                focused = false   // dismiss keyboard first so viewport expands cleanly
                 chat.send()
-                focused = false   // dismiss keyboard on send
             }
         } label: {
             Image(systemName: chat.isStreaming ? "stop.fill" : "arrow.up")

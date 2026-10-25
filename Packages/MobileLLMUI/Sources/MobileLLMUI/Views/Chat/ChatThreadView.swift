@@ -157,7 +157,18 @@ struct ChatThreadView: View {
                     bottomMaxY = maxY
                     atBottom = maxY <= outer.size.height + 40
                 }
-                .onChange(of: convo.messages.count) { _, _ in scrollToBottom(proxy, animated: false) }
+                .onChange(of: convo.messages.count) { _, _ in
+                    scrollToBottom(proxy, animated: false)
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                        scrollToBottom(proxy, animated: false)
+                    }
+                }
+                .onChange(of: outer.size.height) { _, _ in
+                    if atBottom {
+                        scrollToBottom(proxy, animated: false)
+                    }
+                }
                 .onChange(of: chat.activeID) { _, _ in scrollToBottom(proxy, animated: false) }
                 .onAppear { scrollToBottom(proxy, animated: false) }
                 .overlay(alignment: .bottom) {
