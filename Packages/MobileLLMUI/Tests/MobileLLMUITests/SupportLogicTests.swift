@@ -95,4 +95,13 @@ final class SupportLogicTests: XCTestCase {
         s.toolActivity = [ToolRun(name: "calculator", arguments: "{}")]
         XCTAssertTrue(s.hasAnyContent)
     }
+
+    func testToolFormattingPrettyJSON() {
+        let raw = #"{"b":2,"a":1}"#
+        let formatted = ToolFormatting.prettyJSON(orRaw: raw)
+        XCTAssertTrue(formatted.contains("\n"))
+
+        let nonJSON = "Deleted reminder 123"
+        XCTAssertEqual(ToolFormatting.prettyJSON(orRaw: nonJSON), nonJSON)
+    }
 }

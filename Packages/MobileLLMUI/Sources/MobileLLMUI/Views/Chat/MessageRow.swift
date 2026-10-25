@@ -191,31 +191,40 @@ struct ToolActivityPresentation: Equatable {
 }
 
 /// A single tool the assistant invoked — a running spinner while it works, the seal (✓) + result when
-/// it returns. Memory is intentionally quieter: the row confirms the action without exposing or
-/// duplicating its canonical internal sentence.
+/// it returns. Tapping the row opens a bottom sheet with complete arguments and results.
 struct ToolActivityRow: View {
     let run: ToolRun
+    @State private var showingDetail = false
 
     var body: some View {
         let presentation = ToolActivityPresentation(run: run)
-        HStack(spacing: Theme.Space.sm) {
-            if presentation.state == .running {
-                ProgressView().controlSize(.mini).tint(Theme.accent)
-            } else {
-                Image(systemName: presentation.state == .failed
-                      ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
-                    .font(.caption)
-                    .foregroundStyle(presentation.state == .failed ? Theme.danger : Theme.accent)
-            }
-            VStack(alignment: .leading, spacing: 1) {
-                Text(presentation.title)
-                    .font(.caption.weight(.medium)).foregroundStyle(Theme.textSecondary).lineLimit(1)
-                if let detail = presentation.detail {
-                    Text(detail).font(.caption2.monospaced()).foregroundStyle(Theme.textTertiary).lineLimit(2)
+        Button {
+            showingDetail = true
+        } label: {
+            HStack(spacing: Theme.Space.sm) {
+                if presentation.state == .running {
+                    ProgressView().controlSize(.mini).tint(Theme.accent)
+                } else {
+                    Image(systemName: presentation.state == .failed
+                          ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
+                        .font(.caption)
+                        .foregroundStyle(presentation.state == .failed ? Theme.danger : Theme.accent)
                 }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(presentation.title)
+                        .font(.caption.weight(.medium)).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                    if let detail = presentation.detail {
+                        Text(detail).font(.caption2.monospaced()).foregroundStyle(Theme.textTertiary).lineLimit(2)
+                    }
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Theme.textTertiary)
             }
-            Spacer(minLength: 0)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
         .padding(.horizontal, Theme.Space.md).padding(.vertical, Theme.Space.sm)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
@@ -223,6 +232,190 @@ struct ToolActivityRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(presentation.accessibilityLabel)
         .accessibilityIdentifier("assistant.tool.run")
+        .sheet(isPresented: $showingDetail) {
+            ToolDetailSheet(run: run)
+        }
+    }
+}
+
+enum ToolFormatting {
+    static func prettyJSON(orRaw raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return raw }
+        guard let data = trimmed.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data),
+              let prettyData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]),
+              let str = String(data: prettyData, encoding: .utf8)
+        else {
+            return raw
+        }
+        return str
+    }
+}
+
+/// Bottom sheet detail view for a tool execution, inspired by Kelivo.
+/// Displays pretty-printed arguments and result in scrollable, selectable blocks with one-tap copy.
+struct ToolDetailSheet: View {
+    let run: ToolRun
+    @Environment(\.dismiss) private var dismiss
+    @State private var copiedArguments = false
+    @State private var copiedResult = false
+
+    private var prettyArguments: String {
+        ToolFormatting.prettyJSON(orRaw: run.arguments)
+    }
+
+    private var prettyResult: String? {
+        run.result.map { ToolFormatting.prettyJSON(orRaw: $0) }
+    }
+
+    private var displayName: String {
+        run.name.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.Space.lg) {
+                    statusHeader
+
+                    sectionBlock(
+                        title: "Arguments",
+                        content: prettyArguments,
+                        isCopied: copiedArguments,
+                        onCopy: {
+                            Clipboard.copy(prettyArguments)
+                            copiedArguments = true
+                            Task {
+                                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                copiedArguments = false
+                            }
+                        }
+                    )
+
+                    if let result = prettyResult {
+                        sectionBlock(
+                            title: "Result",
+                            content: result,
+                            isCopied: copiedResult,
+                            onCopy: {
+                                Clipboard.copy(result)
+                                copiedResult = true
+                                Task {
+                                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                    copiedResult = false
+                                }
+                            }
+                        )
+                    } else {
+                        runningBlock
+                    }
+                }
+                .padding(Theme.Space.md)
+            }
+            .background(Theme.bg)
+            .navigationTitle(displayName)
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        #if os(macOS)
+        .frame(minWidth: 480, minHeight: 400)
+        #else
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        #endif
+    }
+
+    private var statusHeader: some View {
+        let presentation = ToolActivityPresentation(run: run)
+        return HStack(spacing: Theme.Space.sm) {
+            if presentation.state == .running {
+                ProgressView().controlSize(.mini).tint(Theme.accent)
+            } else {
+                Image(systemName: presentation.state == .failed
+                      ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
+                    .font(.subheadline)
+                    .foregroundStyle(presentation.state == .failed ? Theme.danger : Theme.accent)
+            }
+            Text(presentation.state == .running ? "Running" : (presentation.state == .failed ? "Failed" : "Completed"))
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Theme.textPrimary)
+            Spacer()
+        }
+        .padding(.horizontal, Theme.Space.md)
+        .padding(.vertical, Theme.Space.sm)
+        .background(Theme.surface2)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous)
+                .strokeBorder(Theme.hairline)
+        )
+    }
+
+    private func sectionBlock(
+        title: String,
+        content: String,
+        isCopied: Bool,
+        onCopy: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            HStack {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.textSecondary)
+                Spacer()
+                Button(action: onCopy) {
+                    HStack(spacing: 4) {
+                        Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                        Text(isCopied ? "Copied" : "Copy")
+                    }
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(isCopied ? Theme.accent : Theme.textTertiary)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text(content.isEmpty ? "(Empty)" : content)
+                .font(.caption.monospaced())
+                .foregroundStyle(Theme.textPrimary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(Theme.Space.sm)
+                .background(Theme.surface2)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous)
+                        .strokeBorder(Theme.hairline)
+                )
+        }
+    }
+
+    private var runningBlock: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            Text("Result")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Theme.textSecondary)
+            HStack(spacing: Theme.Space.sm) {
+                ProgressView().controlSize(.small).tint(Theme.accent)
+                Text("Executing tool…")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(Theme.Space.sm)
+            .background(Theme.surface2)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous)
+                    .strokeBorder(Theme.hairline)
+            )
+        }
     }
 }
 
