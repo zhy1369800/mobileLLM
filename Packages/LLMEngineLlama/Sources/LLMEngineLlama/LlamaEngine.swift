@@ -566,12 +566,16 @@ public actor LlamaEngine: LLMEngine {
                     }
                 }
 
+                let isFullPromptMatch = commonCount >= promptTokens.count
+                // When resident tokens fully cover the new prompt (e.g. regenerate), roll back by 1 token
+                // and re-evaluate only the prompt's final token to refresh logits, achieving near 100% KV reuse.
+                let effectiveCommon = isFullPromptMatch ? max(0, promptTokens.count - 1) : commonCount
+
                 let incrementalReserve = min(reserve, 256)
                 let canRollback = supportsPartialTrim &&
                                   !residentHadImages &&
                                   !sessionCache.tokens.isEmpty &&
-                                  commonCount >= 16 &&
-                                  commonCount < promptTokens.count &&
+                                  effectiveCommon >= 16 &&
                                   (promptTokens.count + incrementalReserve <= contextCap)
 
                 if !canRollback {
@@ -581,30 +585,28 @@ public actor LlamaEngine: LLMEngine {
                         rollbackDiagnosticMessage = "跳过回滚: 包含多模态图片"
                     } else if sessionCache.tokens.isEmpty {
                         rollbackDiagnosticMessage = "跳过回滚: 显存中无历史会话Token"
-                    } else if commonCount < 16 {
+                    } else if effectiveCommon < 16 {
                         rollbackDiagnosticMessage = "回滚失败: 最长公共前缀过短 (仅匹配 \(commonCount) tok, 需要>=16, resident=\(sessionCache.tokens.count), prompt=\(promptTokens.count))"
-                    } else if commonCount >= promptTokens.count {
-                        rollbackDiagnosticMessage = "跳过回滚: 前缀完全包含新Prompt"
                     } else {
                         rollbackDiagnosticMessage = "跳过回滚: 上下文超限 (prompt=\(promptTokens.count), cap=\(contextCap))"
                     }
                 }
 
-                NSLog("[LlamaEngine] Prefix rollback evaluation: resident=%d, prompt=%d, common=%d (canRollback=%@, residentHadImages=%@)",
+                NSLog("[LlamaEngine] Prefix rollback evaluation: resident=%d, prompt=%d, common=%d (effectiveCommon=%d, canRollback=%@, residentHadImages=%@)",
                       Int32(sessionCache.tokens.count), Int32(promptTokens.count), Int32(commonCount),
-                      canRollback ? "true" : "false", residentHadImages ? "true" : "false")
+                      Int32(effectiveCommon), canRollback ? "true" : "false", residentHadImages ? "true" : "false")
 
                 var rollbackSucceeded = false
                 if canRollback {
                     var rmSuccess = true
-                    if sessionCache.tokens.count > commonCount {
-                        rmSuccess = llama_memory_seq_rm(llama_get_memory(context), 0, Int32(commonCount), -1)
+                    if sessionCache.tokens.count > effectiveCommon {
+                        rmSuccess = llama_memory_seq_rm(llama_get_memory(context), 0, Int32(effectiveCommon), -1)
                     }
                     if rmSuccess {
-                        let suffixTokens = Array(promptTokens[commonCount...])
-                        let hitRatePct = (Double(commonCount) / Double(promptTokens.count)) * 100.0
-                        NSLog("[LlamaEngine] Prefix rollback matched! Common prefix: %d tokens (hit %.1f%%), suffix: %d tokens",
-                              Int32(commonCount), hitRatePct, Int32(suffixTokens.count))
+                        let suffixTokens = Array(promptTokens[effectiveCommon...])
+                        let hitRatePct = (Double(effectiveCommon) / Double(promptTokens.count)) * 100.0
+                        NSLog("[LlamaEngine] Prefix rollback matched! Common prefix: %d tokens (hit %.1f%%), suffix: %d tokens (fullMatch=%@)",
+                              Int32(effectiveCommon), hitRatePct, Int32(suffixTokens.count), isFullPromptMatch ? "true" : "false")
 
                         let batchCap = Int32(max(1, min(nBatch, suffixTokens.count)))
                         var batch = llama_batch_init(batchCap, 0, 1)
@@ -621,7 +623,7 @@ public actor LlamaEngine: LLMEngine {
                                 let tok = suffixTokens[i + offset]
                                 let isLast = (i + offset == suffixTokens.count - 1)
                                 Self.setBatchItem(&batch, at: offset, maxCapacity: batchCap,
-                                                  token: tok, pos: Int32(commonCount + i + offset), logits: isLast)
+                                                  token: tok, pos: Int32(effectiveCommon + i + offset), logits: isLast)
                             }
                             batch.n_tokens = Int32(chunkCount)
                             let decodeRes = llama_decode(context, batch)
@@ -635,9 +637,13 @@ public actor LlamaEngine: LLMEngine {
                         }
                         if decodeError == nil {
                             promptTokenCount = suffixTokens.count
-                            cachedRollbackTokensCount = commonCount
+                            cachedRollbackTokensCount = effectiveCommon
                             rollbackSucceeded = true
-                            rollbackDiagnosticMessage = "前缀回滚命中: 复用 \(commonCount) tok (\(String(format: "%.1f%%", hitRatePct))), 解码后缀 \(suffixTokens.count) tok"
+                            if isFullPromptMatch {
+                                rollbackDiagnosticMessage = "前缀回滚命中(重发): 复用 \(effectiveCommon) tok (\(String(format: "%.1f%%", hitRatePct))), 仅刷新末尾Token"
+                            } else {
+                                rollbackDiagnosticMessage = "前缀回滚命中: 复用 \(effectiveCommon) tok (\(String(format: "%.1f%%", hitRatePct))), 解码后缀 \(suffixTokens.count) tok"
+                            }
                         } else {
                             rollbackDiagnosticMessage = "回滚失败: 后缀Token解码失败 (llama_decode error)"
                             NSLog("[LlamaEngine] Prefix rollback decode failed, falling back to clean slate")
