@@ -613,18 +613,11 @@ public actor LlamaEngine: LLMEngine {
                     if sessionCache.tokens.count > effectiveCommon {
                         rmSuccess = llama_memory_seq_rm(llama_get_memory(context), 0, Int32(effectiveCommon), -1)
                     }
-                    // 对于 Qwen3.5 等混合 Gated DeltaNet / SSM / Recurrent 架构模型，llama.cpp 的 llama_memory_seq_rm
-                    // 会返回 false（因底层状态机在通用任意位置截断受限）。
-                    // 但在重新生成（isFullPromptMatch）场景下，当前 Prompt 的全部前缀在显存中 100% 完整存在，
-                    // 仅需对末尾 Token 做一次 decode 刷新 Logits，新生成的回答会自回归覆盖后续槽位（与 OGAM / llama.rn 机制一致）。
-                    // 因此在 isFullPromptMatch 时无需被 rmSuccess 阻断，直接复用前缀缓存，避免清空显存导致全量重算。
-                    let canProceedWithRollback = rmSuccess || isFullPromptMatch
-                    if canProceedWithRollback {
+                    if rmSuccess {
                         let suffixTokens = Array(promptTokens[effectiveCommon...])
                         let hitRatePct = (Double(effectiveCommon) / Double(promptTokens.count)) * 100.0
-                        NSLog("[LlamaEngine] Prefix rollback matched! Common prefix: %d tokens (hit %.1f%%), suffix: %d tokens (fullMatch=%@, rmSuccess=%@)",
-                              Int32(effectiveCommon), hitRatePct, Int32(suffixTokens.count),
-                              isFullPromptMatch ? "true" : "false", rmSuccess ? "true" : "false")
+                        NSLog("[LlamaEngine] Prefix rollback matched! Common prefix: %d tokens (hit %.1f%%), suffix: %d tokens (fullMatch=%@)",
+                              Int32(effectiveCommon), hitRatePct, Int32(suffixTokens.count), isFullPromptMatch ? "true" : "false")
 
                         let batchCap = Int32(max(1, min(nBatch, suffixTokens.count)))
                         var batch = llama_batch_init(batchCap, 0, 1)
@@ -658,8 +651,7 @@ public actor LlamaEngine: LLMEngine {
                             cachedRollbackTokensCount = effectiveCommon
                             rollbackSucceeded = true
                             if isFullPromptMatch {
-                                let modeDesc = rmSuccess ? "截断刷新" : "覆写刷新"
-                                rollbackDiagnosticMessage = "前缀回滚命中(重发-\(modeDesc)): 复用 \(effectiveCommon) tok (\(String(format: "%.1f%%", hitRatePct))), 仅刷新末尾Token"
+                                rollbackDiagnosticMessage = "前缀回滚命中(重发): 复用 \(effectiveCommon) tok (\(String(format: "%.1f%%", hitRatePct))), 仅刷新末尾Token"
                             } else {
                                 rollbackDiagnosticMessage = "前缀回滚命中: 复用 \(effectiveCommon) tok (\(String(format: "%.1f%%", hitRatePct))), 解码后缀 \(suffixTokens.count) tok"
                             }
@@ -668,6 +660,11 @@ public actor LlamaEngine: LLMEngine {
                             NSLog("[LlamaEngine] Prefix rollback decode failed, falling back to clean slate")
                         }
                     } else {
+                        supportsPartialTrim = false
+                        rollbackDiagnosticMessage = "回滚跳过: 显存不支持局部截断 (如Qwen3.5等混合SSM/Recurrent架构隐状态在数学上不可逆)，已安全全量重新预填充"
+                        NSLog("[LlamaEngine] Prefix rollback llama_memory_seq_rm rejected partial sequence trim (likely hybrid/recurrent architecture like Qwen 3.5), safely falling back to clean slate")
+                    }
+                }
                         supportsPartialTrim = false
                         rollbackDiagnosticMessage = "回滚跳过: 显存不支持局部截断 (如Qwen3.5等混合SSM/Recurrent架构隐状态在数学上不可逆)，已安全全量重新预填充"
                         NSLog("[LlamaEngine] Prefix rollback llama_memory_seq_rm rejected partial sequence trim (likely hybrid/recurrent architecture like Qwen 3.5), safely falling back to clean slate")
