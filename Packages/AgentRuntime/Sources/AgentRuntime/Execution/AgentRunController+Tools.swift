@@ -956,7 +956,8 @@ extension AgentRunController {
                 .toolInvocations: 1,
             ])))
             var finalOutcome = outcome
-            let toolLimit = facts.submission?.request.payload.budget.limits[.toolInvocations] ?? 10
+            let rawToolLimit = budget.limits[.toolInvocations]
+            let toolLimit = rawToolLimit > 0 ? rawToolLimit : 10
             let isLastInvocation = (finalHistory.toolOutcomes.count + 1) >= Int(toolLimit)
             if !hasMore && isLastInvocation {
                 if case .completed(let collection) = outcome {
