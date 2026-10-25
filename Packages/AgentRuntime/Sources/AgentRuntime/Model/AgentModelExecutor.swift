@@ -7,6 +7,7 @@ import Foundation
 public enum AgentModelRuntimeEvent: Hashable, Sendable {
     case visibleReasoningDelta(String)
     case provisionalAnswerDelta(String)
+    case toolCallDelta(name: String, argumentDelta: String)
     case usage(AgentModelUsage)
     case provisionalAnswerResolved(AgentModelProvisionalAnswerDisposition)
 }
@@ -429,6 +430,11 @@ private actor ModelEventAccumulator: AgentModelEventSink {
             else { throw AgentContractError.invalidEventSequence("provisional answer is invalid") }
             answer += delta
             await downstream?.receive(.provisionalAnswerDelta(delta))
+        case .toolCallDelta(let name, let delta):
+            guard actionSignal == nil, !name.isEmpty else {
+                throw AgentContractError.invalidEventSequence("provisional tool call is invalid")
+            }
+            await downstream?.receive(.toolCallDelta(name: name, argumentDelta: delta))
         case .toolCalls(let calls):
             guard capabilities.toolCallingMode != .unavailable,
                   calls.count <= 1 || capabilities.features.contains(.multipleToolCalls),

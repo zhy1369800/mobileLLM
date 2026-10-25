@@ -1117,6 +1117,8 @@ public enum AgentModelEvent: Hashable, Codable, Sendable {
     case reasoningDelta(String)
     /// Ephemeral answer content.
     case answerDelta(String)
+    /// Ephemeral tool-call progress for progressive UI rendering.
+    case toolCallDelta(name: String, argumentDelta: String)
     /// One normalized serial tool batch.
     case toolCalls([ProposedToolCall])
     /// The model explicitly asks for additional user input.
@@ -1276,6 +1278,10 @@ public actor AgentModelBoundaryEmitter {
             guard actionSignal == nil, !value.isEmpty, value.utf8.count <= 1_024 * 1_024 else {
                 throw AgentContractError.invalidEventSequence("invalid model delta")
             }
+        case .toolCallDelta(let name, let argumentDelta):
+            guard actionSignal == nil, !name.isEmpty, argumentDelta.utf8.count <= 1_024 * 1_024 else {
+                throw AgentContractError.invalidEventSequence("invalid model tool call delta")
+            }
         case .toolCalls(let calls):
             guard !calls.isEmpty, Set(calls.map(\.invocationID)).count == calls.count,
                   actionSignal == nil
@@ -1345,6 +1351,10 @@ public enum AgentModelEventStreamValidator {
             case .reasoningDelta(let value), .answerDelta(let value):
                 guard actionSignal == nil, !value.isEmpty, value.utf8.count <= 1_024 * 1_024 else {
                     throw AgentContractError.invalidEventSequence("invalid model delta")
+                }
+            case .toolCallDelta(let name, let argumentDelta):
+                guard actionSignal == nil, !name.isEmpty, argumentDelta.utf8.count <= 1_024 * 1_024 else {
+                    throw AgentContractError.invalidEventSequence("invalid model tool call delta")
                 }
             case .toolCalls(let calls):
                 guard !calls.isEmpty, Set(calls.map(\.invocationID)).count == calls.count else {

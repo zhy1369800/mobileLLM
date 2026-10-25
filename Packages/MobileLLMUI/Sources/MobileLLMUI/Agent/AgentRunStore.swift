@@ -517,6 +517,9 @@ public final class AgentRunStore {
                     status: status,
                     sequence: steps[index].sequence
                 )
+                if let res = resultText {
+                    onEphemeral?(conversationID, .toolResult(name: steps[index].title), res)
+                }
             }
         case .modelAttemptOutcome:
             // Token activity is rendered by the streaming row; a per-pass step is internal noise.
@@ -595,6 +598,8 @@ public final class AgentRunStore {
             case .provisionalAnswerDelta(let delta):
                 run = run.replacing(provisionalText: run.provisionalText + delta)
                 onEphemeral?(conversationID, .answer, delta)
+            case .toolCallDelta(let name, let delta):
+                onEphemeral?(conversationID, .toolCall(name: name), delta)
             case .usage:
                 break
             case .provisionalAnswerResolved(let resolution):
@@ -983,8 +988,10 @@ extension AgentRunStore {
 }
 
 /// Discriminator for live-only token deltas forwarded to the chat streaming surface.
-public enum AgentEphemeralDeltaKind: Sendable {
+public enum AgentEphemeralDeltaKind: Sendable, Equatable {
     case reasoning
     case answer
     case discardProvisionalAnswer
+    case toolCall(name: String)
+    case toolResult(name: String)
 }

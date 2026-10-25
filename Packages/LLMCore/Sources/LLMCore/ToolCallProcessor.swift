@@ -16,6 +16,8 @@ public struct ToolCallProcessor {
     public enum Event: Equatable, Sendable {
         case text(String)
         case call(ToolCall)
+        case callStarted(name: String)
+        case callDelta(name: String, argumentDelta: String)
         /// A tool-call block whose body isn't a usable call (bad JSON, no name). Carries the raw body so the
         /// loop can tell the model what was wrong and let it retry. Dropping these silently is what made a
         /// small model's near-miss vanish into an empty, unexplained reply.
@@ -27,6 +29,8 @@ public struct ToolCallProcessor {
     /// dialect's call is always closed by ITS OWN terminator.
     private var closingWith: String?
     private var currentOpenMarker: String?
+    private var currentCallStartedName: String?
+    private var lastEmittedCallOffset = 0
 
     /// Accept an UNTAGGED `{"name":…,"arguments":…}` as a call, but only as the opening of the answer.
     ///
@@ -59,11 +63,27 @@ public struct ToolCallProcessor {
         var out: [Event] = []
         while true {
             if let close = closingWith {
-                guard let r = buffer.range(of: close) else { break }
+                guard let r = buffer.range(of: close) else {
+                    if currentCallStartedName == nil {
+                        if let name = ToolCallSyntax.peekToolName(in: buffer) {
+                            currentCallStartedName = name
+                            out.append(.callStarted(name: name))
+                            lastEmittedCallOffset = buffer.count
+                        }
+                    } else if buffer.count > lastEmittedCallOffset {
+                        let startIdx = buffer.index(buffer.startIndex, offsetBy: lastEmittedCallOffset)
+                        let delta = String(buffer[startIdx...])
+                        lastEmittedCallOffset = buffer.count
+                        out.append(.callDelta(name: currentCallStartedName!, argumentDelta: delta))
+                    }
+                    break
+                }
                 let body = String(buffer[buffer.startIndex..<r.lowerBound])
                 let rawSnippet = (currentOpenMarker ?? "") + body + String(buffer[r])
                 out.append(event(forBody: body, rawText: rawSnippet))
                 buffer.removeSubrange(buffer.startIndex..<r.upperBound)
+                currentCallStartedName = nil
+                lastEmittedCallOffset = 0
                 closingWith = nil
                 currentOpenMarker = nil
                 continue
@@ -74,6 +94,8 @@ public struct ToolCallProcessor {
                 currentOpenMarker = String(buffer[hit.range])
                 buffer.removeSubrange(buffer.startIndex..<hit.range.upperBound)
                 closingWith = hit.close
+                currentCallStartedName = nil
+                lastEmittedCallOffset = 0
                 continue
             }
             break
@@ -83,6 +105,8 @@ public struct ToolCallProcessor {
             switch bareJSONHead(flush: flush) {
             case .call(let c):
                 buffer.removeAll()
+            currentCallStartedName = nil
+            lastEmittedCallOffset = 0
                 return [.call(c)]
             case .keepWaiting:
                 return out                       // withhold — it may still complete
@@ -104,6 +128,8 @@ public struct ToolCallProcessor {
             let rawSnippet = (currentOpenMarker ?? "") + buffer
             out.append(event(forBody: buffer, rawText: rawSnippet))
             buffer.removeAll()
+            currentCallStartedName = nil
+            lastEmittedCallOffset = 0
             closingWith = nil
             currentOpenMarker = nil
         }

@@ -293,6 +293,8 @@ public struct ToolLoop: Sendable {
                                         }
                                     case .call(let c): call = c; break loop   // stop generating; run the tool
                                     case .malformed(let body): malformed = body; break loop
+
+                                    case .callStarted, .callDelta: break
                                     }
                                 }
                             case .done(let stats):
@@ -316,6 +318,7 @@ public struct ToolLoop: Sendable {
                                     }
                                 case .call(let c): call = c
                                 case .malformed(let body): malformed = body
+                                case .callStarted, .callDelta: break
                                 }
                             }
                         }

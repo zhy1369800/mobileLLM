@@ -289,6 +289,20 @@ public final class ChatStore {
                 if self.streaming?.phase != .stopping {
                     self.streaming?.phase = .warming
                 }
+            case .toolCall(let name):
+                self.pauseReasoningClock()
+                if self.streaming?.phase != .stopping {
+                    self.streaming?.phase = .answering
+                }
+                if let idx = self.streaming?.toolActivity.lastIndex(where: { $0.result == nil && $0.name == name }) {
+                    self.streaming?.toolActivity[idx].arguments += delta
+                } else {
+                    self.streaming?.toolActivity.append(ToolRun(name: name, arguments: delta, result: nil))
+                }
+            case .toolResult(let name):
+                if let idx = self.streaming?.toolActivity.lastIndex(where: { $0.name == name && $0.result == nil }) {
+                    self.streaming?.toolActivity[idx].result = delta
+                }
             }
         }
     }

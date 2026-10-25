@@ -640,6 +640,18 @@ private enum LocalModelGeneration {
                     accounted = true
                     emittedText = true
                 }
+            case .callStarted(let name):
+                try await emitter.emit(
+                    .toolCallDelta(name: name, argumentDelta: ""),
+                    responseBytes: accounted ? 0 : rawResponseBytes
+                )
+                accounted = true
+            case .callDelta(let name, let argumentDelta):
+                try await emitter.emit(
+                    .toolCallDelta(name: name, argumentDelta: argumentDelta),
+                    responseBytes: accounted ? 0 : rawResponseBytes
+                )
+                accounted = true
             case .call(let call):
                 calls.append(call)
             case .malformed:

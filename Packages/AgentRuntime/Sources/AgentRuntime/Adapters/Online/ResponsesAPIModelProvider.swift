@@ -798,6 +798,19 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                             }
                         }
                         partialCalls[index] = call
+                        if !call.name.isEmpty {
+                            let argDelta: String
+                            if case .object(let function)? = callObject["function"],
+                               case .string(let arguments)? = function["arguments"] {
+                                argDelta = arguments
+                            } else {
+                                argDelta = ""
+                            }
+                            try await emitter.emit(
+                                .toolCallDelta(name: call.name, argumentDelta: argDelta),
+                                responseBytes: 0
+                            )
+                        }
                     }
                 }
             }

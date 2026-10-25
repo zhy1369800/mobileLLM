@@ -13,6 +13,7 @@ public enum AgentProvisionalAnswerResolution: Hashable, Sendable {
 public enum AgentEphemeralModelEvent: Hashable, Sendable {
     case visibleReasoningDelta(String)
     case provisionalAnswerDelta(String)
+    case toolCallDelta(name: String, argumentDelta: String)
     case usage(AgentModelUsage)
     case provisionalAnswerResolved(AgentProvisionalAnswerResolution)
 }

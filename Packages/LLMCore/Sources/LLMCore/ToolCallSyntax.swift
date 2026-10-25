@@ -301,4 +301,81 @@ enum ToolCallSyntax {
               (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] != nil else { return nil }
         return ToolCall(name: name, argumentsJSON: rest)
     }
+
+    // MARK: - Streaming Peek
+
+    /// Early peek of the tool name from an incomplete/streaming tool-call body.
+    /// Returns nil if the name is not yet identifiable (e.g. still buffering opening tokens or malformed).
+    static func peekToolName(in body: String) -> String? {
+        let t = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return nil }
+
+        // 1. Gemma: call:NAME{... or call:NAME
+        if let callRange = t.range(of: "call:") {
+            let rest = t[callRange.upperBound...]
+            if let stop = rest.firstIndex(where: { $0 == "{" || $0.isWhitespace }) {
+                let name = String(rest[..<stop]).trimmingCharacters(in: .whitespaces)
+                if isValidToolName(name) { return name }
+            }
+        }
+
+        // 2. DeepSeek separator: ...<｜tool▁sep｜>NAME...
+        let deepSeekSep = "<｜tool▁sep｜>"
+        if let sepRange = t.range(of: deepSeekSep) {
+            let rest = t[sepRange.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+            if let stop = rest.firstIndex(where: { $0 == "{" || $0 == "`" || $0 == "\n" }) {
+                let name = String(rest[..<stop]).trimmingCharacters(in: CharacterSet(charactersIn: " \n\t\"'"))
+                if isValidToolName(name) { return name }
+            }
+        }
+
+        // 3. JSON: "name": "..." or "function": "..." or "function": { "name": "..." }
+        if let name = peekJSONToolName(in: t) {
+            return name
+        }
+
+        // 4. nameThenArgs: NAME{... or NAME\n```{...
+        if let firstChar = t.first, (firstChar.isLetter || firstChar == "_") {
+            if let stop = t.firstIndex(where: { $0 == "{" || $0 == "`" || $0 == "\n" }) {
+                let name = String(t[..<stop]).trimmingCharacters(in: CharacterSet(charactersIn: " \n\t\"'"))
+                if isValidToolName(name) { return name }
+            }
+        }
+
+        return nil
+    }
+
+    private static func isValidToolName(_ name: String) -> Bool {
+        guard !name.isEmpty, name.count < 64 else { return false }
+        return name.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" || $0 == "." }
+    }
+
+    private static func peekJSONToolName(in text: String) -> String? {
+        for key in ["\"name\"", "\"function\""] {
+            guard let keyRange = text.range(of: key) else { continue }
+            var idx = keyRange.upperBound
+            while idx < text.endIndex && (text[idx].isWhitespace || text[idx] == ":") {
+                idx = text.index(after: idx)
+            }
+            guard idx < text.endIndex else { continue }
+            if text[idx] == "\"" {
+                let start = text.index(after: idx)
+                var end = start
+                var escaped = false
+                while end < text.endIndex {
+                    if escaped {
+                        escaped = false
+                    } else if text[end] == "\\" {
+                        escaped = true
+                    } else if text[end] == "\"" {
+                        let candidate = String(text[start..<end])
+                        if isValidToolName(candidate) { return candidate }
+                        break
+                    }
+                    end = text.index(after: end)
+                }
+            }
+        }
+        return nil
+    }
 }

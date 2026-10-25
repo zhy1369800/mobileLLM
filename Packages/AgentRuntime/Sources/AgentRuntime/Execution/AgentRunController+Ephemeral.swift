@@ -63,6 +63,8 @@ extension AgentRunController {
             normalized = .visibleReasoningDelta(value)
         case .provisionalAnswerDelta(let value):
             normalized = .provisionalAnswerDelta(value)
+        case .toolCallDelta(let name, let value):
+            normalized = .toolCallDelta(name: name, argumentDelta: value)
         case .usage(let value):
             normalized = .usage(value)
         case .provisionalAnswerResolved(let value):

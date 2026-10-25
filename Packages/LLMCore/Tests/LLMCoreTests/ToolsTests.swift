@@ -140,6 +140,29 @@ final class ToolsTests: XCTestCase {
         XCTAssertEqual(events, [.text("Hello, "), .text("world. No tools here.")])
     }
 
+    func testStreamingToolPeekAndDelta() {
+        var p = ToolCallProcessor()
+        let e1 = p.feed("<tool_call>{\"name\": \"calculator\", \"arguments\": ")
+        XCTAssertTrue(e1.contains(.callStarted(name: "calculator")))
+
+        let e2 = p.feed("{\"expression\": \"2 + ")
+        XCTAssertTrue(e2.contains(.callDelta(name: "calculator", argumentDelta: "{\"expression\": \"2 + ")))
+
+        let e3 = p.feed("2\"}}</tool_call>")
+        guard case let .call(c)? = e3.last else { return XCTFail("expected final call, got \(e3)") }
+        XCTAssertEqual(c.name, "calculator")
+        XCTAssertEqual(c.arg("expression"), "2 + 2")
+    }
+
+    func testStreamingToolPeekFallbackOnMalformedOrNonTool() {
+        var p = ToolCallProcessor()
+        let e1 = p.feed("<tool_call>unknown_custom_content_without_name")
+        XCTAssertTrue(e1.isEmpty)
+
+        let e2 = p.feed("</tool_call>")
+        XCTAssertTrue(e2.contains { if case .malformed = $0 { return true }; return false })
+    }
+
     func testWithheldPartialTagNotLeakedMidStream() {
         // A lone "<tool" that never completes must surface as text on finish, not vanish.
         var p = ToolCallProcessor()

@@ -308,6 +308,11 @@ final class AgentRunStoreTests: XCTestCase {
         XCTAssertEqual(deltas[2].0, .discardProvisionalAnswer)
         XCTAssertEqual(store.presentation(for: conversationID)?.provisionalText, "")
 
+        handle.pushEphemeral(.toolCallDelta(name: "calculator", argumentDelta: "{\"a\": 1}"))
+        try await waitUntil { deltas.count == 4 }
+        XCTAssertEqual(deltas[3].0, .toolCall(name: "calculator"))
+        XCTAssertEqual(deltas[3].1, "{\"a\": 1}")
+
         // A terminal event without an answer must settle the run through onRunTerminated.
         handle.push(
             terminal: try AgentAnswer(text: "unused"),
