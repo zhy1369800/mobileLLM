@@ -448,6 +448,8 @@ public actor LlamaEngine: LLMEngine {
             var promptTokenCount: Int = 0
             var cachedRollbackTokensCount: Int = 0
             var rollbackDiagnosticMessage: String? = nil
+            var suffixTokensToDecode: [llama_token] = []
+            var rollbackSucceeded = false
             hasImages = kept.contains { !$0.images.isEmpty }
 
             // Check if this turn is an incremental continuation of the cached session:
@@ -555,6 +557,18 @@ public actor LlamaEngine: LLMEngine {
 
                 let residentHadImages = sessionCache.hasImages
 
+                // 识别会话重发（Regenerate）：
+                // 语义级别：无论是重发最后一轮，还是更早历史中的任意一轮，
+                // 本次 kept 均为显存中已驻留轮次的严格前缀（Array(sessionCache.turns.prefix(kept.count)) == kept）
+                let isHistoricalPrefixTurn = !residentHadImages &&
+                    !sessionCache.tokens.isEmpty &&
+                    kept.count < sessionCache.turns.count &&
+                    Array(sessionCache.turns.prefix(kept.count)) == kept
+
+                // 如果命中精确语义重发，并且记录了该轮 Prompt 当时在显存中的结束位置，
+                // 则可以直接复用显存中已解码好的完整 prompt，无需受限于全局整体分词导致的 BPE 边界重组分叉。
+                let knownPromptEndPos = isHistoricalPrefixTurn ? sessionCache.turnPromptEndPositions[kept.count] : nil
+
                 // Calculate Longest Common Prefix (LCP) between resident KV tokens and new prompt tokens.
                 // LCP matching itself is purely textual and independent of backend architecture capabilities.
                 var commonCount = 0
@@ -563,31 +577,42 @@ public actor LlamaEngine: LLMEngine {
                     while commonCount < maxLcp && sessionCache.tokens[commonCount] == promptTokens[commonCount] {
                         commonCount += 1
                     }
+                    if commonCount > 0 && commonCount < promptTokens.count && commonCount < sessionCache.tokens.count {
+                        let oldTok = sessionCache.tokens[commonCount]
+                        let newTok = promptTokens[commonCount]
+                        NSLog("[LlamaEngine] LCP diverged at index %d: cached token %d ('%@') vs new token %d ('%@')",
+                              Int32(commonCount), oldTok, Self.tokenToPiece(vocab: vocab, token: oldTok),
+                              newTok, Self.tokenToPiece(vocab: vocab, token: newTok))
+                    }
                 }
 
-                // 识别会话重发（Regenerate）：
-                // 1. 语义级别：无论是重发最后一轮，还是重发更早历史中的任意一轮，
-                //    本次 kept 均为显存中已驻留轮次的严格前缀（Array(sessionCache.turns.prefix(kept.count)) == kept）
-                // 2. Token 级别：LCP 匹配达到了 promptTokens.count（或仅末尾存在微小分词边界差异）
-                let isHistoricalPrefixTurn = kept.count < sessionCache.turns.count &&
-                    Array(sessionCache.turns.prefix(kept.count)) == kept
                 let isFullPromptMatch = isHistoricalPrefixTurn || (commonCount >= promptTokens.count)
 
-                // 确定安全的回滚点：
-                // 如果是全匹配重发，若 commonCount 已覆盖整个 prompt，则退回 1 个 token 刷新 logits；
-                // 若末尾因分词合并有轻微差异（commonCount < promptTokens.count），则从 commonCount 处快速解码最后几个 token。
-                let effectiveCommon = isFullPromptMatch
-                    ? min(commonCount, max(0, promptTokens.count - 1))
-                    : commonCount
+                // 确定安全的回滚点与所需解码的后缀：
+                let effectiveCommon: Int
+                let totalPromptCountForStats: Int
+
+                if let knownEnd = knownPromptEndPos, knownEnd > 1, knownEnd <= sessionCache.tokens.count {
+                    // 精确重发最优路径：Prompt 在显存中完整存在，回滚 1 个 token 刷新 logits，达成 99.9% 复用率
+                    effectiveCommon = knownEnd - 1
+                    suffixTokensToDecode = [sessionCache.tokens[effectiveCommon]]
+                    totalPromptCountForStats = knownEnd
+                } else if isFullPromptMatch {
+                    effectiveCommon = min(commonCount, max(0, promptTokens.count - 1))
+                    suffixTokensToDecode = Array(promptTokens[effectiveCommon...])
+                    totalPromptCountForStats = promptTokens.count
+                } else {
+                    effectiveCommon = commonCount
+                    suffixTokensToDecode = Array(promptTokens[effectiveCommon...])
+                    totalPromptCountForStats = promptTokens.count
+                }
 
                 let incrementalReserve = min(reserve, 256)
-                // 重发场景（isFullPromptMatch）无需强求底层模型架构支持局部 seq_rm，后续将通过自回归覆写进行；
-                // 仅非重发的任意位置历史分叉编辑，才需要 supportsPartialTrim。
                 let canRollback = (supportsPartialTrim || isFullPromptMatch) &&
                                   !residentHadImages &&
                                   !sessionCache.tokens.isEmpty &&
                                   effectiveCommon >= 16 &&
-                                  (promptTokens.count + incrementalReserve <= contextCap)
+                                  (totalPromptCountForStats + incrementalReserve <= contextCap)
 
                 if !canRollback {
                     if !supportsPartialTrim && !isFullPromptMatch {
@@ -607,15 +632,14 @@ public actor LlamaEngine: LLMEngine {
                       Int32(sessionCache.tokens.count), Int32(promptTokens.count), Int32(commonCount),
                       Int32(effectiveCommon), canRollback ? "true" : "false", residentHadImages ? "true" : "false")
 
-                var rollbackSucceeded = false
                 if canRollback {
                     var rmSuccess = true
                     if sessionCache.tokens.count > effectiveCommon {
                         rmSuccess = llama_memory_seq_rm(llama_get_memory(context), 0, Int32(effectiveCommon), -1)
                     }
                     if rmSuccess {
-                        let suffixTokens = Array(promptTokens[effectiveCommon...])
-                        let hitRatePct = (Double(effectiveCommon) / Double(promptTokens.count)) * 100.0
+                        let suffixTokens = suffixTokensToDecode
+                        let hitRatePct = (Double(effectiveCommon) / Double(totalPromptCountForStats)) * 100.0
                         NSLog("[LlamaEngine] Prefix rollback matched! Common prefix: %d tokens (hit %.1f%%), suffix: %d tokens (fullMatch=%@)",
                               Int32(effectiveCommon), hitRatePct, Int32(suffixTokens.count), isFullPromptMatch ? "true" : "false")
 
@@ -660,11 +684,6 @@ public actor LlamaEngine: LLMEngine {
                             NSLog("[LlamaEngine] Prefix rollback decode failed, falling back to clean slate")
                         }
                     } else {
-                        supportsPartialTrim = false
-                        rollbackDiagnosticMessage = "回滚跳过: 显存不支持局部截断 (如Qwen3.5等混合SSM/Recurrent架构隐状态在数学上不可逆)，已安全全量重新预填充"
-                        NSLog("[LlamaEngine] Prefix rollback llama_memory_seq_rm rejected partial sequence trim (likely hybrid/recurrent architecture like Qwen 3.5), safely falling back to clean slate")
-                    }
-                }
                         supportsPartialTrim = false
                         rollbackDiagnosticMessage = "回滚跳过: 显存不支持局部截断 (如Qwen3.5等混合SSM/Recurrent架构隐状态在数学上不可逆)，已安全全量重新预填充"
                         NSLog("[LlamaEngine] Prefix rollback llama_memory_seq_rm rejected partial sequence trim (likely hybrid/recurrent architecture like Qwen 3.5), safely falling back to clean slate")
@@ -1112,14 +1131,25 @@ public actor LlamaEngine: LLMEngine {
             // If KV rollback failed during speculative decoding, the physical KV cache is dirty and must not be reused.
             if stop == .eos && supportsKvRollback && answerStripper.isNoop && !fullGeneratedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let updatedTurns = kept + [ChatTurn(role: .assistant, content: fullGeneratedAnswer)]
+                let currentPromptEndPos = baseKvPos + promptTokenCount
                 if let suffixTokens = incrementalSuffixTokens {
                     sessionCache.append(turns: updatedTurns,
                                         additionalTokens: suffixTokens + generatedTokens,
-                                        additionalCount: suffixTokens.count + generatedTokens.count)
+                                        additionalCount: suffixTokens.count + generatedTokens.count,
+                                        promptEndPos: currentPromptEndPos,
+                                        promptTurnCount: kept.count)
                 } else if let promptTokens = prefilledPromptTokens {
+                    let committedTokens: [llama_token]
+                    if rollbackSucceeded && cachedRollbackTokensCount > 0 && sessionCache.tokens.count >= cachedRollbackTokensCount {
+                        committedTokens = Array(sessionCache.tokens.prefix(cachedRollbackTokensCount)) + suffixTokensToDecode + generatedTokens
+                    } else {
+                        committedTokens = promptTokens + generatedTokens
+                    }
                     sessionCache.commit(turns: updatedTurns,
-                                        tokens: promptTokens + generatedTokens,
-                                        count: promptTokens.count + generatedTokens.count)
+                                        tokens: committedTokens,
+                                        count: currentPromptEndPos + generatedTokens.count,
+                                        promptEndPos: currentPromptEndPos,
+                                        promptTurnCount: kept.count)
                 } else {
                     // Multimodal evaluation (full or incremental):
                     // No purely textual tokens to match for Prefix Rollback, but the total physical
@@ -1580,6 +1610,9 @@ public actor LlamaEngine: LLMEngine {
         private(set) var turns: [ChatTurn] = []
         private(set) var tokens: [llama_token] = []
         private(set) var tokenCount: Int = 0
+        /// Maps turn count (e.g. `kept.count`) to the exact physical KV position where that prompt's prefill ended.
+        /// This allows instant 99.9% KV cache reuse on regenerate without re-tokenizing and risking BPE boundary divergence.
+        private(set) var turnPromptEndPositions: [Int: Int] = [:]
 
         var isEmpty: Bool { turns.isEmpty && tokens.isEmpty && tokenCount == 0 }
         var hasImages: Bool { turns.contains { !$0.images.isEmpty } }
@@ -1592,6 +1625,7 @@ public actor LlamaEngine: LLMEngine {
             turns.removeAll()
             tokens.removeAll()
             tokenCount = 0
+            turnPromptEndPositions.removeAll()
         }
 
         /// Prune the session cache to `count` tokens by trimming the physical KV cache.
@@ -1622,6 +1656,7 @@ public actor LlamaEngine: LLMEngine {
                     tokens = Array(tokens.prefix(count))
                 }
                 tokenCount = count
+                turnPromptEndPositions = turnPromptEndPositions.filter { $0.value <= count }
                 // `turns` is intentionally left intact — see doc comment above.
                 return true
             } else {
@@ -1631,19 +1666,27 @@ public actor LlamaEngine: LLMEngine {
         }
 
         /// Commit full turns, tokens, and count on natural completion.
-        mutating func commit(turns: [ChatTurn], tokens: [llama_token], count: Int) {
+        mutating func commit(turns: [ChatTurn], tokens: [llama_token], count: Int,
+                             promptEndPos: Int? = nil, promptTurnCount: Int? = nil) {
             self.turns = turns
             self.tokens = tokens
             self.tokenCount = count
+            if let promptEndPos, let promptTurnCount {
+                self.turnPromptEndPositions[promptTurnCount] = promptEndPos
+            }
         }
 
         /// Append tokens to existing session cache on incremental suffix turn.
-        mutating func append(turns: [ChatTurn], additionalTokens: [llama_token], additionalCount: Int) {
+        mutating func append(turns: [ChatTurn], additionalTokens: [llama_token], additionalCount: Int,
+                             promptEndPos: Int? = nil, promptTurnCount: Int? = nil) {
             self.turns = turns
             if !tokens.isEmpty {
                 self.tokens.append(contentsOf: additionalTokens)
             }
             self.tokenCount += additionalCount
+            if let promptEndPos, let promptTurnCount {
+                self.turnPromptEndPositions[promptTurnCount] = promptEndPos
+            }
         }
 
         /// Multimodal full evaluation commit: physical count tracked, but no pure text tokens.
