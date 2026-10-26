@@ -648,7 +648,7 @@ struct DiagramCardView: View {
 
     var body: some View {
         CollapsibleCardContainer(
-            title: type == "mermaid" ? "流程架构图 (Mermaid)" : "图表预览",
+            title: type == "mermaid" ? "流程架构图" : "图表预览",
             iconName: "point.3.connected.trianglepath.dotted",
             collapsedHeight: 280,
             sourceCode: code,
