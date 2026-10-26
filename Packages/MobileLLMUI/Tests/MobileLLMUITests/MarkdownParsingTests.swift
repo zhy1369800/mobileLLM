@@ -223,4 +223,26 @@ final class MarkdownParsingTests: XCTestCase {
             .prose("more tokens")
         ])
     }
+
+    // MARK: Mermaid Sanitizer
+
+    func testSanitizeMermaidCodeWrapsUnquotedSpecialLabels() {
+        let input = """
+        graph TD
+            A[输入序列 X1,X2,...Xn] --> B[TOKEN EMBEDDING<br/>词向量 + 位置编码]
+            D --> E[注意力分数<br/>Q · K^T / √d_k]
+            E --> F[softmax(Q·K^T)]
+            formula[Attention(Q,K,V) = softmax(QK^T/√d_k) · V]
+            alreadyQuoted["Keep (This) Safe"]
+            plainNode[SimpleText]
+        """
+
+        let sanitized = MermaidDiagramView.sanitizeMermaidCode(input)
+
+        XCTAssertTrue(sanitized.contains(#"E["注意力分数<br/>Q · K^T / √d_k"]"#))
+        XCTAssertTrue(sanitized.contains(#"F["softmax(Q·K^T)"]"#))
+        XCTAssertTrue(sanitized.contains(#"formula["Attention(Q,K,V) = softmax(QK^T/√d_k) · V"]"#))
+        XCTAssertTrue(sanitized.contains(#"alreadyQuoted["Keep (This) Safe"]"#), "Already quoted labels must not be double quoted")
+        XCTAssertTrue(sanitized.contains(#"plainNode[SimpleText]"#), "Labels without special characters should remain unquoted")
+    }
 }

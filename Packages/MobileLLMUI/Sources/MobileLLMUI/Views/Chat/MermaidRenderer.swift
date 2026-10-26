@@ -54,7 +54,8 @@ public struct MermaidDiagramView: View {
         let hairlineColor = isDark ? "rgba(255,255,255,0.18)" : "rgba(33,20,0,0.15)"
         let accentColor = isDark ? "#D06450" : "#9F3C2E"
 
-        let jsonData = (try? JSONSerialization.data(withJSONObject: [code], options: [])) ?? Data()
+        let sanitizedCode = Self.sanitizeMermaidCode(code)
+        let jsonData = (try? JSONSerialization.data(withJSONObject: [sanitizedCode], options: [])) ?? Data()
         let jsonString = String(data: jsonData, encoding: .utf8) ?? "[\"\"]"
 
         let hasBundledEngine = !Self.bundledMermaidJS.isEmpty
@@ -238,5 +239,47 @@ public struct MermaidDiagramView: View {
         </body>
         </html>
         """
+    }
+
+    /// Sanitizes Mermaid code before passing to the official engine.
+    /// Automatically wraps unquoted node labels inside `[...]` that contain parentheses, math operators,
+    /// or special characters in double quotes to prevent syntax errors in the Mermaid lexer/parser.
+    public static func sanitizeMermaidCode(_ code: String) -> String {
+        let lines = code.components(separatedBy: "\n")
+        let pattern = #"([a-zA-Z0-9_\-]+)\s*\[([^\[\]]+)\]"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return code }
+
+        let specialCharacters = CharacterSet(charactersIn: "()[]{}=^√·*+/%&|<>:;,!?~#\\")
+
+        let sanitizedLines = lines.map { line -> String in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("%%") { return line }
+
+            let nsLine = line as NSString
+            let matches = regex.matches(in: line, range: NSRange(location: 0, length: nsLine.length))
+            guard !matches.isEmpty else { return line }
+
+            let mutable = NSMutableString(string: line)
+            for match in matches.reversed() {
+                guard match.numberOfRanges >= 3 else { continue }
+                let idRange = match.range(at: 1)
+                let labelRange = match.range(at: 2)
+                let idStr = nsLine.substring(with: idRange)
+                let labelStr = nsLine.substring(with: labelRange)
+
+                let trimmedLabel = labelStr.trimmingCharacters(in: .whitespaces)
+                if trimmedLabel.hasPrefix("\"") && trimmedLabel.hasSuffix("\"") && trimmedLabel.count >= 2 {
+                    continue
+                }
+
+                if labelStr.rangeOfCharacter(from: specialCharacters) != nil {
+                    let escaped = trimmedLabel.replacingOccurrences(of: "\"", with: "\\\"")
+                    let replacement = "\(idStr)[\"\(escaped)\"]"
+                    mutable.replaceCharacters(in: match.range, with: replacement)
+                }
+            }
+            return mutable as String
+        }
+        return sanitizedLines.joined(separator: "\n")
     }
 }
