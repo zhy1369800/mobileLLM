@@ -242,16 +242,42 @@ public struct MermaidDiagramView: View {
     }
 
     /// Sanitizes Mermaid code before passing to the official engine.
-    /// Automatically wraps unquoted node labels inside `[...]` that contain parentheses, math operators,
-    /// or special characters in double quotes to prevent syntax errors in the Mermaid lexer/parser.
+    /// 1. Splits inline boolean branching operators like `||` into standard multi-line statements.
+    /// 2. Automatically wraps unquoted labels containing special characters or unescaped quotes in double quotes.
     public static func sanitizeMermaidCode(_ code: String) -> String {
         let lines = code.components(separatedBy: "\n")
-        let pattern = #"([a-zA-Z0-9_\-]+)\s*\[([^\[\]]+)\]"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return code }
+        var expandedLines: [String] = []
 
-        let specialCharacters = CharacterSet(charactersIn: "()[]{}=^√·*+/%&|<>:;,!?~#\\")
+        // Phase 1: Split inline `||` branches into standard independent lines
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("%%") || trimmed.hasPrefix("graph") || trimmed.hasPrefix("flowchart") {
+                expandedLines.append(line)
+                continue
+            }
 
-        let sanitizedLines = lines.map { line -> String in
+            if line.contains("||") {
+                let parts = line.components(separatedBy: "||")
+                for part in parts {
+                    let pTrimmed = part.trimmingCharacters(in: .whitespaces)
+                    if !pTrimmed.isEmpty {
+                        expandedLines.append("    " + pTrimmed)
+                    }
+                }
+            } else {
+                expandedLines.append(line)
+            }
+        }
+
+        // Phase 2: Sanitize bracketed labels with special characters or embedded quotes
+        let pattern = #"([a-zA-Z0-9_\u4e00-\u9fa5\-]+)\s*(\[|\(|\{)(.*?)(\]|\)|\})"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return expandedLines.joined(separator: "\n")
+        }
+
+        let specialCharacters = CharacterSet(charactersIn: "()[]{}=^√·*+/%&|<>:;,!?~#\\\"")
+
+        let sanitizedLines = expandedLines.map { line -> String in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("%%") { return line }
 
@@ -261,25 +287,32 @@ public struct MermaidDiagramView: View {
 
             let mutable = NSMutableString(string: line)
             for match in matches.reversed() {
-                guard match.numberOfRanges >= 3 else { continue }
-                let idRange = match.range(at: 1)
-                let labelRange = match.range(at: 2)
-                let idStr = nsLine.substring(with: idRange)
-                let labelStr = nsLine.substring(with: labelRange)
+                guard match.numberOfRanges >= 5 else { continue }
+                let idStr = nsLine.substring(with: match.range(at: 1))
+                let leftBracket = nsLine.substring(with: match.range(at: 2))
+                let contentStr = nsLine.substring(with: match.range(at: 3))
+                let rightBracket = nsLine.substring(with: match.range(at: 4))
 
-                let trimmedLabel = labelStr.trimmingCharacters(in: .whitespaces)
-                if trimmedLabel.hasPrefix("\"") && trimmedLabel.hasSuffix("\"") && trimmedLabel.count >= 2 {
-                    continue
+                let trimmedContent = contentStr.trimmingCharacters(in: .whitespaces)
+
+                // Already properly quoted: ["..."]
+                if trimmedContent.hasPrefix("\"") && trimmedContent.hasSuffix("\"") && trimmedContent.count >= 2 {
+                    let inner = trimmedContent.dropFirst().dropLast()
+                    if !inner.contains("\"") {
+                        continue
+                    }
                 }
 
-                if labelStr.rangeOfCharacter(from: specialCharacters) != nil {
-                    let escaped = trimmedLabel.replacingOccurrences(of: "\"", with: "\\\"")
-                    let replacement = "\(idStr)[\"\(escaped)\"]"
+                // If content contains special characters or embedded quotes, normalize safely
+                if contentStr.rangeOfCharacter(from: specialCharacters) != nil {
+                    let safeText = trimmedContent.replacingOccurrences(of: "\"", with: "'")
+                    let replacement = "\(idStr)\(leftBracket)\"\(safeText)\"\(rightBracket)"
                     mutable.replaceCharacters(in: match.range, with: replacement)
                 }
             }
             return mutable as String
         }
+
         return sanitizedLines.joined(separator: "\n")
     }
 }

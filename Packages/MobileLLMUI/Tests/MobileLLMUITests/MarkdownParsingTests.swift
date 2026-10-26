@@ -245,6 +245,21 @@ final class MarkdownParsingTests: XCTestCase {
         XCTAssertTrue(sanitized.contains(#"alreadyQuoted["Keep (This) Safe"]"#), "Already quoted labels must not be double quoted")
         XCTAssertTrue(sanitized.contains(#"plainNode[SimpleText]"#), "Labels without special characters should remain unquoted")
     }
+
+    func testSanitizeMermaidCodeSplitsDoublePipesAndSanitizesQuotes() {
+        let input = """
+        graph TD
+            A[用户访问网站] --> B{是否登录？}
+            B --> C[是] || B --> D[否]
+            K --> M[提示 "请输入正确凭据"]
+        """
+
+        let sanitized = MermaidDiagramView.sanitizeMermaidCode(input)
+        XCTAssertFalse(sanitized.contains("||"), "Inline double pipes must be split into separate lines")
+        XCTAssertTrue(sanitized.contains("B --> C[是]"))
+        XCTAssertTrue(sanitized.contains("B --> D[否]"))
+        XCTAssertTrue(sanitized.contains(#"K --> M["提示 '请输入正确凭据'"]"#))
+    }
     // MARK: Streaming Pacer Tests
 
     func testStreamingPacerCadenceSteps() {
