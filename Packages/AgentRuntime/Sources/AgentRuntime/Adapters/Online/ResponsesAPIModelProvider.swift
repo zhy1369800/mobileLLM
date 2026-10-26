@@ -977,11 +977,38 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
         return try JSONValue.object(fields).canonicalData()
     }
 
+    private static func isInternalRunStateMessage(_ message: AgentModelMessage) -> Bool {
+        guard message.role == .system else { return false }
+        return message.content.contains("\"state\":") && message.content.contains("\"modelAttempt\":")
+    }
+
+    private static func extractRepairInstruction(from content: String) -> String? {
+        guard content.contains("\"repairInstruction\""),
+              let data = content.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let instruction = json["repairInstruction"] as? String,
+              !instruction.isEmpty
+        else {
+            return nil
+        }
+        return instruction
+    }
+
     private static func chatMessagesPayload(
         _ messages: [AgentModelMessage]
     ) -> [JSONValue] {
         var merged: [(role: String, content: String)] = []
         for message in messages {
+            if isInternalRunStateMessage(message) {
+                if let repair = extractRepairInstruction(from: message.content) {
+                    if let last = merged.last, last.role == "system" {
+                        merged[merged.count - 1].content += "\n\n" + repair
+                    } else {
+                        merged.append((role: "system", content: repair))
+                    }
+                }
+                continue
+            }
             let role: String = switch message.role {
             case .system: "system"
             case .user: "user"
@@ -1095,10 +1122,17 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
     /// string for system content and `input` items for everything else. Tool results are relayed as
     /// user-role text because the compiled message does not carry the native `call_id`.
     static func messagesPayload(_ messages: [AgentModelMessage]) throws -> (instructions: String, input: [JSONValue]) {
-        let instructions = messages
-            .filter { $0.role == .system }
-            .map(\.content)
-            .joined(separator: "\n")
+        var systemBlocks: [String] = []
+        for message in messages where message.role == .system {
+            if isInternalRunStateMessage(message) {
+                if let repair = extractRepairInstruction(from: message.content) {
+                    systemBlocks.append(repair)
+                }
+                continue
+            }
+            systemBlocks.append(message.content)
+        }
+        let instructions = systemBlocks.joined(separator: "\n")
         let input = messages
             .filter { $0.role != .system }
             .map { message -> JSONValue in
