@@ -321,7 +321,8 @@ private struct StreamingRow: View {
     let displayMode: ThinkingDisplayMode
 
     @State private var shownReasoning = ""
-    @State private var lastReasoningAt = Date.distantPast
+    @State private var targetReasoning = ""
+    @State private var reasoningTicker: Task<Void, Never>?
 
     var body: some View {
         Group {
@@ -360,13 +361,30 @@ private struct StreamingRow: View {
                 }
             }
         }
-        .onAppear { shownReasoning = chat.streaming?.reasoning ?? "" }
+        .onAppear {
+            let initial = chat.streaming?.reasoning ?? ""
+            shownReasoning = initial
+            targetReasoning = initial
+        }
         .onChange(of: chat.streaming?.reasoning ?? "") { _, new in
-            let now = Date()
-            if now.timeIntervalSince(lastReasoningAt) >= 0.05 || new.count - shownReasoning.count > 24 {
-                shownReasoning = new
-                lastReasoningAt = now
+            targetReasoning = new
+            ensureReasoningTicker()
+        }
+        .onDisappear {
+            reasoningTicker?.cancel()
+            reasoningTicker = nil
+        }
+    }
+
+    private func ensureReasoningTicker() {
+        guard reasoningTicker == nil, shownReasoning != targetReasoning else { return }
+        reasoningTicker = Task { @MainActor in
+            while !Task.isCancelled {
+                guard shownReasoning != targetReasoning else { break }
+                shownReasoning = StreamingPacer.advance(visible: shownReasoning, toward: targetReasoning)
+                try? await Task.sleep(nanoseconds: 50_000_000)
             }
+            reasoningTicker = nil
         }
     }
 

@@ -245,4 +245,43 @@ final class MarkdownParsingTests: XCTestCase {
         XCTAssertTrue(sanitized.contains(#"alreadyQuoted["Keep (This) Safe"]"#), "Already quoted labels must not be double quoted")
         XCTAssertTrue(sanitized.contains(#"plainNode[SimpleText]"#), "Labels without special characters should remain unquoted")
     }
+    // MARK: Streaming Pacer Tests
+
+    func testStreamingPacerCadenceSteps() {
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 0), 1)
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 1), 1)
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 2), 2)
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 4), 2)
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 5), 4)
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 16), 4)
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 18), 6)
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 60), 20)
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 500), 120) // Clamped at 120
+    }
+
+    func testStreamingPacerAdvanceText() {
+        let target = "Hello, world!"
+        var visible = "Hello"
+        visible = StreamingPacer.advance(visible: visible, toward: target, maxStep: 2)
+        XCTAssertEqual(visible, "Hello, ")
+        visible = StreamingPacer.advance(visible: visible, toward: target, maxStep: 10)
+        XCTAssertEqual(visible, target)
+        // Calling advance when already equal returns target
+        XCTAssertEqual(StreamingPacer.advance(visible: visible, toward: target, maxStep: 5), target)
+        // Diverged target resets
+        XCTAssertEqual(StreamingPacer.advance(visible: "Something else", toward: target, maxStep: 5), target)
+    }
+
+    func testStreamingPacerEmojiAndMultiByteSafety() {
+        let target = "你好👋世界👨‍👩‍👧‍👦🎉"
+        var visible = ""
+        while visible.count < target.count {
+            let next = StreamingPacer.advance(visible: visible, toward: target, maxStep: 1)
+            XCTAssertTrue(next.count > visible.count)
+            XCTAssertTrue(target.hasPrefix(next))
+            visible = next
+        }
+        XCTAssertEqual(visible, target)
+    }
+
 }

@@ -269,46 +269,78 @@ struct MarkdownMessage: View {
     }
 }
 
-/// Streaming wrapper: coalesces token-by-token growth to ~20 fps so the markdown re-parse can't thrash
-/// on a phone (FlowDown's throttle idea). The inline block caret rides at the tail; the final text is
-/// always shown when the caller switches to the non-streaming `MarkdownMessage` on completion.
+/// Pure helper calculating smooth typing cadence and safe character advancement.
+enum StreamingPacer {
+    /// Adaptive step count based on unrendered backlog size (in characters) to provide
+    /// smooth typewriter cadence (~20 fps) without falling behind bursty cloud providers.
+    static func nextStep(backlog: Int) -> Int {
+        if backlog <= 4 {
+            return min(max(1, backlog), 2)
+        } else if backlog <= 16 {
+            return 4
+        } else {
+            return min(120, max(6, backlog / 3))
+        }
+    }
+
+    /// Advances visible text towards target.
+    /// Uses UTF-8 prefix slicing so locating the unrendered tail is O(backlog) rather than O(document),
+    /// while advancing by Swift Extended Grapheme Clusters to preserve multi-byte and emoji boundaries.
+    static func advance(visible: String, toward target: String, maxStep: Int? = nil) -> String {
+        guard target.utf8.count > visible.utf8.count,
+              target.utf8.starts(with: visible.utf8) else {
+            return target
+        }
+        let splitIdx = target.utf8.index(target.utf8.startIndex, offsetBy: visible.utf8.count)
+        let remaining = target[splitIdx...]
+        let backlog = remaining.count
+        guard backlog > 0 else { return target }
+        let step = maxStep ?? nextStep(backlog: backlog)
+        guard step < backlog else { return target }
+        let sliceEnd = target.index(splitIdx, offsetBy: step, limitedBy: target.endIndex) ?? target.endIndex
+        return String(target[..<sliceEnd])
+    }
+}
+
+/// Streaming wrapper: provides smooth typewriter-like streaming interpolation (~20 fps) to eliminate
+/// visual stutter and jumpiness from bursty cloud API network chunks. The inline block caret rides at
+/// the tail; the final text is always shown when the caller switches to non-streaming `MarkdownMessage`.
 struct StreamingMarkdown: View {
     let text: String
     @State private var shown = ""
-    @State private var lastRenderedAt = Date.distantPast
-    @State private var trailingFlush: Task<Void, Never>?
-    /// Latest text seen; read by the trailing flush so tokens arriving while it is pending aren't lost
-    /// (a value captured at scheduling time would be stale).
-    @State private var latest = ""
+    @State private var target = ""
+    @State private var ticker: Task<Void, Never>?
 
-    private static let interval: TimeInterval = 0.04   // ~25 fps cap, immune to large online chunks
+    private static let frameIntervalNs: UInt64 = 50_000_000 // 50ms (20 fps, aligned with kelivo)
 
     var body: some View {
         MarkdownMessage(text: shown + "\u{258C}", isStreaming: true)
             .onChange(of: text) { _, new in
-                latest = new
-                let now = Date()
-                let elapsed = now.timeIntervalSince(lastRenderedAt)
-                if elapsed >= Self.interval {
-                    trailingFlush?.cancel()
-                    trailingFlush = nil
-                    shown = new
-                    lastRenderedAt = now
-                } else if trailingFlush == nil {
-                    // Trailing-edge flush: if the stream pauses (tool call, network stall) inside the gate,
-                    // the withheld tail still lands instead of waiting for the next token.
-                    let wait = max(0, Self.interval - elapsed)
-                    trailingFlush = Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
-                        guard !Task.isCancelled else { return }
-                        shown = latest
-                        lastRenderedAt = Date()
-                        trailingFlush = nil
-                    }
-                }
+                target = new
+                ensureTicker()
             }
-            .onAppear { shown = text; latest = text }
-            .onDisappear { trailingFlush?.cancel(); trailingFlush = nil }
+            .onAppear {
+                shown = text
+                target = text
+            }
+            .onDisappear {
+                ticker?.cancel()
+                ticker = nil
+            }
+    }
+
+    private func ensureTicker() {
+        guard ticker == nil, shown != target else { return }
+        ticker = Task { @MainActor in
+            while !Task.isCancelled {
+                guard shown != target else { break }
+                shown = StreamingPacer.advance(visible: shown, toward: target)
+                // Always hold the gate for a full 50ms interval after advancing so rapid
+                // single-token arrivals coalesce into `target` instead of bypassing the gate.
+                try? await Task.sleep(nanoseconds: Self.frameIntervalNs)
+            }
+            ticker = nil
+        }
     }
 }
 
