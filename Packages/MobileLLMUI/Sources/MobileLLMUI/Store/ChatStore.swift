@@ -560,11 +560,14 @@ public final class ChatStore {
     public var isOnlineActive: Bool { onlineModelID != nil }
     public var isShortcutsActive: Bool { settings.shortcutsModelActive }
 
-    public var isStreaming: Bool { streaming != nil }
+    /// Reads `streamingMessageID` (changes only at start/stop) rather than the per-token `streaming`
+    /// struct, so views gating on busy-state (the composer) aren't invalidated on every token. Both are
+    /// always assigned together on the main actor.
+    public var isStreaming: Bool { streamingMessageID != nil }
     public var hasModel: Bool { activeModel != nil || isOnlineActive || isShortcutsActive }
     public var canSend: Bool {
         acceptingNewActions && !conversationEraseInProgress && agentRuntimeUnavailableReason == nil
-            && hasModel && streaming == nil
+            && hasModel && streamingMessageID == nil
             && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingImages.isEmpty)
     }
 
@@ -622,7 +625,7 @@ public final class ChatStore {
 
     /// Room for another staged image (the photo affordance disables at the cap).
     public var canAttachMoreImages: Bool {
-        !conversationEraseInProgress && streaming == nil && pendingImages.count < Self.maxAttachments
+        !conversationEraseInProgress && streamingMessageID == nil && pendingImages.count < Self.maxAttachments
     }
 
     /// Stage a picked/pasted image for the next send. Downscales + re-encodes to JPEG BEFORE storing so a

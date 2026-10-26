@@ -119,12 +119,8 @@ struct ChatThreadView: View {
                             ForEach(convo.messages) { message in
                                 row(message).id(message.id)
                             }
-                            if let agentRuns,
-                               let run = agentRuns.presentation(for: convo.id),
-                               run.needsPanel
-                            {
-                                AgentRunPanel(store: agentRuns, conversationID: convo.id)
-                                    .id("agent-run-\(run.runID.description)")
+                            if let agentRuns {
+                                AgentRunPanelRow(store: agentRuns, conversationID: convo.id)
                             }
                         }
                         .padding(Theme.Space.lg)
@@ -199,9 +195,7 @@ struct ChatThreadView: View {
                 }
             }
         } else if message.id == chat.streamingMessageID {
-            StreamingRow(chat: chat, displayMode: displayMode,
-                         modelName: chat.streaming?.generatedBy?.displayName
-                            ?? chat.activeModel?.model.displayName ?? "Model")
+            StreamingRow(chat: chat, displayMode: displayMode)
         } else {
             AssistantView(
                 reasoning: message.reasoning ?? "",
@@ -325,7 +319,6 @@ struct ChatThreadView: View {
 private struct StreamingRow: View {
     let chat: ChatStore
     let displayMode: ThinkingDisplayMode
-    let modelName: String
 
     @State private var shownReasoning = ""
     @State private var lastReasoningAt = Date.distantPast
@@ -333,6 +326,7 @@ private struct StreamingRow: View {
     var body: some View {
         Group {
             if let s = chat.streaming {
+                let modelName = s.generatedBy?.displayName ?? chat.activeModel?.model.displayName ?? "Model"
                 if s.phase == .warming && !s.hasAnyContent {
                     VStack(alignment: .leading, spacing: Theme.Space.xs) {
                         WarmingShimmer()
@@ -379,5 +373,18 @@ private struct StreamingRow: View {
     /// Throttled while thinking; the full text once thinking ends, so the frozen block is exact.
     private func displayedReasoning(_ s: StreamingState) -> String {
         s.phase == .thinking ? shownReasoning : s.reasoning
+    }
+}
+
+/// Isolated container for AgentRunPanel so observing `store.presentation` does not invalidate the entire ChatThreadView
+private struct AgentRunPanelRow: View {
+    let store: AgentRunStore
+    let conversationID: UUID
+
+    var body: some View {
+        if let run = store.presentation(for: conversationID), run.needsPanel {
+            AgentRunPanel(store: store, conversationID: conversationID)
+                .id("agent-run-\(run.runID.description)")
+        }
     }
 }

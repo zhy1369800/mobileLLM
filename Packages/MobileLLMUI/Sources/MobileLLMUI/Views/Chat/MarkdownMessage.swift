@@ -276,18 +276,39 @@ struct StreamingMarkdown: View {
     let text: String
     @State private var shown = ""
     @State private var lastRenderedAt = Date.distantPast
+    @State private var trailingFlush: Task<Void, Never>?
+    /// Latest text seen; read by the trailing flush so tokens arriving while it is pending aren't lost
+    /// (a value captured at scheduling time would be stale).
+    @State private var latest = ""
+
+    private static let interval: TimeInterval = 0.04   // ~25 fps cap, immune to large online chunks
 
     var body: some View {
         MarkdownMessage(text: shown + "\u{258C}", isStreaming: true)
             .onChange(of: text) { _, new in
+                latest = new
                 let now = Date()
-                // Render on a ~50 ms gate, or immediately when a big chunk arrives so we never fall far behind.
-                if now.timeIntervalSince(lastRenderedAt) >= 0.05 || new.count - shown.count > 24 {
+                let elapsed = now.timeIntervalSince(lastRenderedAt)
+                if elapsed >= Self.interval {
+                    trailingFlush?.cancel()
+                    trailingFlush = nil
                     shown = new
                     lastRenderedAt = now
+                } else if trailingFlush == nil {
+                    // Trailing-edge flush: if the stream pauses (tool call, network stall) inside the gate,
+                    // the withheld tail still lands instead of waiting for the next token.
+                    let wait = max(0, Self.interval - elapsed)
+                    trailingFlush = Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                        guard !Task.isCancelled else { return }
+                        shown = latest
+                        lastRenderedAt = Date()
+                        trailingFlush = nil
+                    }
                 }
             }
-            .onAppear { shown = text }
+            .onAppear { shown = text; latest = text }
+            .onDisappear { trailingFlush?.cancel(); trailingFlush = nil }
     }
 }
 
