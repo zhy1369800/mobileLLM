@@ -37,6 +37,15 @@ public struct MermaidDiagramView: View {
         return ""
     }()
 
+    // Pre-compiled regex patterns and character sets to eliminate runtime compilation overhead
+    private static let sanitizeRectRegex = try? NSRegularExpression(
+        pattern: #"([a-zA-Z0-9_\u4e00-\u9fa5\-]+)\s*\[(?!\(|\/|\\|\[)([^\[\]]+)\]"#
+    )
+    private static let sanitizeRhombusRegex = try? NSRegularExpression(
+        pattern: #"([a-zA-Z0-9_\u4e00-\u9fa5\-]+)\s*\{(?!\})([^{}]+)\}"#
+    )
+    private static let sanitizeSpecialCharacters = CharacterSet(charactersIn: "()[]{}=^√·*+/%&|<>:;,!?~#\\\"？")
+
     public var body: some View {
         RichContentWebView(
             htmlString: generateMermaidHTML(code: code, colorScheme: colorScheme, interactive: isInteractiveZoom),
@@ -246,18 +255,27 @@ public struct MermaidDiagramView: View {
     /// 2. Automatically wraps unquoted labels containing special characters or unescaped quotes in double quotes.
     public static func sanitizeMermaidCode(_ code: String) -> String {
         let lines = code.components(separatedBy: "\n")
-        var expandedLines: [String] = []
-
-        // Phase 1: Split inline `||` branches into standard independent lines
+        var isERDiagram = false
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("%%") || trimmed.hasPrefix("graph") || trimmed.hasPrefix("flowchart") {
+            if trimmed.hasPrefix("erDiagram") {
+                isERDiagram = true
+                break
+            }
+        }
+
+        // Phase 1: Split inline ` || ` branches into standard independent lines
+        var expandedLines: [String] = []
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("%%") || trimmed.hasPrefix("graph") || trimmed.hasPrefix("flowchart") || isERDiagram {
                 expandedLines.append(line)
                 continue
             }
 
-            if line.contains("||") {
-                let parts = line.components(separatedBy: "||")
+            // Only split when " || " connects flow statements with arrow indicators
+            if line.contains(" || ") && (line.contains("-->") || line.contains("---") || line.contains("==>") || line.contains("-.->")) {
+                let parts = line.components(separatedBy: " || ")
                 for part in parts {
                     let pTrimmed = part.trimmingCharacters(in: .whitespaces)
                     if !pTrimmed.isEmpty {
@@ -270,28 +288,20 @@ public struct MermaidDiagramView: View {
         }
 
         // Phase 2: Sanitize bracketed labels with special characters or embedded quotes
-        let pattern = #"([a-zA-Z0-9_\u4e00-\u9fa5\-]+)\s*(\[|\(|\{)(.*?)(\]|\)|\})"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+        guard let rectRegex = sanitizeRectRegex, let rhombusRegex = sanitizeRhombusRegex else {
             return expandedLines.joined(separator: "\n")
         }
 
-        let specialCharacters = CharacterSet(charactersIn: "()[]{}=^√·*+/%&|<>:;,!?~#\\\"")
-
-        let sanitizedLines = expandedLines.map { line -> String in
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("%%") { return line }
-
+        func sanitizeMatches(in line: String, regex: NSRegularExpression, leftB: String, rightB: String) -> String {
             let nsLine = line as NSString
             let matches = regex.matches(in: line, range: NSRange(location: 0, length: nsLine.length))
             guard !matches.isEmpty else { return line }
 
             let mutable = NSMutableString(string: line)
             for match in matches.reversed() {
-                guard match.numberOfRanges >= 5 else { continue }
+                guard match.numberOfRanges >= 3 else { continue }
                 let idStr = nsLine.substring(with: match.range(at: 1))
-                let leftBracket = nsLine.substring(with: match.range(at: 2))
-                let contentStr = nsLine.substring(with: match.range(at: 3))
-                let rightBracket = nsLine.substring(with: match.range(at: 4))
+                let contentStr = nsLine.substring(with: match.range(at: 2))
 
                 let trimmedContent = contentStr.trimmingCharacters(in: .whitespaces)
 
@@ -301,16 +311,26 @@ public struct MermaidDiagramView: View {
                     if !inner.contains("\"") {
                         continue
                     }
+                    let safe = inner.replacingOccurrences(of: "\"", with: "'")
+                    mutable.replaceCharacters(in: match.range, with: "\(idStr)\(leftB)\"\(safe)\"\(rightB)")
+                    continue
                 }
 
-                // If content contains special characters or embedded quotes, normalize safely
-                if contentStr.rangeOfCharacter(from: specialCharacters) != nil {
-                    let safeText = trimmedContent.replacingOccurrences(of: "\"", with: "'")
-                    let replacement = "\(idStr)\(leftBracket)\"\(safeText)\"\(rightBracket)"
-                    mutable.replaceCharacters(in: match.range, with: replacement)
+                if contentStr.rangeOfCharacter(from: sanitizeSpecialCharacters) != nil {
+                    let safe = trimmedContent.replacingOccurrences(of: "\"", with: "'")
+                    mutable.replaceCharacters(in: match.range, with: "\(idStr)\(leftB)\"\(safe)\"\(rightB)")
                 }
             }
             return mutable as String
+        }
+
+        let sanitizedLines = expandedLines.map { line -> String in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("%%") { return line }
+
+            let l1 = sanitizeMatches(in: line, regex: rectRegex, leftB: "[", rightB: "]")
+            let l2 = sanitizeMatches(in: l1, regex: rhombusRegex, leftB: "{", rightB: "}")
+            return l2
         }
 
         return sanitizedLines.joined(separator: "\n")

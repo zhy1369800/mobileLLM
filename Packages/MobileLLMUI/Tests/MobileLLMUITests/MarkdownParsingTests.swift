@@ -251,14 +251,53 @@ final class MarkdownParsingTests: XCTestCase {
         graph TD
             A[用户访问网站] --> B{是否登录？}
             B --> C[是] || B --> D[否]
+            C --> E[跳转到主页]
+            D --> E
+
+            E --> F[进入登录页面]
+            F --> G[输入用户名/密码]
+            G --> H[提交登录]
+            H --> I{登录成功？}
+            I --> J[是] || I --> K[否]
+
+            J --> L[跳转到首页]
             K --> M[提示 "请输入正确凭据"]
+
+            M --> N[重新尝试登录]
         """
 
         let sanitized = MermaidDiagramView.sanitizeMermaidCode(input)
         XCTAssertFalse(sanitized.contains("||"), "Inline double pipes must be split into separate lines")
         XCTAssertTrue(sanitized.contains("B --> C[是]"))
         XCTAssertTrue(sanitized.contains("B --> D[否]"))
+        XCTAssertTrue(sanitized.contains("I --> J[是]"))
+        XCTAssertTrue(sanitized.contains("I --> K[否]"))
         XCTAssertTrue(sanitized.contains(#"K --> M["提示 '请输入正确凭据'"]"#))
+        XCTAssertTrue(sanitized.contains(#"G["输入用户名/密码"]"#))
+        XCTAssertTrue(sanitized.contains(#"B{"是否登录？"}"#))
+        XCTAssertTrue(sanitized.contains(#"I{"登录成功？"}"#))
+    }
+
+    func testSanitizeMermaidPreservesStandardShapesAndERDiagrams() {
+        let erInput = """
+        erDiagram
+            CUSTOMER ||--o{ ORDER : places
+            ORDER ||--|{ LINE_ITEM : contains
+        """
+        let sanitizedER = MermaidDiagramView.sanitizeMermaidCode(erInput)
+        XCTAssertTrue(sanitizedER.contains("CUSTOMER ||--o{ ORDER : places"), "ER relationship line must not be split")
+
+        let shapesInput = """
+        graph TD
+            db[(Database)] --> app[App]
+            start((Start)) --> stop((Stop))
+            stadium([Stadium Label]) --> hex{{Hexagon}}
+        """
+        let sanitizedShapes = MermaidDiagramView.sanitizeMermaidCode(shapesInput)
+        XCTAssertTrue(sanitizedShapes.contains("db[(Database)]"), "Cylinder syntax must not be corrupted")
+        XCTAssertTrue(sanitizedShapes.contains("start((Start))"), "Circle syntax must not be corrupted")
+        XCTAssertTrue(sanitizedShapes.contains("stadium([Stadium Label])"), "Stadium syntax must not be corrupted")
+        XCTAssertTrue(sanitizedShapes.contains("hex{{Hexagon}}"), "Hexagon syntax must not be corrupted")
     }
     // MARK: Streaming Pacer Tests
 
