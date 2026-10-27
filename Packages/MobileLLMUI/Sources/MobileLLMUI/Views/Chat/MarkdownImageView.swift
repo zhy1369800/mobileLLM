@@ -2,6 +2,7 @@
 
 import SwiftUI
 import AppUI
+import CryptoKit
 #if canImport(UIKit)
 import UIKit
 #elseif canImport(AppKit)
@@ -100,6 +101,74 @@ public enum MarkdownImageSource: Equatable, Hashable {
     }
 }
 
+/// Manages on-disk persistence for markdown images in the user-visible `Documents/images` folder.
+/// Matches Kelivo's architecture so all generated/remote images can be browsed in iOS Files ("My iPhone/mobileLLM/images").
+public enum MarkdownImageDiskStore {
+    public static var imagesDirectory: URL? {
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let dir = docs.appendingPathComponent("images", isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir
+    }
+
+    public static func hashString(_ input: String) -> String {
+        let digest = SHA256.hash(data: Data(input.utf8))
+        return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    public static func hashData(_ data: Data) -> String {
+        let digest = SHA256.hash(data: data)
+        return digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
+
+    public static func extFor(data: Data) -> String {
+        if data.count >= 4 {
+            let header = [UInt8](data.prefix(4))
+            if header == [0x89, 0x50, 0x4E, 0x47] { return "png" }
+            if header[0] == 0xFF && header[1] == 0xD8 && header[2] == 0xFF { return "jpg" }
+            if header[0] == 0x47 && header[1] == 0x49 && header[2] == 0x46 { return "gif" }
+            if header == [0x52, 0x49, 0x46, 0x46] { return "webp" }
+        }
+        return "png"
+    }
+
+    @discardableResult
+    public static func persistBase64(data: Data) -> URL? {
+        guard let dir = imagesDirectory else { return nil }
+        let ext = extFor(data: data)
+        let hash = hashData(data)
+        let fileURL = dir.appendingPathComponent("img_\(hash).\(ext)")
+        if !FileManager.default.fileExists(atPath: fileURL.path) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+        return fileURL
+    }
+
+    public static func localURLForRemote(url: URL) -> URL? {
+        guard let dir = imagesDirectory else { return nil }
+        let hash = hashString(url.absoluteString)
+        let ext = url.pathExtension.isEmpty ? "png" : url.pathExtension.lowercased()
+        let fileURL = dir.appendingPathComponent("net_\(hash).\(ext)")
+        return FileManager.default.fileExists(atPath: fileURL.path) ? fileURL : nil
+    }
+
+    @discardableResult
+    public static func persistRemote(url: URL, data: Data) -> URL? {
+        guard let dir = imagesDirectory else { return nil }
+        let hash = hashString(url.absoluteString)
+        let ext = url.pathExtension.isEmpty ? extFor(data: data) : url.pathExtension.lowercased()
+        let fileURL = dir.appendingPathComponent("net_\(hash).\(ext)")
+        if !FileManager.default.fileExists(atPath: fileURL.path) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+        return fileURL
+    }
+}
+
 /// In-memory cache for downscaled, ready-to-render platform images.
 final class MarkdownImageCache: @unchecked Sendable {
     static let shared = MarkdownImageCache()
@@ -164,13 +233,27 @@ final class MarkdownImageLoader: ObservableObject {
             let rawData: Data?
             switch source {
             case .remote(let url):
-                var request = URLRequest(url: url)
-                request.timeoutInterval = 15
-                rawData = try? await URLSession.shared.data(for: request).0
+                // 1. Check local Documents/images persistent cache first for instant offline hits
+                if let localURL = MarkdownImageDiskStore.localURLForRemote(url: url),
+                   let localData = try? Data(contentsOf: localURL), !localData.isEmpty {
+                    rawData = localData
+                } else {
+                    var request = URLRequest(url: url)
+                    request.timeoutInterval = 15
+                    if let downloaded = try? await URLSession.shared.data(for: request).0, !downloaded.isEmpty {
+                        rawData = downloaded
+                        // Asynchronously persist to Documents/images for Files app visibility & offline access
+                        MarkdownImageDiskStore.persistRemote(url: url, data: downloaded)
+                    } else {
+                        rawData = nil
+                    }
+                }
             case .file(let url):
                 rawData = try? Data(contentsOf: url)
             case .data(let data):
                 rawData = data
+                // Asynchronously persist base64 data to Documents/images/img_<hash>.<ext>
+                MarkdownImageDiskStore.persistBase64(data: data)
             }
 
             guard !Task.isCancelled, let rawData, !rawData.isEmpty else {

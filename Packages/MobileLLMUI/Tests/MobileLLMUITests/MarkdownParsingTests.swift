@@ -341,6 +341,39 @@ final class MarkdownParsingTests: XCTestCase {
 
     // MARK: Images & Multi-Protocol Tests
 
+    func testMarkdownImageDiskStoreHashingAndPersistence() {
+        let sampleData = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) // PNG header
+        XCTAssertEqual(MarkdownImageDiskStore.extFor(data: sampleData), "png")
+
+        let jpgData = Data([0xFF, 0xD8, 0xFF, 0xE0])
+        XCTAssertEqual(MarkdownImageDiskStore.extFor(data: jpgData), "jpg")
+
+        let gifData = Data([0x47, 0x49, 0x46, 0x38])
+        XCTAssertEqual(MarkdownImageDiskStore.extFor(data: gifData), "gif")
+
+        // Persist base64 sample
+        let persistedBase64 = MarkdownImageDiskStore.persistBase64(data: sampleData)
+        XCTAssertNotNil(persistedBase64)
+        if let path = persistedBase64?.path {
+            XCTAssertTrue(path.contains("images/img_"))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+            try? FileManager.default.removeItem(atPath: path)
+        }
+
+        // Persist remote url cache
+        let testRemoteURL = URL(string: "https://example.com/test_photo.png")!
+        let persistedRemote = MarkdownImageDiskStore.persistRemote(url: testRemoteURL, data: sampleData)
+        XCTAssertNotNil(persistedRemote)
+
+        let cachedURL = MarkdownImageDiskStore.localURLForRemote(url: testRemoteURL)
+        XCTAssertEqual(cachedURL, persistedRemote)
+        if let path = cachedURL?.path {
+            XCTAssertTrue(path.contains("images/net_"))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: path))
+            try? FileManager.default.removeItem(atPath: path)
+        }
+    }
+
     func testMobileLLMVirtualSandboxSchemeParses() {
         let md = "![Sandbox](mobilellm://upload/chart.png)"
         let blocks = MarkdownBlock.parse(md)
