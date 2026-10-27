@@ -3,8 +3,10 @@
 import SwiftUI
 #if canImport(UIKit)
 import UIKit
+public typealias PlatformImage = UIImage
 #elseif canImport(AppKit)
 import AppKit
+public typealias PlatformImage = NSImage
 #endif
 
 extension Image {
@@ -22,4 +24,14 @@ extension Image {
         return nil
         #endif
     }
+
+    #if canImport(UIKit)
+    init(platformImage: UIImage) {
+        self.init(uiImage: platformImage)
+    }
+    #elseif canImport(AppKit)
+    init(platformImage: NSImage) {
+        self.init(nsImage: platformImage)
+    }
+    #endif
 }

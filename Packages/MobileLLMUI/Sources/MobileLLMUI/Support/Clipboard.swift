@@ -18,6 +18,20 @@ enum Clipboard {
         #endif
     }
 
+    /// Copy raw image bytes to the platform pasteboard.
+    static func copyImage(_ data: Data) {
+        #if os(iOS)
+        if let image = UIImage(data: data) {
+            UIPasteboard.general.image = image
+        }
+        #elseif os(macOS)
+        if let image = NSImage(data: data) {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.writeObjects([image])
+        }
+        #endif
+    }
+
     /// The clipboard's image as encoded bytes (for paste-into-composer), or `nil` when it holds no image.
     /// The caller downscales/re-encodes before storing — this just hands back the rawest bytes we can.
     static func imageData() -> Data? {

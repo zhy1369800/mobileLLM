@@ -338,4 +338,68 @@ final class MarkdownParsingTests: XCTestCase {
         XCTAssertEqual(visible, target)
     }
 
+
+    // MARK: Images & Multi-Protocol Tests
+
+    func testRemoteImageParses() {
+        let md = "![Cat](https://example.com/cat.png)"
+        let blocks = MarkdownBlock.parse(md)
+        XCTAssertEqual(blocks.count, 1)
+        guard case let .image(source, alt) = blocks[0].kind else {
+            return XCTFail("Expected image block")
+        }
+        XCTAssertEqual(alt, "Cat")
+        XCTAssertEqual(source, .remote(URL(string: "https://example.com/cat.png")!))
+    }
+
+    func testLocalFileUriAndAbsolutePath() {
+        let fileUriMd = "![Local](file:///var/mobile/photo.jpg)"
+        let fileBlocks = MarkdownBlock.parse(fileUriMd)
+        XCTAssertEqual(fileBlocks.count, 1)
+        guard case let .image(fileSource, _) = fileBlocks[0].kind else {
+            return XCTFail("Expected image block for file URI")
+        }
+        XCTAssertEqual(fileSource, .file(URL(string: "file:///var/mobile/photo.jpg")!))
+
+        let absMd = "![Abs](/var/mobile/test.png)"
+        let absBlocks = MarkdownBlock.parse(absMd)
+        XCTAssertEqual(absBlocks.count, 1)
+        guard case let .image(absSource, _) = absBlocks[0].kind else {
+            return XCTFail("Expected image block for absolute path")
+        }
+        XCTAssertEqual(absSource, .file(URL(fileURLWithPath: "/var/mobile/test.png")))
+    }
+
+    func testBase64DataUriParses() {
+        // 1x1 transparent PNG in base64
+        let base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+        let md = "![Dot](data:image/png;base64,\(base64))"
+        let blocks = MarkdownBlock.parse(md)
+        XCTAssertEqual(blocks.count, 1)
+        guard case let .image(source, alt) = blocks[0].kind else {
+            return XCTFail("Expected image block for data URI")
+        }
+        XCTAssertEqual(alt, "Dot")
+        guard case let .data(data) = source else {
+            return XCTFail("Expected .data source")
+        }
+        XCTAssertFalse(data.isEmpty)
+    }
+
+    func testProseWithInlineImageSplitsCorrectly() {
+        let md = "Check this diagram:\n![Architecture](https://example.com/arch.png)\nLooks great!"
+        let blocks = MarkdownBlock.parse(md)
+        XCTAssertEqual(blocks.count, 3)
+        XCTAssertEqual(blocks[0].kind, .prose("Check this diagram:"))
+        XCTAssertEqual(blocks[1].kind, .image(source: .remote(URL(string: "https://example.com/arch.png")!), alt: "Architecture"))
+        XCTAssertEqual(blocks[2].kind, .prose("Looks great!"))
+    }
+
+    func testStreamingIncompleteImageStaysProse() {
+        // Stream mid-token where closing parenthesis is not yet arrived
+        let streamingMd = "Here is the pic: ![Diagram](https://example.com/arch"
+        let blocks = MarkdownBlock.parse(streamingMd)
+        XCTAssertEqual(blocks.count, 1)
+        XCTAssertEqual(blocks[0].kind, .prose(streamingMd))
+    }
 }

@@ -25,6 +25,7 @@ struct MarkdownBlock: Identifiable {
         case table(header: [String], rows: [[String]])
         case html(String)
         case diagram(type: String, code: String)
+        case image(source: MarkdownImageSource, alt: String?)
     }
 
     /// Stable position-based id so SwiftUI reuses the block views across streaming re-parses — a random
@@ -42,7 +43,10 @@ struct MarkdownBlock: Identifiable {
         var prose: [String] = []
         func flushProse() {
             let joined = prose.joined(separator: "\n").trimmingCharacters(in: .newlines)
-            if !joined.isEmpty { blocks.append(MarkdownBlock(id: blocks.count, kind: .prose(joined))) }
+            if !joined.isEmpty {
+                let parsedBlocks = splitProseAndImages(joined, startIndex: blocks.count)
+                blocks.append(contentsOf: parsedBlocks)
+            }
             prose.removeAll()
         }
 
@@ -209,6 +213,82 @@ struct MarkdownBlock: Identifiable {
         if cells.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { cells.removeLast() }
         return cells
     }
+
+    private static func splitProseAndImages(_ text: String, startIndex: Int) -> [MarkdownBlock] {
+        guard text.contains("![") && text.contains("](") else {
+            return [MarkdownBlock(id: startIndex, kind: .prose(text))]
+        }
+
+        let pattern = #"!\[(.*?)\]\((.*?)\)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) else {
+            return [MarkdownBlock(id: startIndex, kind: .prose(text))]
+        }
+
+        let nsString = text as NSString
+        let fullRange = NSRange(location: 0, length: nsString.length)
+        let matches = regex.matches(in: text, options: [], range: fullRange)
+
+        if matches.isEmpty {
+            return [MarkdownBlock(id: startIndex, kind: .prose(text))]
+        }
+
+        var result: [MarkdownBlock] = []
+        var currentId = startIndex
+        var lastIndex = 0
+
+        for match in matches {
+            let matchRange = match.range
+            let altRange = match.range(at: 1)
+            let targetRange = match.range(at: 2)
+
+            let rawAlt = nsString.substring(with: altRange)
+            let rawTarget = nsString.substring(with: targetRange)
+
+            let trimmedTarget = rawTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+            let finalTarget: String
+            if trimmedTarget.hasPrefix("data:") {
+                finalTarget = trimmedTarget
+            } else if let spaceIdx = trimmedTarget.firstIndex(where: { $0 == " " || $0 == "\t" }) {
+                finalTarget = String(trimmedTarget[..<spaceIdx])
+            } else {
+                finalTarget = trimmedTarget
+            }
+
+            guard let source = MarkdownImageSource.resolve(finalTarget) else {
+                continue
+            }
+
+            if matchRange.location > lastIndex {
+                let preText = nsString.substring(with: NSRange(location: lastIndex, length: matchRange.location - lastIndex))
+                let trimmedPre = preText.trimmingCharacters(in: .newlines)
+                if !trimmedPre.isEmpty {
+                    result.append(MarkdownBlock(id: currentId, kind: .prose(trimmedPre)))
+                    currentId += 1
+                }
+            }
+
+            let alt = rawAlt.trimmingCharacters(in: .whitespacesAndNewlines)
+            result.append(MarkdownBlock(id: currentId, kind: .image(source: source, alt: alt.isEmpty ? nil : alt)))
+            currentId += 1
+
+            lastIndex = matchRange.location + matchRange.length
+        }
+
+        if lastIndex < nsString.length {
+            let postText = nsString.substring(with: NSRange(location: lastIndex, length: nsString.length - lastIndex))
+            let trimmedPost = postText.trimmingCharacters(in: .newlines)
+            if !trimmedPost.isEmpty {
+                result.append(MarkdownBlock(id: currentId, kind: .prose(trimmedPost)))
+                currentId += 1
+            }
+        }
+
+        if result.isEmpty {
+            return [MarkdownBlock(id: startIndex, kind: .prose(text))]
+        }
+
+        return result
+    }
 }
 
 enum MarkdownInline {
@@ -262,6 +342,7 @@ struct MarkdownMessage: View {
                 case let .table(header, rows): MarkdownTable(header: header, rows: rows)
                 case let .html(code): HTMLCardView(code: code)
                 case let .diagram(type, code): DiagramCardView(type: type, code: code)
+                case let .image(source, alt): MarkdownImageView(source: source, alt: alt)
                 }
             }
         }
