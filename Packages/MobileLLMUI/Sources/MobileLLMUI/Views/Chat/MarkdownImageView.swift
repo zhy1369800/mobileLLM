@@ -424,7 +424,7 @@ struct MarkdownImageViewerSheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                Theme.surface1.ignoresSafeArea()
+                Theme.bg.ignoresSafeArea()
 
                 ScrollView([.horizontal, .vertical], showsIndicators: false) {
                     Image(platformImage: image)
@@ -474,7 +474,7 @@ struct MarkdownImageViewerSheet: View {
 
     #if os(iOS)
     private func saveToPhotos() {
-        guard let uiImage = UIImage(data: rawData) ?? (image as? UIImage) else { return }
+        let uiImage = UIImage(data: rawData) ?? image
         let helper = PhotoSaveHelper { success in
             if success {
                 saved = true
