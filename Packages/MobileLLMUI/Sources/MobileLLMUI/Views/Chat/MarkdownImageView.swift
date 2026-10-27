@@ -216,13 +216,22 @@ final class MarkdownImageLoader: ObservableObject {
     func load() {
         let key = source.cacheKey
         if let cached = MarkdownImageCache.shared.image(forKey: key) {
-            // Instant memory cache hit
+            // Instant memory cache hit (0ms UI render)
             switch source {
             case .data(let data):
                 state = .success(image: cached, rawData: data)
                 return
-            default:
-                break
+            case .remote(let url):
+                if let localURL = MarkdownImageDiskStore.localURLForRemote(url: url),
+                   let localData = try? Data(contentsOf: localURL), !localData.isEmpty {
+                    state = .success(image: cached, rawData: localData)
+                    return
+                }
+            case .file(let url):
+                if let localData = try? Data(contentsOf: url), !localData.isEmpty {
+                    state = .success(image: cached, rawData: localData)
+                    return
+                }
             }
         }
 
