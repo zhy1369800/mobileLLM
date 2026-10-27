@@ -341,6 +341,20 @@ final class MarkdownParsingTests: XCTestCase {
 
     // MARK: Images & Multi-Protocol Tests
 
+    func testMobileLLMVirtualSandboxSchemeParses() {
+        let md = "![Sandbox](mobilellm://upload/chart.png)"
+        let blocks = MarkdownBlock.parse(md)
+        XCTAssertEqual(blocks.count, 1)
+        guard case let .image(source, alt) = blocks[0].kind else {
+            return XCTFail("Expected image block for mobilellm:// scheme")
+        }
+        XCTAssertEqual(alt, "Sandbox")
+        guard case let .file(url) = source else {
+            return XCTFail("Expected .file source for virtual scheme")
+        }
+        XCTAssertTrue(url.path.hasSuffix("upload/chart.png"), "Resolved file URL should end with sandbox relative path")
+    }
+
     func testRemoteImageParses() {
         let md = "![Cat](https://example.com/cat.png)"
         let blocks = MarkdownBlock.parse(md)

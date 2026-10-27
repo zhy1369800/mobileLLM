@@ -55,7 +55,22 @@ public enum MarkdownImageSource: Equatable, Hashable {
             return nil
         }
 
-        // 4. Local Absolute Path (Unix /... or Windows C:\...)
+        // 4. Virtual App Sandbox Scheme (mobilellm://)
+        if trimmed.hasPrefix("mobilellm://") {
+            var rest = String(trimmed.dropFirst("mobilellm://".count))
+            while rest.hasPrefix("/") {
+                rest.removeFirst()
+            }
+            let cleanPath = (rest.components(separatedBy: "?").first ?? rest)
+                .removingPercentEncoding ?? rest
+            if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                let fileURL = cleanPath.isEmpty ? docs : docs.appendingPathComponent(cleanPath)
+                return .file(fileURL)
+            }
+            return nil
+        }
+
+        // 5. Local Absolute Path (Unix /... or Windows C:\...)
         let isUnixAbs = trimmed.hasPrefix("/")
         let isWindowsAbs = trimmed.range(of: #"^[a-zA-Z]:[\\/]"#, options: .regularExpression) != nil
         if isUnixAbs || isWindowsAbs {
@@ -63,7 +78,7 @@ public enum MarkdownImageSource: Equatable, Hashable {
             return .file(url)
         }
 
-        // 5. App sandbox relative path (e.g. "attachments/img.png")
+        // 6. App sandbox relative path (e.g. "attachments/img.png")
         let ext = (trimmed as NSString).pathExtension.lowercased()
         let knownImageExts: Set<String> = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "heic", "tiff"]
         if knownImageExts.contains(ext) {
