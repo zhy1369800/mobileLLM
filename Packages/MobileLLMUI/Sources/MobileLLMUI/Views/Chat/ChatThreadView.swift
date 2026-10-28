@@ -35,8 +35,6 @@ struct ChatThreadView: View {
     var agentRuns: AgentRunStore? = nil
 
     @State private var atBottom = true
-    /// The bottom marker's current Y in the scroll view's coordinate space.
-    @State private var bottomMaxY: CGFloat = 0
     @State private var editing: Message?
     @State private var editText = ""
     /// A mid-history regenerate awaiting confirmation (nil = none pending).
@@ -142,21 +140,21 @@ struct ChatThreadView: View {
                     }
                     .frame(maxWidth: .infinity)
                 }
-                // Platform-native bottom anchoring (iOS 17+): while the scroll view is at the bottom,
-                // content growth keeps the bottom edge pinned without any per-token manual scrolling.
-                // The user can still scroll away; the pill below reflects that state.
-                .defaultScrollAnchor(.bottom)
+                // Aligned with Kelivo: remove aggressive defaultScrollAnchor(.bottom) which fights
+                // the user's manual dragging gesture during LazyVStack content growth.
                 .scrollDismissesKeyboard(.interactively)   // drag the thread down to dismiss the keyboard
                 .coordinateSpace(name: "thread")
                 .background(Theme.bg)
                 .onPreferenceChange(BottomOffsetKey.self) { maxY in
-                    bottomMaxY = maxY
-                    atBottom = maxY <= outer.size.height + 40
+                    // Only update atBottom when boolean changes to prevent high-frequency (120Hz) re-renders
+                    let newAtBottom = maxY <= outer.size.height + 40
+                    if atBottom != newAtBottom {
+                        atBottom = newAtBottom
+                    }
                 }
                 .onChange(of: convo.messages.count) { _, _ in
-                    scrollToBottom(proxy, animated: false)
-                    Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 100_000_000)
+                    // Only auto-follow when already at the bottom; yield unconditionally to user historical browsing
+                    if atBottom {
                         scrollToBottom(proxy, animated: false)
                     }
                 }
