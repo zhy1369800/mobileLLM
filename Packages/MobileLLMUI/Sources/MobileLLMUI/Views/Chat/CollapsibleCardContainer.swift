@@ -2,6 +2,10 @@
 
 import SwiftUI
 import AppUI
+#if os(iOS)
+import UIKit
+import Photos
+#endif
 
 /// A versatile card container for rich content (HTML preview, Mermaid diagrams, long tables)
 /// featuring ink-wash aesthetics, collapsed height capping, gradient mask, "View Full Content" button,
@@ -19,6 +23,12 @@ public struct CollapsibleCardContainer<Content: View, ExpandedContent: View>: Vi
     @State private var showFullScreenSheet: Bool = false
     @State private var showSourceCode: Bool = false
     @State private var copied: Bool = false
+    @StateObject private var snapshotController = WebViewSnapshotController()
+    @State private var saving: Bool = false
+    @State private var saved: Bool = false
+    @State private var sharing: Bool = false
+    @State private var errorMessage: String? = nil
+    @State private var showErrorAlert: Bool = false
 
     public init(
         title: String,
@@ -211,6 +221,7 @@ public struct CollapsibleCardContainer<Content: View, ExpandedContent: View>: Vi
     private var fullScreenSheetView: some View {
         NavigationStack {
             expandedContent()
+                .environment(\.webViewSnapshotController, snapshotController)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Theme.bg)
                 .toolbar {
@@ -219,8 +230,41 @@ public struct CollapsibleCardContainer<Content: View, ExpandedContent: View>: Vi
                             showFullScreenSheet = false
                         }
                     }
-                    if let code = sourceCode {
-                        ToolbarItem(placement: .primaryAction) {
+
+                    ToolbarItemGroup(placement: .primaryAction) {
+                        #if os(iOS)
+                        Button {
+                            downloadImage()
+                        } label: {
+                            if saving {
+                                ProgressView()
+                                    .progressViewStyle(.circular)
+                                    .scaleEffect(0.8)
+                            } else {
+                                Image(systemName: saved ? "checkmark.circle.fill" : "arrow.down.circle")
+                                    .foregroundStyle(saved ? Color.green : Theme.textPrimary)
+                            }
+                        }
+                        .disabled(saving)
+                        .accessibilityLabel("保存图片到相册")
+
+                        Button {
+                            shareImage()
+                        } label: {
+                            if sharing {
+                                ProgressView()
+                                    .progressViewStyle(.circular)
+                                    .scaleEffect(0.8)
+                            } else {
+                                Image(systemName: "square.and.arrow.up")
+                                    .foregroundStyle(Theme.textPrimary)
+                            }
+                        }
+                        .disabled(sharing)
+                        .accessibilityLabel("分享图片")
+                        #endif
+
+                        if let code = sourceCode {
                             Button {
                                 #if os(iOS)
                                 UIPasteboard.general.string = code
@@ -235,7 +279,9 @@ public struct CollapsibleCardContainer<Content: View, ExpandedContent: View>: Vi
                                 }
                             } label: {
                                 Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                                    .foregroundStyle(copied ? Color.green : Theme.textPrimary)
                             }
+                            .accessibilityLabel("复制代码")
                         }
                     }
                 }
@@ -243,8 +289,100 @@ public struct CollapsibleCardContainer<Content: View, ExpandedContent: View>: Vi
                 #if os(iOS)
                 .navigationBarTitleDisplayMode(.inline)
                 #endif
+                .alert("提示", isPresented: $showErrorAlert) {
+                    Button("好", role: .cancel) {}
+                } message: {
+                    Text(errorMessage ?? "操作失败，请重试")
+                }
         }
     }
+
+    #if os(iOS)
+    private func downloadImage() {
+        guard !saving else { return }
+        saving = true
+        Task { @MainActor in
+            guard let image = await snapshotController.captureImage() else {
+                saving = false
+                errorMessage = "生成图表快照失败，请稍后重试。"
+                showErrorAlert = true
+                return
+            }
+            saveImageToPhotos(image)
+        }
+    }
+
+    private func saveImageToPhotos(_ uiImage: UIImage) {
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            DispatchQueue.main.async {
+                switch status {
+                case .authorized, .limited:
+                    PHPhotoLibrary.shared().performChanges({
+                        PHAssetChangeRequest.creationRequestForAsset(from: uiImage)
+                    }) { success, error in
+                        DispatchQueue.main.async {
+                            saving = false
+                            if success {
+                                saved = true
+                                Task {
+                                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                    saved = false
+                                }
+                            } else {
+                                errorMessage = error?.localizedDescription ?? "保存图片失败。"
+                                showErrorAlert = true
+                            }
+                        }
+                    }
+                case .denied, .restricted:
+                    saving = false
+                    errorMessage = "未获得相册权限，请在系统“设置”中允许 mobileLLM 访问相册。"
+                    showErrorAlert = true
+                case .notDetermined:
+                    saving = false
+                @unknown default:
+                    saving = false
+                }
+            }
+        }
+    }
+
+    private func shareImage() {
+        guard !sharing else { return }
+        sharing = true
+        Task { @MainActor in
+            guard let image = await snapshotController.captureImage() else {
+                sharing = false
+                errorMessage = "生成图表快照失败，请稍后重试。"
+                showErrorAlert = true
+                return
+            }
+            sharing = false
+            presentShareSheet(items: [image])
+        }
+    }
+
+    private func presentShareSheet(items: [Any]) {
+        guard let windowScene = UIApplication.shared.connectedScenes.first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene ?? UIApplication.shared.connectedScenes.first as? UIWindowScene,
+              let rootVC = windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController ?? windowScene.windows.first?.rootViewController else {
+            return
+        }
+
+        let activityVC = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        var topVC = rootVC
+        while let presented = topVC.presentedViewController {
+            topVC = presented
+        }
+
+        if let popover = activityVC.popoverPresentationController {
+            popover.sourceView = topVC.view
+            popover.sourceRect = CGRect(x: topVC.view.bounds.midX, y: topVC.view.bounds.midY, width: 0, height: 0)
+            popover.permittedArrowDirections = []
+        }
+
+        topVC.present(activityVC, animated: true)
+    }
+    #endif
 }
 
 public struct ContentHeightPreferenceKey: PreferenceKey {

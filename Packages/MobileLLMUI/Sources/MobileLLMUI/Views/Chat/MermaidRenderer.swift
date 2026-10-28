@@ -106,23 +106,43 @@ public struct MermaidDiagramView: View {
         """
 
         let fullscreenModeCSS = """
+        html, body {
+            width: 100%;
+            height: 100%;
+            min-height: 100%;
+            margin: 0;
+            padding: 0;
+        }
         body {
-            padding: 24px 16px 90px 16px;
-            overflow-x: auto;
-            overflow-y: auto;
+            padding: 20px 16px 80px 16px;
+            box-sizing: border-box;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: auto;
             -webkit-overflow-scrolling: touch;
-            display: block;
         }
         #viewport {
             width: 100%;
+            height: 100%;
             display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        #diagram-target {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
             justify-content: center;
         }
         svg {
             max-width: 100% !important;
+            max-height: 100% !important;
+            width: auto !important;
             height: auto !important;
             display: block;
-            margin: 0 auto;
+            margin: auto;
         }
         """
 
@@ -132,7 +152,7 @@ public struct MermaidDiagramView: View {
         <head>
             <meta charset="utf-8">
             <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; \(scriptCSP) img-src data: blob:; connect-src 'none';">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=4.0, user-scalable=\(interactive ? "yes" : "no")">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=0.5, maximum-scale=5.0, user-scalable=\(interactive ? "yes" : "no")">
             <style>
                 :root {
                     --bg-surface: \(bgColor);
@@ -237,8 +257,15 @@ public struct MermaidDiagramView: View {
                                             svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
                                         }
                                     }
-                                    svg.style.width = '100%';
-                                    svg.style.height = 'auto';
+                                    if (\(interactive ? "true" : "false")) {
+                                        svg.style.maxWidth = '100%';
+                                        svg.style.maxHeight = '100%';
+                                        svg.style.width = 'auto';
+                                        svg.style.height = 'auto';
+                                    } else {
+                                        svg.style.width = '100%';
+                                        svg.style.height = 'auto';
+                                    }
                                 }
                             })
                             .catch(function(err) {

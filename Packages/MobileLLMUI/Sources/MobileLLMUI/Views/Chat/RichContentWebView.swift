@@ -3,6 +3,50 @@
 import SwiftUI
 import WebKit
 import AppUI
+/// Controller for capturing snapshots from RichContentWebView.
+public final class WebViewSnapshotController: ObservableObject {
+    public weak var targetView: AnyObject?
+
+    public init() {}
+
+    #if os(iOS)
+    @MainActor
+    public func captureImage() async -> UIImage? {
+        guard let webView = targetView as? WKWebView else { return nil }
+        return await withCheckedContinuation { continuation in
+            let config = WKSnapshotConfiguration()
+            config.afterScreenUpdates = true
+            webView.takeSnapshot(with: config) { image, error in
+                continuation.resume(returning: image)
+            }
+        }
+    }
+    #elseif os(macOS)
+    @MainActor
+    public func captureImage() async -> NSImage? {
+        guard let webView = targetView as? WKWebView else { return nil }
+        return await withCheckedContinuation { continuation in
+            let config = WKSnapshotConfiguration()
+            config.afterScreenUpdates = true
+            webView.takeSnapshot(with: config) { image, error in
+                continuation.resume(returning: image)
+            }
+        }
+    }
+    #endif
+}
+
+private struct WebViewSnapshotControllerKey: EnvironmentKey {
+    static let defaultValue: WebViewSnapshotController? = nil
+}
+
+extension EnvironmentValues {
+    public var webViewSnapshotController: WebViewSnapshotController? {
+        get { self[WebViewSnapshotControllerKey.self] }
+        set { self[WebViewSnapshotControllerKey.self] = newValue }
+    }
+}
+
 
 /// A cross-platform, security-isolated offline WebKit view for rendering HTML content and interactive diagrams.
 /// Strictly enforces local-only rendering, prevents external network hops, and automatically injects ink-wash theme CSS tokens.
@@ -12,6 +56,7 @@ public struct RichContentWebView: View {
     public var onHeightCalculated: ((CGFloat) -> Void)?
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.webViewSnapshotController) private var snapshotController
     @State private var internalHeight: CGFloat = 200
 
     public init(
@@ -31,7 +76,8 @@ public struct RichContentWebView: View {
                 RepresentedWebView(
                     htmlString: prepareHTML(htmlString, colorScheme: colorScheme, interactive: true),
                     isScrollEnabled: true,
-                    onHeightCalculated: nil
+                    onHeightCalculated: nil,
+                    snapshotController: snapshotController
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -42,7 +88,8 @@ public struct RichContentWebView: View {
                     onHeightCalculated: { height in
                         internalHeight = max(80, height)
                         onHeightCalculated?(internalHeight)
-                    }
+                    },
+                    snapshotController: snapshotController
                 )
                 .frame(height: internalHeight)
             }
@@ -147,6 +194,7 @@ private struct RepresentedWebView: UIViewRepresentable {
     let htmlString: String
     let isScrollEnabled: Bool
     let onHeightCalculated: ((CGFloat) -> Void)?
+    var snapshotController: WebViewSnapshotController? = nil
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -162,6 +210,7 @@ private struct RepresentedWebView: UIViewRepresentable {
         webView.scrollView.alwaysBounceVertical = isScrollEnabled
         webView.scrollView.contentInsetAdjustmentBehavior = .automatic
         webView.navigationDelegate = context.coordinator
+        snapshotController?.targetView = webView
         return webView
     }
 
@@ -169,6 +218,7 @@ private struct RepresentedWebView: UIViewRepresentable {
         webView.scrollView.isScrollEnabled = isScrollEnabled
         webView.scrollView.alwaysBounceVertical = isScrollEnabled
         context.coordinator.onHeightCalculated = onHeightCalculated
+        snapshotController?.targetView = webView
 
         if context.coordinator.currentHTML != htmlString {
             context.coordinator.currentHTML = htmlString
@@ -213,6 +263,7 @@ private struct RepresentedWebView: NSViewRepresentable {
     let htmlString: String
     let isScrollEnabled: Bool
     let onHeightCalculated: ((CGFloat) -> Void)?
+    var snapshotController: WebViewSnapshotController? = nil
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
@@ -222,6 +273,7 @@ private struct RepresentedWebView: NSViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
+        snapshotController?.targetView = webView
         return webView
     }
 
