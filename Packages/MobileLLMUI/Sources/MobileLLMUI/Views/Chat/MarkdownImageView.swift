@@ -449,6 +449,18 @@ struct MarkdownImageViewerSheet: View {
     let rawData: Data
     let alt: String?
 
+    init(image: PlatformImage, rawData: Data, alt: String?) {
+        self.image = image
+        self.rawData = rawData
+        self.alt = alt
+    }
+
+    init(image: PlatformImage, data: Data, alt: String?) {
+        self.image = image
+        self.rawData = data
+        self.alt = alt
+    }
+
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
     @State private var saving = false
@@ -764,7 +776,7 @@ struct MarkdownImageViewerSheet: View {
                         saved = false
                     }
                 } else {
-                    let fallbackImage = UIImage(data: rawData) ?? (image as? UIImage)
+                    let fallbackImage = UIImage(data: rawData) ?? image
                     if let fallbackImage {
                         PHPhotoLibrary.shared().performChanges({
                             PHAssetChangeRequest.creationRequestForAsset(from: fallbackImage)

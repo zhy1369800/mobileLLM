@@ -538,7 +538,7 @@ struct AssistantView: View {
             case .tool(let run):
                 ToolDetailSheet(run: run)
             case .image(let image, let data, let alt):
-                MarkdownImageViewerSheet(image: image, data: data, alt: alt)
+                MarkdownImageViewerSheet(image: image, rawData: data, alt: alt)
             }
         }
     }
