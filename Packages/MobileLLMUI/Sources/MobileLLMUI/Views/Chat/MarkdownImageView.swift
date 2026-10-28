@@ -8,6 +8,10 @@ import UIKit
 #elseif canImport(AppKit)
 import AppKit
 #endif
+#if os(iOS)
+import Photos
+import CoreTransferable
+#endif
 
 /// Identifies the resolved location of an image in Markdown text.
 public enum MarkdownImageSource: Equatable, Hashable {
@@ -426,7 +430,20 @@ struct MarkdownImageView: View {
     }
 }
 
-/// Fullscreen gallery sheet for high-resolution inspection, sharing, and saving.
+#if os(iOS)
+struct MarkdownImageTransferable: Transferable {
+    let data: Data
+    let title: String
+
+    static var transferRepresentation: some TransferRepresentation {
+        DataRepresentation(exportedContentType: .image) { item in
+            item.data
+        }
+    }
+}
+#endif
+
+/// Fullscreen gallery sheet for high-resolution inspection, sharing, rotating, and saving.
 struct MarkdownImageViewerSheet: View {
     let image: PlatformImage
     let rawData: Data
@@ -434,50 +451,140 @@ struct MarkdownImageViewerSheet: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
+    @State private var saving = false
     @State private var saved = false
+    @State private var showSaveErrorAlert = false
     @State private var saveErrorMessage: String?
+
+    // Transform states (aligned with Kelivo)
+    @State private var quarterTurns: Int = 0 // 90° steps
+    @State private var flipH: Bool = false
+    @State private var flipV: Bool = false
+    @State private var scale: CGFloat = 1.0
+    @State private var baseScale: CGFloat = 1.0
+    @State private var offset: CGSize = .zero
+    @State private var baseOffset: CGSize = .zero
+    @State private var showControls: Bool = true
+
+    private var isTransformed: Bool {
+        quarterTurns != 0 || flipH || flipV || scale != 1.0 || offset != .zero
+    }
 
     var body: some View {
         NavigationStack {
             ZStack {
                 Theme.bg.ignoresSafeArea()
 
-                ScrollView([.horizontal, .vertical], showsIndicators: false) {
-                    Image(platformImage: image)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .padding(Theme.Space.md)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                GeometryReader { geo in
+                    let viewport = geo.size
+                    let isOddTurn = (abs(quarterTurns) % 2 == 1)
+                    let maxW = max(50, isOddTurn ? viewport.height : viewport.width)
+                    let maxH = max(50, isOddTurn ? viewport.width : viewport.height)
+
+                    ZStack {
+                        Image(platformImage: image)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: maxW, maxHeight: maxH)
+                            .scaleEffect(x: flipH ? -1 : 1, y: flipV ? -1 : 1)
+                            .rotationEffect(.degrees(Double(quarterTurns) * 90))
+                            .scaleEffect(scale)
+                            .offset(offset)
+                    }
+                    .frame(width: viewport.width, height: viewport.height, alignment: .center)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        SimultaneousGesture(
+                            MagnificationGesture()
+                                .onChanged { val in
+                                    let next = baseScale * val
+                                    scale = min(max(next, 0.7), 6.0)
+                                }
+                                .onEnded { _ in
+                                    baseScale = scale
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                        if scale < 1.0 {
+                                            scale = 1.0
+                                            baseScale = 1.0
+                                            offset = .zero
+                                            baseOffset = .zero
+                                        } else if scale > 5.0 {
+                                            scale = 5.0
+                                            baseScale = 5.0
+                                        }
+                                    }
+                                },
+                            DragGesture()
+                                .onChanged { val in
+                                    if scale > 1.05 {
+                                        offset = CGSize(
+                                            width: baseOffset.width + val.translation.width,
+                                            height: baseOffset.height + val.translation.height
+                                        )
+                                    } else if val.translation.height > 0 {
+                                        offset = CGSize(width: 0, height: val.translation.height * 0.6)
+                                    }
+                                }
+                                .onEnded { val in
+                                    if scale > 1.05 {
+                                        baseOffset = offset
+                                    } else {
+                                        if val.translation.height > 120 {
+                                            dismiss()
+                                        } else {
+                                            withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
+                                                offset = .zero
+                                                baseOffset = .zero
+                                            }
+                                        }
+                                    }
+                                }
+                        )
+                    )
+                    .onTapGesture(count: 2) {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                            if scale > 1.05 {
+                                scale = 1.0
+                                baseScale = 1.0
+                                offset = .zero
+                                baseOffset = .zero
+                            } else {
+                                scale = 2.5
+                                baseScale = 2.5
+                            }
+                        }
+                    }
+                    .onTapGesture(count: 1) {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showControls.toggle()
+                        }
+                    }
+                }
+
+                if showControls {
+                    VStack {
+                        Spacer()
+                        actionBar
+                            .padding(.bottom, Theme.Space.lg)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                    }
                 }
             }
-            .navigationTitle(alt ?? "Image")
+            .navigationTitle(showControls ? (alt ?? "Image") : "")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Done") { dismiss() }
-                }
-                ToolbarItemGroup(placement: .primaryAction) {
-                    Button {
-                        Clipboard.copyImage(rawData)
-                        copied = true
-                        Task {
-                            try? await Task.sleep(nanoseconds: 1_500_000_000)
-                            copied = false
-                        }
-                    } label: {
-                        Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                if showControls {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { dismiss() }
                     }
-
-                    #if os(iOS)
-                    Button {
-                        saveToPhotos()
-                    } label: {
-                        Label(saved ? "Saved" : "Save", systemImage: saved ? "checkmark.circle" : "arrow.down.circle")
-                    }
-                    #endif
                 }
+            }
+            .alert("Save Failed", isPresented: $showSaveErrorAlert) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text(saveErrorMessage ?? "Unable to save image to photo library.")
             }
         }
         #if os(macOS)
@@ -488,32 +595,200 @@ struct MarkdownImageViewerSheet: View {
         #endif
     }
 
-    #if os(iOS)
-    private func saveToPhotos() {
-        let uiImage = UIImage(data: rawData) ?? image
-        let helper = PhotoSaveHelper { success in
-            if success {
-                saved = true
+    private var actionBar: some View {
+        HStack(spacing: Theme.Space.sm) {
+            #if os(iOS)
+            Button {
+                saveToPhotos()
+            } label: {
+                if saving {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .scaleEffect(0.8)
+                        .frame(width: 20, height: 20)
+                } else {
+                    Image(systemName: saved ? "checkmark.circle.fill" : "arrow.down.circle")
+                        .foregroundStyle(saved ? Color.green : Theme.textPrimary)
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(saving)
+            .accessibilityLabel("Save to Photos")
+            #endif
+
+            Button {
+                Clipboard.copyImage(rawData)
+                copied = true
                 Task {
                     try? await Task.sleep(nanoseconds: 1_500_000_000)
-                    saved = false
+                    copied = false
+                }
+            } label: {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .foregroundStyle(copied ? Color.green : Theme.textPrimary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Copy image")
+
+            #if os(iOS)
+            ShareLink(
+                item: MarkdownImageTransferable(data: rawData, title: alt ?? "Image"),
+                preview: SharePreview(alt ?? "Image", image: Image(platformImage: image))
+            ) {
+                Image(systemName: "square.and.arrow.up")
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Share image")
+            #endif
+
+            Divider()
+                .frame(height: 16)
+                .background(Theme.hairline)
+
+            Button {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                    flipH.toggle()
+                }
+            } label: {
+                Image(systemName: "arrow.left.and.right")
+                    .foregroundStyle(flipH ? Theme.accent : Theme.textPrimary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Flip horizontally")
+
+            Button {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                    flipV.toggle()
+                }
+            } label: {
+                Image(systemName: "arrow.up.and.down")
+                    .foregroundStyle(flipV ? Theme.accent : Theme.textPrimary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Flip vertically")
+
+            Button {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                    quarterTurns -= 1
+                }
+            } label: {
+                Image(systemName: "rotate.left")
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Rotate counter-clockwise")
+
+            Button {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                    quarterTurns += 1
+                }
+            } label: {
+                Image(systemName: "rotate.right")
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Rotate clockwise")
+
+            if isTransformed {
+                Divider()
+                    .frame(height: 16)
+                    .background(Theme.hairline)
+
+                Button {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                        quarterTurns = 0
+                        flipH = false
+                        flipV = false
+                        scale = 1.0
+                        baseScale = 1.0
+                        offset = .zero
+                        baseOffset = .zero
+                    }
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .foregroundStyle(Theme.accent)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Reset orientation and zoom")
+            }
+        }
+        .font(.system(size: 16, weight: .medium))
+        .padding(.horizontal, Theme.Space.md)
+        .padding(.vertical, 10)
+        .background(
+            Capsule()
+                .fill(Theme.surface2.opacity(0.92))
+                .shadow(color: Color.black.opacity(0.18), radius: 12, x: 0, y: 4)
+        )
+        .overlay(
+            Capsule()
+                .strokeBorder(Theme.hairline, lineWidth: 1)
+        )
+    }
+
+    #if os(iOS)
+    private func saveToPhotos() {
+        guard !saving else { return }
+        saving = true
+
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            DispatchQueue.main.async {
+                switch status {
+                case .authorized, .limited:
+                    performPhotoSave()
+                case .denied, .restricted:
+                    saving = false
+                    saveErrorMessage = "Photo Library access is denied. Please allow photo access in Settings to save images."
+                    showSaveErrorAlert = true
+                case .notDetermined:
+                    saving = false
+                @unknown default:
+                    saving = false
                 }
             }
         }
-        UIImageWriteToSavedPhotosAlbum(uiImage, helper, #selector(PhotoSaveHelper.image(_:didFinishSavingWithError:contextInfo:)), nil)
+    }
+
+    private func performPhotoSave() {
+        PHPhotoLibrary.shared().performChanges({
+            let request = PHAssetCreationRequest.forAsset()
+            request.addResource(with: .photo, data: rawData, options: nil)
+        }) { success, error in
+            DispatchQueue.main.async {
+                saving = false
+                if success {
+                    saved = true
+                    Task {
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        saved = false
+                    }
+                } else {
+                    let fallbackImage = UIImage(data: rawData) ?? (image as? UIImage)
+                    if let fallbackImage {
+                        PHPhotoLibrary.shared().performChanges({
+                            PHAssetChangeRequest.creationRequestForAsset(from: fallbackImage)
+                        }) { fallbackSuccess, fallbackError in
+                            DispatchQueue.main.async {
+                                if fallbackSuccess {
+                                    saved = true
+                                    Task {
+                                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                        saved = false
+                                    }
+                                } else {
+                                    saveErrorMessage = fallbackError?.localizedDescription ?? error?.localizedDescription ?? "Failed to save image."
+                                    showSaveErrorAlert = true
+                                }
+                            }
+                        }
+                    } else {
+                        saveErrorMessage = error?.localizedDescription ?? "Failed to save image."
+                        showSaveErrorAlert = true
+                    }
+                }
+            }
+        }
     }
     #endif
 }
-
-#if os(iOS)
-private final class PhotoSaveHelper: NSObject {
-    let completion: (Bool) -> Void
-    init(completion: @escaping (Bool) -> Void) {
-        self.completion = completion
-    }
-
-    @objc func image(_ image: UIImage, didFinishSavingWithError error: Error?, contextInfo: UnsafeRawPointer) {
-        completion(error == nil)
-    }
-}
-#endif

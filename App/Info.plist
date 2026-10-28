@@ -14,5 +14,9 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>Save images from conversations to your Photo Library.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Access your Photo Library to save images.</string>
 </dict>
 </plist>
