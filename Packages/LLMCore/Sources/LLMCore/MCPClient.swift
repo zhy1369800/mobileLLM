@@ -143,7 +143,10 @@ public actor MCPClient {
 
     /// Handshake + list the server's tools (paginating `nextCursor`). Idempotent-ish: re-handshakes only
     /// if not already connected.
-    public func connect() async throws -> [MCPToolSpec] {
+    /// Ensure the client has performed the JSON-RPC initialization handshake (`initialize` +
+    /// `notifications/initialized`) and negotiated protocol version and session ID. Idempotent:
+    /// returns immediately if already connected.
+    public func ensureReady() async throws {
         if !ready {
             let initResult = try await request(method: "initialize", params: [
                 "protocolVersion": "2025-11-25",
@@ -154,6 +157,12 @@ public actor MCPClient {
             try await notify(method: "notifications/initialized")
             ready = true
         }
+    }
+
+    /// Handshake + list the server's tools (paginating `nextCursor`). Idempotent-ish: re-handshakes only
+    /// if not already connected.
+    public func connect() async throws -> [MCPToolSpec] {
+        try await ensureReady()
         var tools: [MCPToolSpec] = []
         var cursor: String?
         var seenCursors = Set<String>()
@@ -184,7 +193,9 @@ public actor MCPClient {
     }
 
     /// Call a tool; returns its text content (or an "error" string for a tool-level failure the model reads).
+    /// Ensures initialization handshake and session ID negotiation have completed before dispatching.
     public func call(name: String, argumentsJSON: String) async throws -> String {
+        try await ensureReady()
         let args = (try? JSONSerialization.jsonObject(with: Data(argumentsJSON.utf8))) as? [String: Any] ?? [:]
         let res = try await request(method: "tools/call", params: ["name": name, "arguments": args])
         let text = (res?["content"] as? [[String: Any]] ?? [])

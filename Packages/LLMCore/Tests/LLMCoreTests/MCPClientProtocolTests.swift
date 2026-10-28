@@ -216,6 +216,15 @@ final class MCPClientProtocolTests: XCTestCase {
         XCTAssertEqual(result, "CALLED", "calling works with no session id")
     }
 
+    /// Calling a tool on a fresh client without explicit connect() must perform the initialization
+    /// handshake first and echo the negotiated session ID and protocol version on the call request.
+    func testCallWithoutExplicitConnectPerformsInitializationFirst() async throws {
+        let client = MCPClient(server: MCPServer(name: "direct", url: "https://mock.mcp/direct-call"),
+                               session: mockSession())
+        let result = try await client.call(name: "direct_tool", argumentsJSON: "{}")
+        XCTAssertEqual(result, "CALLED", "call() on an uninitialized client performs handshake first")
+    }
+
     private func assertInvalidResponse(_ client: MCPClient, contains expectedText: String,
                                        file: StaticString = #filePath, line: UInt = #line) async {
         do {
@@ -261,6 +270,10 @@ private final class MCPMockProtocol: URLProtocol {
            request.value(forHTTPHeaderField: "Mcp-Session-Id") != "sess-123"
             || request.value(forHTTPHeaderField: "MCP-Protocol-Version") != "2025-11-25" {
             responseParts = (409, ["Content-Type": "application/json"], Data())
+        } else if path.hasSuffix("/direct-call"), method == "tools/call",
+                  request.value(forHTTPHeaderField: "Mcp-Session-Id") != "sess-123"
+                   || request.value(forHTTPHeaderField: "MCP-Protocol-Version") != "2025-11-25" {
+            responseParts = (400, ["Content-Type": "application/json"], Data())
         } else {
             responseParts = Self.respond(path: path, method: method, id: id, cursor: cursor)
         }
