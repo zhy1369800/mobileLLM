@@ -299,6 +299,29 @@ final class MarkdownParsingTests: XCTestCase {
         XCTAssertTrue(sanitizedShapes.contains("stadium([Stadium Label])"), "Stadium syntax must not be corrupted")
         XCTAssertTrue(sanitizedShapes.contains("hex{{Hexagon}}"), "Hexagon syntax must not be corrupted")
     }
+
+    func testSanitizeMermaidProtectsAlreadyQuotedNodesWithMathSubscripts() {
+        let input = """
+        flowchart TD
+            X["输入 token 序列 x_1..x_t"] --> TRUNK["主模型 Transformer trunk<br/>（共享）"]
+            TRUNK --> H["隐状态 h_t"]
+            H --> HEAD0["主输出头<br/>预测 x_{t+1}"]
+            H --> CAT["concat(h_t, Emb(x_{t+1}))"]
+            X1["真实 x_{t+1}（teacher forcing）"] --> EMB["Embedding（共享）"]
+            EMB --> CAT
+            CAT --> BLK["MTP Transformer Block<br/>（第 k 深度独立）"]
+            BLK --> HEAD1["MTP 输出头<br/>预测 x_{t+2}"]
+            HEAD0 --> L0["Loss_0"]
+            HEAD1 --> L1["Loss_1"]
+            L0 --> TOT["总 loss 加权求和"]
+            L1 --> TOT
+        """
+
+        let sanitized = MermaidDiagramView.sanitizeMermaidCode(input)
+        XCTAssertTrue(sanitized.contains(#"HEAD1["MTP 输出头<br/>预测 x_{t+2}"]"#), "Valid quoted label must not have inner braces double-quoted")
+        XCTAssertTrue(sanitized.contains(#"HEAD0["主输出头<br/>预测 x_{t+1}"]"#), "Valid quoted label must not have inner braces double-quoted")
+        XCTAssertFalse(sanitized.contains(#"x_{"t+2"}"#), "Math subscript must not be corrupted into a nested rhombus")
+    }
     // MARK: Streaming Pacer Tests
 
     func testStreamingPacerCadenceSteps() {

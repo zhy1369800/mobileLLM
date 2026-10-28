@@ -44,6 +44,10 @@ public struct MermaidDiagramView: View {
     private static let sanitizeRhombusRegex = try? NSRegularExpression(
         pattern: #"([a-zA-Z0-9_\u4e00-\u9fa5\-]+)\s*\{(?!\})([^{}]+)\}"#
     )
+    // Matches already fully-quoted valid nodes like `id["some text"]` or `id{"some text"}`
+    private static let sanitizeQuotedNodeRegex = try? NSRegularExpression(
+        pattern: #"([a-zA-Z0-9_\u4e00-\u9fa5\-]+)\s*(\[|\{)"([^"\n]*)"(\]|\})"#
+    )
     private static let sanitizeSpecialCharacters = CharacterSet(charactersIn: "()[]{}=^√·*+/%&|<>:;,!?~#\\\"？")
 
     public var body: some View {
@@ -328,9 +332,35 @@ public struct MermaidDiagramView: View {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("%%") { return line }
 
-            let l1 = sanitizeMatches(in: line, regex: rectRegex, leftB: "[", rightB: "]")
+            // Phase 2A: Protect already-valid quoted nodes from sub-regex corruption (e.g. math subscripts like `x_{t+2}`)
+            var protectedNodes: [String] = []
+            var lineProtected = line
+            if let quotedRegex = sanitizeQuotedNodeRegex {
+                let nsLine = lineProtected as NSString
+                let matches = quotedRegex.matches(in: lineProtected, range: NSRange(location: 0, length: nsLine.length))
+                if !matches.isEmpty {
+                    let mutable = NSMutableString(string: lineProtected)
+                    for match in matches.reversed() {
+                        let originalNode = nsLine.substring(with: match.range)
+                        let placeholder = "__MERMAID_QUOTED_NODE_\(protectedNodes.count)__"
+                        protectedNodes.append(originalNode)
+                        mutable.replaceCharacters(in: match.range, with: placeholder)
+                    }
+                    lineProtected = mutable as String
+                }
+            }
+
+            // Phase 2B: Sanitize unquoted nodes
+            let l1 = sanitizeMatches(in: lineProtected, regex: rectRegex, leftB: "[", rightB: "]")
             let l2 = sanitizeMatches(in: l1, regex: rhombusRegex, leftB: "{", rightB: "}")
-            return l2
+
+            // Phase 2C: Restore protected nodes
+            var finalLine = l2
+            for (index, originalNode) in protectedNodes.enumerated() {
+                let placeholder = "__MERMAID_QUOTED_NODE_\(index)__"
+                finalLine = finalLine.replacingOccurrences(of: placeholder, with: originalNode)
+            }
+            return finalLine
         }
 
         return sanitizedLines.joined(separator: "\n")
