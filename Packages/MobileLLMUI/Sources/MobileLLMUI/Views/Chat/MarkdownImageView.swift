@@ -303,11 +303,23 @@ final class MarkdownImageLoader: ObservableObject {
     }
 }
 
+public struct MarkdownImagePreviewActionKey: EnvironmentKey {
+    public static let defaultValue: ((PlatformImage, Data, String?) -> Void)? = nil
+}
+
+public extension EnvironmentValues {
+    var onPreviewMarkdownImage: ((PlatformImage, Data, String?) -> Void)? {
+        get { self[MarkdownImagePreviewActionKey.self] }
+        set { self[MarkdownImagePreviewActionKey.self] = newValue }
+    }
+}
+
 /// Renders a responsive, downscaled image within assistant markdown responses.
 struct MarkdownImageView: View {
     let source: MarkdownImageSource
     let alt: String?
 
+    @Environment(\.onPreviewMarkdownImage) private var onPreviewExternal
     @StateObject private var loader: MarkdownImageLoader
     @State private var showingFullScreen = false
 
@@ -351,7 +363,11 @@ struct MarkdownImageView: View {
 
     private func successView(image: PlatformImage, rawData: Data) -> some View {
         Button {
-            showingFullScreen = true
+            if let onPreviewExternal {
+                onPreviewExternal(image, rawData, alt)
+            } else {
+                showingFullScreen = true
+            }
         } label: {
             Image(platformImage: image)
                 .resizable()

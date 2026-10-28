@@ -107,6 +107,8 @@ public struct CollapsibleCardContainer<Content: View, ExpandedContent: View>: Vi
                     Image(systemName: copied ? "checkmark" : "doc.on.doc")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(copied ? Theme.fitGreen : Theme.textSecondary)
+                        .frame(width: 32, height: 32)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("复制代码")
@@ -118,6 +120,8 @@ public struct CollapsibleCardContainer<Content: View, ExpandedContent: View>: Vi
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .help("全屏查看")

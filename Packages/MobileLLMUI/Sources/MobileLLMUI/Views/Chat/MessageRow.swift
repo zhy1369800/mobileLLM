@@ -194,12 +194,17 @@ struct ToolActivityPresentation: Equatable {
 /// it returns. Tapping the row opens a bottom sheet with complete arguments and results.
 struct ToolActivityRow: View {
     let run: ToolRun
+    var onSelect: (() -> Void)? = nil
     @State private var showingDetail = false
 
     var body: some View {
         let presentation = ToolActivityPresentation(run: run)
         Button {
-            showingDetail = true
+            if let onSelect {
+                onSelect()
+            } else {
+                showingDetail = true
+            }
         } label: {
             HStack(spacing: Theme.Space.sm) {
                 if presentation.state == .running {
@@ -222,17 +227,20 @@ struct ToolActivityRow: View {
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(Theme.textTertiary)
             }
+            .padding(.horizontal, Theme.Space.md).padding(.vertical, Theme.Space.sm)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous).strokeBorder(Theme.hairline))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, Theme.Space.md).padding(.vertical, Theme.Space.sm)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous).strokeBorder(Theme.hairline))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(presentation.accessibilityLabel)
         .accessibilityIdentifier("assistant.tool.run")
-        .sheet(isPresented: $showingDetail) {
+        .sheet(isPresented: Binding(
+            get: { onSelect == nil && showingDetail },
+            set: { showingDetail = $0 }
+        )) {
             ToolDetailSheet(run: run)
         }
     }
@@ -460,6 +468,21 @@ struct EmptyReplyRow: View {
     }
 }
 
+/// Lifted modal state for assistant messages, preventing multiple sheet collision in a single view node.
+enum AssistantModalSheet: Identifiable {
+    case tool(ToolRun)
+    case image(PlatformImage, Data, String?)
+
+    var id: String {
+        switch self {
+        case .tool(let run):
+            return "tool_\(run.id)"
+        case .image(_, let data, let alt):
+            return "image_\(alt ?? "")_\(data.count)"
+        }
+    }
+}
+
 /// The assistant turn — full-width document text (no bubble) so markdown + code read cleanly
 /// (DESIGN §4). Drives the thinking disclosure, an optional streaming caret, and a quiet action bar.
 struct AssistantView: View {
@@ -477,6 +500,8 @@ struct AssistantView: View {
     var onCopy: (() -> Void)?
     var onRegenerate: (() -> Void)?
 
+    @State private var activeModalSheet: AssistantModalSheet?
+
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
             if !reasoning.isEmpty {
@@ -484,7 +509,11 @@ struct AssistantView: View {
             }
             if !toolRuns.isEmpty {
                 VStack(alignment: .leading, spacing: Theme.Space.xs) {
-                    ForEach(toolRuns) { ToolActivityRow(run: $0) }
+                    ForEach(toolRuns) { run in
+                        ToolActivityRow(run: run) {
+                            activeModalSheet = .tool(run)
+                        }
+                    }
                 }
             }
             if !answer.isEmpty {
@@ -501,6 +530,17 @@ struct AssistantView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .environment(\.onPreviewMarkdownImage) { image, data, alt in
+            activeModalSheet = .image(image, data, alt)
+        }
+        .sheet(item: $activeModalSheet) { sheet in
+            switch sheet {
+            case .tool(let run):
+                ToolDetailSheet(run: run)
+            case .image(let image, let data, let alt):
+                MarkdownImageViewerSheet(image: image, data: data, alt: alt)
+            }
+        }
     }
 
     private var answerBody: some View {
@@ -519,7 +559,7 @@ struct AssistantView: View {
                     MarkdownMessage(text: answer)
                         // Markdown rendering may consume underscores or split one answer into several
                         // accessibility nodes. Keep the exact raw answer available as one value.
-                        .accessibilityElement(children: .ignore)
+                        .accessibilityElement(children: .contain)
                         .accessibilityLabel("Assistant answer")
                         .accessibilityValue(answer)
                         .accessibilityIdentifier("assistant.answer")
