@@ -27,8 +27,8 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.xl) {
-                behaviorSection
                 onlineSection
+                behaviorSection
                 samplingSection
                 appearanceSection
                 privacySection
@@ -155,9 +155,7 @@ struct SettingsView: View {
             Toggle(isOn: $settings.toolsEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Allow selected tools").font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("Only tools selected below are exposed to the model. The model decides whether "
-                         + "to call one; every call adds another model pass, and network tools such as web "
-                         + "search, Wikipedia, and remote MCP also wait for the network.")
+                    Text("Choose which tools the model may use. Calls follow the conversation’s approval mode.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                 }
             }
@@ -178,10 +176,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Continue work in background (iOS 26)")
                         .font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("When available, an active finite run may keep processing after you leave "
-                         + "the app, with progress shown by the system. Ordinary chat is never "
-                         + "submitted unless you turn this on, and a rejected submission pauses "
-                         + "the run until you resume it in the foreground.")
+                    Text("Continue supported tasks after leaving the app. iOS may pause work until you return.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                 }
             }
@@ -502,23 +497,11 @@ struct SettingsView: View {
         }
     }
 
-    /// Honest privacy copy: local by default, but tell the truth about what Tools can send and only when.
-    /// Claiming "nothing is sent to a server" is false the moment a tool call reaches Wikipedia or an MCP
-    /// server, so the sentence changes with the Tools setting.
     private var privacyBlurb: String {
-        let base = "Your chats, prompts, and the models stay on this device — there's no account and no telemetry."
-        guard settings.toolsEnabled else {
-            return base + " Nothing is sent to a server. (Turning on Tools lets the model reach the web — "
-                 + "search, a webpage reader, Wikipedia — or an MCP server you configure, and lets tools you "
-                 + "enable touch your calendar, reminders, or location, but only when it invokes that tool.)"
-        }
-        let hasMCP = settings.mcpServers.contains(where: \.isEnabled)
-        return base + " Tools are on: when the model uses a web tool it sends that query or its arguments to "
-             + "that endpoint — a search engine, a page you link, or Wikipedia"
-             + (hasMCP ? ", or an MCP server you've enabled." : " (and any MCP server you add).")
-             + " The calendar, reminders, and location tools read or write that system data only when the "
-             + "model calls them, each asks the system for permission when selected, and only if you select "
-             + "it in Choose tools."
+        "Local models run on this device, and conversations and model files are saved here. "
+        + "mobileLLM has no account system or analytics. Online models and enabled external tools "
+        + "receive the content needed for your request. OpenSandbox runs project code on your "
+        + "configured server. Calendar, reminders and location follow your tool selection and system permissions."
     }
 
     // MARK: About
@@ -527,10 +510,9 @@ struct SettingsView: View {
         section("About", icon: "info.circle") {
             row("Version", appVersion)
             row("Engine", "Pure Swift · MLX + llama.cpp")
-            Text("A private, open-source runner for open-weight language models — everything runs on your "
-                 + "device by default, with no account. The optional Tools feature can reach Wikipedia or "
-                 + "MCP servers you configure, only when the model calls them. Each model's provider and "
-                 + "license are shown on its card in Models.")
+            Text("An open-source app for on-device and optional online models, tools and agent workflows. "
+                 + "You choose the services and execution environments. Each model's provider and license "
+                 + "are shown on its card in Models.")
                 .font(.caption).foregroundStyle(Theme.textTertiary)
         }
     }

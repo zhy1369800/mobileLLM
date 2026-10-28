@@ -235,8 +235,73 @@ final class DynamicWorkflowAdversarialTests: XCTestCase {
         XCTAssertTrue(cancelled)
     }
 
+    func testCancellationUsesCommittedResultWhenAcknowledgementIsLostAndKeepsUsage() async throws {
+        let fixture = try ADWorkflowFixture(body: "return await agent('held');")
+        let spawner = ADControlledSpawner(mode: .held, losesCancellationAcknowledgement: true)
+        let engine = ADWorkflowFixture.engine(journal: InMemoryDynamicWorkflowJournal(), spawner: spawner)
+        let launch = fixture.launch()
+        _ = try await engine.prepareLaunch(script: fixture.saved, snapshot: launch)
+        try await engine.approveLaunch(runID: launch.runID, approvalID: ApprovalID())
+        try await engine.start(runID: launch.runID)
+        let started = try await ADEventually { await spawner.collectCount == 1 }
+        XCTAssertTrue(started)
+        try await engine.stop(runID: launch.runID)
+        let stopped = try await ADEventually { try await engine.projection(runID: launch.runID)?.state == .cancelled }
+        XCTAssertTrue(stopped)
+        let loaded = try await engine.projection(runID: launch.runID)
+        let projection = try XCTUnwrap(loaded)
+        XCTAssertNil(projection.reconciliationCallID)
+        XCTAssertEqual(projection.usage.quantities[.inputTokens], 14)
+        let handle = try XCTUnwrap(projection.submittedHandles.values.first)
+        let committed = try await spawner.terminalResult(handle)
+        let terminal = try XCTUnwrap(committed)
+        let encoded = try JSONEncoder().encode(terminal)
+        XCTAssertEqual(try JSONDecoder().decode(SubagentResult.self, from: encoded).usage, terminal.usage)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        legacy.removeValue(forKey: "terminalUsage")
+        XCTAssertEqual(try JSONDecoder().decode(SubagentResult.self, from: JSONSerialization.data(withJSONObject: legacy)).usage, .zero)
+    }
+
+    func testFailedParallelWorkflowWaitsForDelayedCancellationCommitWithoutRespawning() async throws {
+        let fixture = try ADWorkflowFixture(
+            body: "return await parallel([0,1,2,3,4].map(i => () => agent(`held-${i}`)));",
+            maximumConcurrentAgents: 8)
+        let spawner = ADControlledSpawner(mode: .held, losesCancellationAcknowledgement: true, delayedTerminalReads: 2)
+        let engine = ADWorkflowFixture.engine(journal: InMemoryDynamicWorkflowJournal(), spawner: spawner)
+        let launch = fixture.launch()
+        _ = try await engine.prepareLaunch(script: fixture.saved, snapshot: launch)
+        try await engine.approveLaunch(runID: launch.runID, approvalID: ApprovalID())
+        do {
+            _ = try await engine.runAndWait(runID: launch.runID)
+            XCTFail("The fifth child exceeds available reserved capacity")
+        } catch { }
+        let projection = try await engine.projection(runID: launch.runID)
+        let spawned = await spawner.spawnCount
+        let cancelled = await spawner.cancelCount
+        XCTAssertEqual(spawned, 4)
+        XCTAssertEqual(cancelled, 4)
+        XCTAssertEqual(projection?.state, .failed)
+        XCTAssertNil(projection?.reconciliationCallID)
+        XCTAssertEqual(projection?.submittedHandles.count, 4)
+        // Four submitted children settle cancellation; the rejected fifth admission is also a
+        // durable outcome. A resumed append caller must not reinstall a projection that loses it.
+        XCTAssertEqual(projection?.outcomes.count, 5)
+        let rejected = projection?.calls.filter { projection?.submittedHandles[$0.callID] == nil } ?? []
+        XCTAssertEqual(rejected.count, 1)
+        if let call = rejected.first, case .failed(let failure, let usage) = projection?.outcomes[call.callID] {
+            XCTAssertEqual(failure.code, "workflow.child-admission")
+            XCTAssertEqual(usage, .zero)
+        } else { XCTFail("The unsubmitted call must retain its admission failure") }
+        XCTAssertEqual(projection?.usage.quantities[.inputTokens], 56)
+    }
+
     func testUncertainChildStopsForReconciliationWithoutSettlingOrRetrying() async throws {
-        let fixture = try ADWorkflowFixture(body: "return await agent('external-effect');")
+        for body in [
+            "return await agent('external-effect');",
+            "try { await agent('external-effect'); } catch(e) {} return 'pretend success';",
+            "try { await agent('external-effect'); } catch(e) {} return await agent('repeat-effect');"
+        ] {
+        let fixture = try ADWorkflowFixture(body: body)
         let journal = InMemoryDynamicWorkflowJournal()
         let spawner = ADControlledSpawner(mode: .uncertain)
         let engine = ADWorkflowFixture.engine(journal: journal, spawner: spawner)
@@ -256,10 +321,12 @@ final class DynamicWorkflowAdversarialTests: XCTestCase {
         XCTAssertEqual(projection.calls.count, 1)
         XCTAssertTrue(projection.outcomes.isEmpty)
         XCTAssertNil(projection.failure)
+        XCTAssertNil(projection.output)
         let spawnCount = await spawner.spawnCount
         let collectCount = await spawner.collectCount
         XCTAssertEqual(spawnCount, 1)
         XCTAssertEqual(collectCount, 1)
+            }
     }
 
     func testManualReconciliationIsCallBoundDurableAndSettlesExactlyOnce() async throws {
@@ -1349,6 +1416,9 @@ private actor ADControlledSpawner: SubagentSpawning {
     enum Mode { case held, releasable, uncertain }
 
     let mode: Mode
+    let losesCancellationAcknowledgement: Bool
+    let delayedTerminalReads: Int
+    private var terminalReads: [AgentExecutionHandleID: Int] = [:]
     private var bindings: [AgentExecutionHandleID: (runID: AgentRunID, prompt: String)] = [:]
     private var cancelled: Set<AgentExecutionHandleID> = []
     private var released = false
@@ -1356,7 +1426,20 @@ private actor ADControlledSpawner: SubagentSpawning {
     private(set) var collectCount = 0
     private(set) var cancelCount = 0
 
-    init(mode: Mode) { self.mode = mode }
+    init(mode: Mode, losesCancellationAcknowledgement: Bool = false, delayedTerminalReads: Int = 0) {
+        self.mode = mode
+        self.losesCancellationAcknowledgement = losesCancellationAcknowledgement
+        self.delayedTerminalReads = delayedTerminalReads
+    }
+
+    func terminalResult(_ handleID: AgentExecutionHandleID) async throws -> SubagentResult? {
+        if case .uncertain = mode { return nil }
+        guard cancelled.contains(handleID), let binding = bindings[handleID] else { return nil }
+        terminalReads[handleID, default: 0] += 1
+        if terminalReads[handleID, default: 0] <= delayedTerminalReads { return nil }
+        return SubagentResult(runID: binding.runID, handleID: handleID, outcome: .cancelled,
+            terminalUsage: losesCancellationAcknowledgement ? AgentUsage(quantities: BudgetQuantities([.inputTokens: 14])) : nil)
+    }
 
     func spawn(_ request: SubagentSpawnRequest) -> AgentExecutionHandleID {
         spawnCount += 1
@@ -1392,7 +1475,8 @@ private actor ADControlledSpawner: SubagentSpawning {
             while !cancelled.contains(handleID) {
                 try await Task.sleep(nanoseconds: 2_000_000)
             }
-            return SubagentResult(runID: binding.runID, handleID: handleID, outcome: .cancelled)
+            guard let result = try await terminalResult(handleID) else { throw SubagentSpawnError.resultUnavailable }
+            return result
         case .releasable:
             while !released, !cancelled.contains(handleID) {
                 try await Task.sleep(nanoseconds: 2_000_000)
@@ -1408,9 +1492,10 @@ private actor ADControlledSpawner: SubagentSpawning {
         }
     }
 
-    func cancel(_ handleID: AgentExecutionHandleID, runID: AgentRunID) {
+    func cancel(_ handleID: AgentExecutionHandleID, runID: AgentRunID) throws {
         guard bindings[handleID]?.runID == runID else { return }
         if cancelled.insert(handleID).inserted { cancelCount += 1 }
+        if losesCancellationAcknowledgement { throw SubagentSpawnError.resultUnavailable }
     }
 
     func releaseAll() { released = true }

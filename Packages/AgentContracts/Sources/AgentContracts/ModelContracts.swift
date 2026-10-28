@@ -390,6 +390,8 @@ public struct AgentModelGenerationParameters: Hashable, Codable, Sendable {
     /// Whether the provider sends the output limit on the wire (`.explicit`) or omits it so the
     /// service uses its own model default (`.auto`). Defaults to `.explicit` for compatibility.
     public let outputBudgetMode: AgentOutputBudgetMode
+    /// Optional per-run effort. Nil retains legacy provider-configuration behavior.
+    public let reasoningEffort: AgentModelReasoningEffort?
 
     /// Creates finite, canonicalizable generation controls.
     public init(
@@ -401,7 +403,8 @@ public struct AgentModelGenerationParameters: Hashable, Codable, Sendable {
         repetitionPenalty: Double,
         thinkingMode: AgentModelThinkingMode,
         seed: UInt64?,
-        outputBudgetMode: AgentOutputBudgetMode = .explicit
+        outputBudgetMode: AgentOutputBudgetMode = .explicit,
+        reasoningEffort: AgentModelReasoningEffort? = nil
     ) throws {
         let maximumIJSONInteger: UInt64 = 9_007_199_254_740_991
         guard maximumOutputTokens > 0,
@@ -422,6 +425,7 @@ public struct AgentModelGenerationParameters: Hashable, Codable, Sendable {
         self.thinkingMode = thinkingMode
         self.seed = seed
         self.outputBudgetMode = outputBudgetMode
+        self.reasoningEffort = reasoningEffort
     }
 
     /// Conservative compatibility defaults; production compilers should pass explicit values.
@@ -452,7 +456,8 @@ public struct AgentModelGenerationParameters: Hashable, Codable, Sendable {
                 outputBudgetMode: container.decodeIfPresent(
                     AgentOutputBudgetMode.self,
                     forKey: .outputBudgetMode
-                ) ?? .explicit
+                ) ?? .explicit,
+                reasoningEffort: container.decodeIfPresent(AgentModelReasoningEffort.self, forKey: .reasoningEffort)
             )
         } catch {
             throw DecodingError.dataCorrupted(
@@ -463,7 +468,7 @@ public struct AgentModelGenerationParameters: Hashable, Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case maximumOutputTokens, maximumContextTokens, temperature, topP, topK
-        case repetitionPenalty, thinkingMode, seed, outputBudgetMode
+        case repetitionPenalty, thinkingMode, seed, outputBudgetMode, reasoningEffort
     }
 }
 
@@ -490,12 +495,15 @@ public struct AgentModelMessage: Hashable, Codable, Sendable {
     /// Referenced artifacts supplied with this message.
     public let artifacts: [ArtifactReference]
 
+    public let nativeToolCall: NativeToolCallContext?
+
     /// Creates one bounded model message.
     public init(
         role: AgentModelMessageRole,
         content: String,
         isUntrustedData: Bool,
-        artifacts: [ArtifactReference] = []
+        artifacts: [ArtifactReference] = [],
+        nativeToolCall: NativeToolCallContext? = nil
     ) throws {
         guard content.utf8.count <= 8 * 1_024 * 1_024,
               Set(artifacts.map(\.id)).count == artifacts.count
@@ -505,6 +513,10 @@ public struct AgentModelMessage: Hashable, Codable, Sendable {
         if role == .tool, !isUntrustedData {
             throw AgentContractError.invalidName("tool content must be untrusted")
         }
+        guard nativeToolCall == nil || role == .tool else {
+            throw AgentContractError.invalidName("native tool context requires a tool message")
+        }
+        self.nativeToolCall = nativeToolCall
         self.role = role
         self.content = content
         self.isUntrustedData = isUntrustedData
@@ -519,7 +531,8 @@ public struct AgentModelMessage: Hashable, Codable, Sendable {
                 role: container.decode(AgentModelMessageRole.self, forKey: .role),
                 content: container.decode(String.self, forKey: .content),
                 isUntrustedData: container.decode(Bool.self, forKey: .isUntrustedData),
-                artifacts: container.decode([ArtifactReference].self, forKey: .artifacts)
+                artifacts: container.decode([ArtifactReference].self, forKey: .artifacts),
+                nativeToolCall: container.decodeIfPresent(NativeToolCallContext.self, forKey: .nativeToolCall)
             )
         } catch {
             throw DecodingError.dataCorrupted(
@@ -528,7 +541,7 @@ public struct AgentModelMessage: Hashable, Codable, Sendable {
         }
     }
 
-    private enum CodingKeys: String, CodingKey { case role, content, isUntrustedData, artifacts }
+    private enum CodingKeys: String, CodingKey { case role, content, isUntrustedData, artifacts, nativeToolCall }
 }
 
 /// One selected descriptor and the deterministic rationale codes that admitted it.
@@ -830,12 +843,14 @@ public struct AgentModelRequest: Hashable, Codable, Sendable {
             "capabilityVersion": .string(selection.capabilityVersion.description),
             "compiledManifestDigest": .string(compiledManifestDigest.rawValue),
             "messages": .array(messages.map { message in
-                .object([
+                var fields: [String: JSONValue] = [
                     "role": .string(message.role.rawValue),
                     "content": .string(message.content),
                     "untrusted": .bool(message.isUntrustedData),
                     "artifacts": .array(message.artifacts.map(artifactValue)),
-                ])
+                ]
+                if let native = message.nativeToolCall { fields["nativeToolCall"] = native.authorizationValue }
+                return .object(fields)
             }),
             "advertisedTools": .array(advertisedTools.map(descriptorValue)),
             "toolSelection": .object([
@@ -866,6 +881,12 @@ public struct AgentModelRequest: Hashable, Codable, Sendable {
             ]),
             "output": output,
         ])
+        if let effort = generationParameters.reasoningEffort, case .object(var object) = value,
+           case .object(var generation)? = object["generation"] {
+            generation["reasoningEffort"] = .string(effort.rawValue)
+            object["generation"] = .object(generation)
+            return try CanonicalJSON(.object(object))
+        }
         return try CanonicalJSON(value)
     }
 

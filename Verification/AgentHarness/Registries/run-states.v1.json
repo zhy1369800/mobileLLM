@@ -5,8 +5,8 @@
   "registryType": "run-states",
   "completeness": "complete",
   "sourceSpecification": {
-    "path": "spec.md", "sha256": "2835f092c4e44fba517c8e873171c671f8ae52bd64bd2d25e17424dcedf28532",
-    "section": "8", "lineStart": 215, "lineEnd": 312
+    "path": "spec.md", "sha256": "ea6174de90b0faed8ff37f965d26fa2dec631f33de1c0c2c58781b823f8f3217",
+    "section": "8", "lineStart": 222, "lineEnd": 327
   },
   "entries": [
     { "id": "AH-STATE-001", "name": "created", "terminal": false, "resumable": false, "ownsExecutionSlot": false, "allowedUserCommands": ["cancel"], "requirementIDs": ["AH-RUN-001"], "testIDs": ["AHT-RUN-001"] },

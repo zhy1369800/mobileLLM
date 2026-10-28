@@ -121,15 +121,27 @@ public struct SubagentResult: Hashable, Codable, Sendable {
     public let runID: AgentRunID
     public let handleID: AgentExecutionHandleID
     public let outcome: SubagentOutcome
+    /// Cancelled outcomes historically had no usage field. Preserve metered work without changing
+    /// that enum's wire shape; old records omit this field and continue to decode.
+    public let terminalUsage: AgentUsage?
+
+    public var usage: AgentUsage {
+        switch outcome {
+        case .completed(_, let usage), .failed(_, let usage): usage
+        case .cancelled: terminalUsage ?? .zero
+        }
+    }
 
     public init(
         runID: AgentRunID,
         handleID: AgentExecutionHandleID,
-        outcome: SubagentOutcome
+        outcome: SubagentOutcome,
+        terminalUsage: AgentUsage? = nil
     ) {
         self.runID = runID
         self.handleID = handleID
         self.outcome = outcome
+        self.terminalUsage = terminalUsage
     }
 }
 
@@ -194,8 +206,8 @@ public enum DynamicWorkflowChildStatus: String, Hashable, Codable, Sendable {
     case uncertain
 }
 
-/// Inspectable, non-secret child-call projection. Prompts remain digest-only; labels, attempts and
-/// durable identities are sufficient for status inspection and explicit recovery controls.
+/// Public task assignment and durable execution facts. Provider prompts and private reasoning
+/// are never copied into this display snapshot; recorded result bodies are loaded separately.
 public struct DynamicWorkflowChildPresentation: Hashable, Codable, Sendable, Identifiable {
     public var id: WorkflowAgentCallID { callID }
     public let callID: WorkflowAgentCallID
@@ -207,6 +219,20 @@ public struct DynamicWorkflowChildPresentation: Hashable, Codable, Sendable, Ide
     public let handleID: AgentExecutionHandleID?
     public let status: DynamicWorkflowChildStatus
     public let detail: String?
+    public var task: WorkflowTaskDescriptorV1?
+    public var agentType: String?
+    public var executionState: AgentRunState?
+    public var preparedAt: AgentTimestamp?
+    public var submittedAt: AgentTimestamp?
+    public var settledAt: AgentTimestamp?
+    public var usage: AgentUsage?
+    public var hasResult: Bool?
+    public var preparedSequence: UInt64?
+    public var settledSequence: UInt64?
+    public var sessionKey: String?
+    public var profile: WorkflowAgentProfileV1?
+    public var modelName: String?
+    public var toolCallLimit: UInt64?
 
     public init(
         callID: WorkflowAgentCallID,
@@ -217,7 +243,19 @@ public struct DynamicWorkflowChildPresentation: Hashable, Codable, Sendable, Ide
         childRunID: AgentRunID,
         handleID: AgentExecutionHandleID? = nil,
         status: DynamicWorkflowChildStatus,
-        detail: String? = nil
+        detail: String? = nil,
+        task: WorkflowTaskDescriptorV1? = nil,
+        agentType: String? = nil,
+        executionState: AgentRunState? = nil,
+        preparedAt: AgentTimestamp? = nil,
+        submittedAt: AgentTimestamp? = nil,
+        settledAt: AgentTimestamp? = nil,
+        usage: AgentUsage? = nil,
+        hasResult: Bool? = nil,
+        preparedSequence: UInt64? = nil,
+        settledSequence: UInt64? = nil,
+        sessionKey: String? = nil, profile: WorkflowAgentProfileV1? = nil,
+        modelName: String? = nil, toolCallLimit: UInt64? = nil
     ) {
         self.callID = callID
         self.ordinal = ordinal
@@ -228,6 +266,73 @@ public struct DynamicWorkflowChildPresentation: Hashable, Codable, Sendable, Ide
         self.handleID = handleID
         self.status = status
         self.detail = detail
+        self.task = task
+        self.agentType = agentType
+        self.executionState = executionState
+        self.preparedAt = preparedAt
+        self.submittedAt = submittedAt
+        self.settledAt = settledAt
+        self.usage = usage
+        self.hasResult = hasResult
+        self.preparedSequence = preparedSequence
+        self.settledSequence = settledSequence
+        self.sessionKey = sessionKey; self.profile = profile
+        self.modelName = modelName; self.toolCallLimit = toolCallLimit
+    }
+}
+
+/// The initial coordinator is a real run before a workflow script has been prepared.
+public struct WorkflowPlanningPresentation: Hashable, Codable, Sendable {
+    public let runID: AgentRunID
+    public let handleID: AgentExecutionHandleID
+    public let state: AgentRunState
+    public let updatedAt: AgentTimestamp
+
+    public init(runID: AgentRunID, handleID: AgentExecutionHandleID, state: AgentRunState, updatedAt: AgentTimestamp) {
+        self.runID = runID
+        self.handleID = handleID
+        self.state = state
+        self.updatedAt = updatedAt
+    }
+}
+
+/// Presentation contains result identities, never another copy of protected result bodies.
+public struct WorkflowGoalResultLink: Hashable, Codable, Sendable, Identifiable {
+    public let id: String
+    public let taskID: String
+    public let callID: WorkflowAgentCallID
+    public let inputArtifactIDs: [String]
+    public let validationFailure: String?
+    public let review: WorkflowTaskReview?
+    public let reviewStatus: WorkflowReviewStatus?
+    public let reviewToolEvidence: [WorkflowReviewToolEvidence]?
+    public let reviewMissingTools: [String]?
+    public init(_ artifact: WorkflowTaskArtifact) {
+        id = artifact.id; taskID = artifact.taskID; callID = artifact.callID; inputArtifactIDs = artifact.inputArtifactIDs
+        validationFailure = artifact.validationFailure
+        review = artifact.reviewResult?.contract; reviewStatus = artifact.reviewResult?.status
+        reviewToolEvidence = artifact.reviewResult?.toolEvidence; reviewMissingTools = artifact.reviewResult?.missingTools
+    }
+}
+
+public struct WorkflowGoalPresentation: Hashable, Codable, Sendable {
+    public let objective: String
+    public let revision: UInt64
+    public let state: WorkflowGoalState
+    public let reason: String?
+    public let amendments: [WorkflowGoalAmendment]
+    public let tasks: [WorkflowTaskNode]
+    public let results: [WorkflowGoalResultLink]
+    public let budget: AgentBudget
+    public let usage: AgentUsage
+    public let pendingInputs: AgentSessionPendingInputs
+    public let skillNames: [String: String]
+
+    public init(graph: WorkflowTaskGraph, budget: AgentBudget, usage: AgentUsage,
+                pendingInputs: AgentSessionPendingInputs = .init(), skillNames: [String: String] = [:]) {
+        objective = graph.objective; revision = graph.revision; state = graph.state; reason = graph.reason
+        amendments = graph.amendments; tasks = graph.tasks; results = graph.artifacts.map(WorkflowGoalResultLink.init)
+        self.budget = budget; self.usage = usage; self.pendingInputs = pendingInputs; self.skillNames = skillNames
     }
 }
 
@@ -248,6 +353,8 @@ public struct DynamicWorkflowPresentation: Hashable, Codable, Sendable {
     public var childCalls: [DynamicWorkflowChildPresentation]?
     public var reconciliationCallID: WorkflowAgentCallID?
     public var failure: String?
+    public var planning: WorkflowPlanningPresentation?
+    public var goal: WorkflowGoalPresentation?
 
     public init(
         runID: WorkflowRunID,
@@ -261,7 +368,9 @@ public struct DynamicWorkflowPresentation: Hashable, Codable, Sendable {
         totalCallCount: Int = 0,
         childCalls: [DynamicWorkflowChildPresentation] = [],
         reconciliationCallID: WorkflowAgentCallID? = nil,
-        failure: String? = nil
+        failure: String? = nil,
+        planning: WorkflowPlanningPresentation? = nil,
+        goal: WorkflowGoalPresentation? = nil
     ) {
         self.runID = runID
         self.scriptReference = scriptReference
@@ -275,6 +384,8 @@ public struct DynamicWorkflowPresentation: Hashable, Codable, Sendable {
         self.childCalls = childCalls
         self.reconciliationCallID = reconciliationCallID
         self.failure = failure
+        self.planning = planning
+        self.goal = goal
     }
 }
 
@@ -636,78 +747,7 @@ public struct WorkflowPlan: Hashable, Codable, Sendable {
         return try JSONDecoder().decode(WorkflowPlan.self, from: data)
     }
 
-    /// Deterministic fallback used when the planner model cannot produce valid structured output
-    /// (after the runtime's one bounded repair). Guarantees every goal still gets a reviewable
-    /// multi-phase, multi-subagent plan with the full quality loop:
-    /// explore → plan → audit → revise → verify → deliver.
-    public static func fallback(goal: String) throws -> WorkflowPlan {
-        try WorkflowPlan(
-            goal: goal,
-            phases: [
-                WorkflowPhasePlan(
-                    sequence: 1,
-                    title: "Explore",
-                    acceptanceCriteria: "The key facts and constraints are gathered",
-                    childInstructions: [
-                        "Before answering, run EXACTLY 3 different web_search queries with varied "
-                            + "wording, then use fetch_webpage to READ at least 2 of the linked "
-                            + "pages, so you gather the latest facts, specifications, and constraints "
-                            + "about: \(goal). Summarize what you learned with source URLs "
-                            + "(under 300 words).",
-                    ]
-                ),
-                WorkflowPhasePlan(
-                    sequence: 2,
-                    title: "Plan",
-                    acceptanceCriteria: "A concrete step-by-step plan is written from the findings",
-                    childInstructions: [
-                        "Write a concrete, step-by-step plan for: \(goal), citing the gathered facts "
-                            + "and source URLs. Keep it under 300 words.",
-                    ]
-                ),
-                WorkflowPhasePlan(
-                    sequence: 3,
-                    title: "Audit",
-                    acceptanceCriteria: "The plan is audited from multiple angles and findings listed",
-                    childInstructions: [
-                        "Audit the plan for feasibility, cost, memory, and approval risks. List "
-                            + "concrete findings (under 200 words).",
-                        "Audit the plan for runtime, integration, and UX risks. List concrete "
-                            + "findings (under 200 words).",
-                    ]
-                ),
-                WorkflowPhasePlan(
-                    sequence: 4,
-                    title: "Revise",
-                    acceptanceCriteria: "The plan is revised to address every audit finding",
-                    childInstructions: [
-                        "Revise the plan to address every finding from the previous audit phase. "
-                            + "Output the revised plan (under 300 words).",
-                    ]
-                ),
-                WorkflowPhasePlan(
-                    sequence: 5,
-                    title: "Verify",
-                    acceptanceCriteria: "The revised plan is verified against every finding",
-                    childInstructions: [
-                        "Verify the revised plan resolves every audit finding and is complete and "
-                            + "consistent. List any residual gaps or state that verification passed "
-                            + "(under 150 words).",
-                    ]
-                ),
-                WorkflowPhasePlan(
-                    sequence: 6,
-                    title: "Deliver",
-                    acceptanceCriteria: "The final delivery-ready plan is written",
-                    childInstructions: [
-                        "Write the final delivery-ready plan for: \(goal). This is the answer the "
-                            + "user receives. Include the key facts and source URLs gathered by the "
-                            + "earlier phases. Keep it concise (under 400 words).",
-                    ]
-                ),
-            ]
-        )
-    }
+
 }
 
 /// Draft 2020-12 JSON schema for the workflow-planning model output. Fully enforced by the runtime,

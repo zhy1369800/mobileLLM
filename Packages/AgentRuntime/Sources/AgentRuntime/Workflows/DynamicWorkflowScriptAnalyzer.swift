@@ -37,6 +37,10 @@ public struct AnalyzedWorkflowScriptV1: Hashable, Sendable {
     public let instrumentedSource: String
     public let analysisDigest: StableDigest
     public let staticAgentCallSites: UInt32
+    public let staticPhaseCallSites: UInt32
+    public let staticParallelCallSites: UInt32
+    public let explicitlyBudgetedAgentCallSites: UInt32
+    public let hasUnawaitedHostReturnInCatch: Bool
     public let checkpointSites: UInt32
     public let savedWorkflowNames: [String]
 
@@ -46,6 +50,10 @@ public struct AnalyzedWorkflowScriptV1: Hashable, Sendable {
         executableSource: String,
         instrumentedSource: String,
         staticAgentCallSites: UInt32,
+        staticPhaseCallSites: UInt32,
+        staticParallelCallSites: UInt32,
+        explicitlyBudgetedAgentCallSites: UInt32,
+        hasUnawaitedHostReturnInCatch: Bool,
         checkpointSites: UInt32,
         savedWorkflowNames: [String]
     ) {
@@ -54,6 +62,10 @@ public struct AnalyzedWorkflowScriptV1: Hashable, Sendable {
         self.executableSource = executableSource
         self.instrumentedSource = instrumentedSource
         self.staticAgentCallSites = staticAgentCallSites
+        self.staticPhaseCallSites = staticPhaseCallSites
+        self.staticParallelCallSites = staticParallelCallSites
+        self.explicitlyBudgetedAgentCallSites = explicitlyBudgetedAgentCallSites
+        self.hasUnawaitedHostReturnInCatch = hasUnawaitedHostReturnInCatch
         self.checkpointSites = checkpointSites
         self.savedWorkflowNames = savedWorkflowNames
         analysisDigest = StableDigest.fingerprint(
@@ -82,21 +94,43 @@ public struct DynamicWorkflowScriptAnalyzer: Sendable {
         var lexer = JavaScriptLexer(source: body)
         let tokens = try lexer.tokens()
         try Self.rejectForbiddenCapabilities(tokens)
-        try Self.validateAgentOptions(tokens)
+        let explicitlyBudgetedCalls = try Self.validateAgentOptions(tokens)
         let savedWorkflowNames = try Self.savedWorkflowNames(in: tokens)
         let instrumentation = try Self.instrument(source: body, tokens: tokens)
-        let callSites = tokens.reduce(into: UInt32(0)) { count, token in
-            if token.identifier == "agent" { count &+= UInt32(1) }
+        func calls(_ name: String) -> UInt32 {
+            UInt32(tokens.indices.filter {
+                tokens[$0].identifier == name && $0 + 1 < tokens.count && tokens[$0 + 1].symbol == "("
+            }.count)
         }
         return AnalyzedWorkflowScriptV1(
             script: script,
             metadata: extraction.metadata,
             executableSource: body,
             instrumentedSource: instrumentation.source,
-            staticAgentCallSites: callSites,
+            staticAgentCallSites: calls("agent") + calls("spawn"),
+            staticPhaseCallSites: calls("phase"),
+            staticParallelCallSites: calls("parallel"),
+            explicitlyBudgetedAgentCallSites: explicitlyBudgetedCalls,
+            hasUnawaitedHostReturnInCatch: Self.returnsUnawaitedHostCallFromTry(tokens),
             checkpointSites: UInt32(instrumentation.insertions.count),
             savedWorkflowNames: savedWorkflowNames
         )
+    }
+
+    /// Candidate lint for the common `try { return agent(...) } catch` mistake. Returning a
+    /// promise bypasses this catch when it later rejects. Strings/comments are already lexed out.
+    private static func returnsUnawaitedHostCallFromTry(_ tokens: [JSToken]) -> Bool {
+        let asynchronousHosts: Set<String> = ["agent", "spawn", "waitAny", "collaborate", "parallel", "pipeline", "workflow", "webEvidence"]
+        for i in tokens.indices where tokens[i].identifier == "try" {
+            guard i + 4 < tokens.count, tokens[i + 1].symbol == "{",
+                  tokens[i + 2].identifier == "return",
+                  let host = tokens[i + 3].identifier, asynchronousHosts.contains(host),
+                  tokens[i + 4].symbol == "(",
+                  let end = matchingClose(in: tokens, openingAt: i + 1, open: "{", close: "}"),
+                  end + 1 < tokens.count, tokens[end + 1].identifier == "catch" else { continue }
+            return true
+        }
+        return false
     }
 
     private static func savedWorkflowNames(in tokens: [JSToken]) throws -> [String] {
@@ -121,8 +155,9 @@ public struct DynamicWorkflowScriptAnalyzer: Sendable {
     /// expressions, but the options container and every key must be literal. This catches model-
     /// invented fields before the candidate is saved and lets the app's single repair pass correct
     /// them without ever dispatching a child.
-    private static func validateAgentOptions(_ tokens: [JSToken]) throws {
-        for callIndex in tokens.indices where tokens[callIndex].identifier == "agent" {
+    private static func validateAgentOptions(_ tokens: [JSToken]) throws -> UInt32 {
+        var explicitlyBudgetedCalls: UInt32 = 0
+        for callIndex in tokens.indices where ["agent", "spawn"].contains(tokens[callIndex].identifier ?? "") {
             guard callIndex + 1 < tokens.count, tokens[callIndex + 1].symbol == "(" else {
                 continue
             }
@@ -159,8 +194,10 @@ public struct DynamicWorkflowScriptAnalyzer: Sendable {
                     "agent accepts only prompt and options"
                 )
             }
-            try validateAgentOptionObject(tokens, openingAt: optionStart, closingAt: optionEnd)
+            let keys = try validateAgentOptionObject(tokens, openingAt: optionStart, closingAt: optionEnd)
+            if keys.contains("maxToolCalls") { explicitlyBudgetedCalls += 1 }
         }
+        return explicitlyBudgetedCalls
     }
 
     private static func topLevelArgumentSeparator(
@@ -190,7 +227,7 @@ public struct DynamicWorkflowScriptAnalyzer: Sendable {
         _ tokens: [JSToken],
         openingAt opening: Int,
         closingAt closing: Int
-    ) throws {
+    ) throws -> Set<String> {
         var index = opening + 1
         var seen: Set<String> = []
         while index < closing {
@@ -254,6 +291,7 @@ public struct DynamicWorkflowScriptAnalyzer: Sendable {
             }
             if index < closing { index += 1 }
         }
+        return seen
     }
 
     private static let forbiddenIdentifiers: Set<String> = [
@@ -281,6 +319,7 @@ public struct DynamicWorkflowScriptAnalyzer: Sendable {
     ]
 
     private static func rejectForbiddenCapabilities(_ tokens: [JSToken]) throws {
+        let schemaData = literalSchemaTokenIndices(tokens)
         let protectedIntrinsics: Set<String> = [
             "Object", "Array", "Promise", "Map", "JSON", "Math",
         ]
@@ -313,7 +352,7 @@ public struct DynamicWorkflowScriptAnalyzer: Sendable {
                         )
                     }
                     if embedded.contains(where: {
-                        ["agent", "parallel", "pipeline", "workflow", "phase", "log"]
+                        ["agent", "spawn", "waitAny", "collaborate", "parallel", "pipeline", "workflow", "phase", "log", "webEvidence", "unique"]
                             .contains($0.identifier ?? "")
                     }) {
                         throw WorkflowScriptAnalysisError.unsupportedConstruct(
@@ -324,10 +363,13 @@ public struct DynamicWorkflowScriptAnalyzer: Sendable {
             }
             if let string = token.stringValue,
                ["constructor", "prototype", "__proto__"].contains(string)
-                    || forbiddenSynchronousBuiltins.contains(string)
+                    || (forbiddenSynchronousBuiltins.contains(string) && !schemaData.contains(index))
             {
                 throw WorkflowScriptAnalysisError.forbiddenCapability(string)
             }
+            // A fully parsed literal schema contains no expressions, getters, or computed keys.
+            // Names such as `test` in properties/required are data, not RegExp method access.
+            if schemaData.contains(index) { continue }
             guard let identifier = token.identifier else { continue }
             if identifier.hasPrefix("__") {
                 throw WorkflowScriptAnalysisError.forbiddenCapability("reserved runtime binding")
@@ -377,6 +419,22 @@ public struct DynamicWorkflowScriptAnalyzer: Sendable {
                 throw WorkflowScriptAnalysisError.forbiddenCapability("Math.random")
             }
         }
+    }
+
+    private static func literalSchemaTokenIndices(_ tokens: [JSToken]) -> Set<Int> {
+        var result = Set<Int>()
+        var index = 0
+        while index < tokens.count {
+            defer { index += 1 }
+            guard tokens[index].symbol == "{" else { continue }
+            var parser = LiteralParser(tokens: tokens, index: index)
+            guard let value = try? parser.parseValue(depth: 0), case .object(let object) = value,
+                  object["type"] != nil || object["properties"] != nil || object["$schema"] != nil
+            else { continue }
+            result.formUnion(index ..< parser.index)
+            index = parser.index - 1
+        }
+        return result
     }
 
     /// Extracts exactly the JavaScript inside each `${...}` interpolation while ignoring template
@@ -717,6 +775,17 @@ private struct LiteralParser {
         }
         let token = tokens[index]
         if let string = token.stringValue { index += 1; return .string(string) }
+        if case .number(let number) = token.kind {
+            let value = try JSONDecoder().decode(JSONValue.self, from: Data(number.utf8))
+            index += 1
+            return value
+        }
+        if token.symbol == "-", index + 1 < tokens.count,
+           case .number(let number) = tokens[index + 1].kind {
+            let value = try JSONDecoder().decode(JSONValue.self, from: Data(("-" + number).utf8))
+            index += 2
+            return value
+        }
         if token.identifier == "true" { index += 1; return .bool(true) }
         if token.identifier == "false" { index += 1; return .bool(false) }
         if token.identifier == "null" { index += 1; return .null }

@@ -7,7 +7,7 @@ import SQLite3
 /// Single-actor, single-connection canonical journal. Construction is side-effect free; the file is
 /// created only by `openForWrite` or a mutation.
 public actor SQLiteRunJournal: RuntimeRepository {
-    public static let schemaVersion: Int32 = 5
+    public static let schemaVersion: Int32 = 6
     public static let maximumCommandPayloadBytes = 256 * 1_024
 
     private let databaseURL: URL
@@ -163,6 +163,7 @@ public actor SQLiteRunJournal: RuntimeRepository {
             request: mutation.append,
             projectionCommit: nil,
             budgetOperations: mutation.budgetOperations,
+            sessionInputInclusions: mutation.sessionInputInclusions,
             requiresExistingLedger: true
         )
         let ledger = if let committed = result.ledger {
@@ -181,6 +182,9 @@ public actor SQLiteRunJournal: RuntimeRepository {
     public func commitFinalization(
         _ finalization: RuntimeFinalizationCommit
     ) async throws -> RuntimeJournalMutationReceipt {
+        guard finalization.mutation.sessionInputInclusions.isEmpty else {
+            throw RuntimeRepositoryError.invalidSubmission("input inclusion requires a compiled request")
+        }
         let message = finalization.message
         let outbox = finalization.outbox
         let mutation = finalization.mutation
@@ -972,6 +976,7 @@ public actor SQLiteRunJournal: RuntimeRepository {
         request: RunJournalAppendRequest,
         projectionCommit: MessageProjectionCommit?,
         budgetOperations: [BudgetLedgerOperation] = [],
+        sessionInputInclusions: [AgentSessionInputInclusion] = [],
         initialLedger: BudgetLedgerSnapshot? = nil,
         submission: RuntimeSubmissionCommit? = nil,
         requiresExistingLedger: Bool = false
@@ -980,12 +985,16 @@ public actor SQLiteRunJournal: RuntimeRepository {
             throw SQLiteStoreError.invariantViolation("initial ledger cannot also be mutated")
         }
         let db = try writableConnection()
-        let fingerprint = try mutationFingerprint(
+        let baseFingerprint = try mutationFingerprint(
             request,
             projectionCommit: projectionCommit,
             budgetOperations: budgetOperations,
             initialLedger: initialLedger,
             submission: submission
+        )
+        let fingerprint = sessionInputInclusions.isEmpty ? baseFingerprint : StableDigest.fingerprint(
+            domain: "sqlite-run-journal-session-inclusion.v1",
+            components: [Data(baseFingerprint.rawValue.utf8), try encoder.encode(sessionInputInclusions)]
         )
         let identity = mutationKey(request.mutationIdentity)
         try inject(.beforeTransaction)
@@ -1073,6 +1082,11 @@ public actor SQLiteRunJournal: RuntimeRepository {
             throw SQLiteStoreError.invariantViolation("new run must begin at state version one")
         }
 
+        if request.events.contains(where: { $0.payload.event.isRunTerminal && $0.payload.runState == .completed }),
+           let session = try session(for: request.runID, db: db),
+           !session.pendingInstructions(for: request.runID).isEmpty {
+            throw AgentSessionError.pendingInput
+        }
         let projected: AgentRunProjection
         if let prior { projected = try prior.applying(request.events) }
         else {
@@ -1092,6 +1106,19 @@ public actor SQLiteRunJournal: RuntimeRepository {
         if hasStableBoundary { try inject(.beforeStableBoundaryProjection) }
         for envelope in request.events { try insert(envelope, db: db) }
         if hasStableBoundary { try inject(.afterStableBoundaryProjection) }
+        if !sessionInputInclusions.isEmpty {
+            let steps = Set(request.events.compactMap { envelope -> AgentStepID? in
+                if case .compiledManifestCommitted(let step, _) = envelope.payload.event { return step }
+                return nil
+            })
+            guard sessionInputInclusions.allSatisfy({ $0.runID == request.runID && steps.contains($0.stepID) }),
+                  var session = try session(for: request.runID, db: db)
+            else { throw AgentSessionError.invalidHistory }
+            let revision = session.revision
+            session.revision += 1
+            session.inclusions.append(contentsOf: sessionInputInclusions)
+            try appendSession(session, expectedRevision: revision, db: db)
+        }
         try inject(.afterEventInsert)
 
         var resultingLedger = requiredLedger
@@ -1975,7 +2002,7 @@ public actor SQLiteRunJournal: RuntimeRepository {
         }
     }
 
-    private func existingConnection() throws -> SQLiteConnection? {
+    func existingConnection() throws -> SQLiteConnection? {
         if let connection { return connection }
         guard FileManager.default.fileExists(atPath: databaseURL.path) else { return nil }
         let walExists = FileManager.default.fileExists(atPath: databaseURL.path + "-wal")
@@ -1991,7 +2018,7 @@ public actor SQLiteRunJournal: RuntimeRepository {
         return db
     }
 
-    private func writableConnection() throws -> SQLiteConnection {
+    func writableConnection() throws -> SQLiteConnection {
         if let connection, connectionIsWritable { return connection }
         if let connection {
             connection.close()
@@ -2079,7 +2106,9 @@ public actor SQLiteRunJournal: RuntimeRepository {
             throw SQLiteStoreError.corrupt
         }
         let version = Int32(rawVersion)
-        guard version == Self.schemaVersion else { throw SQLiteStoreError.unsupportedSchema(version) }
+        // Version 6 adds session tables only. Existing v5 runs remain readable without creating
+        // files or migrating during observation; the next explicit write performs the upgrade.
+        guard version == 5 || version == Self.schemaVersion else { throw SQLiteStoreError.unsupportedSchema(version) }
     }
 
     private func migrate(_ db: SQLiteConnection, from version: Int32) throws {
@@ -2230,7 +2259,7 @@ public actor SQLiteRunJournal: RuntimeRepository {
         }
     }
 
-    private func inject(_ point: SQLiteJournalFaultPoint) throws {
+    func inject(_ point: SQLiteJournalFaultPoint) throws {
         do { try faultInjector?(point) }
         catch let error as SQLiteStoreError { throw error }
         catch { throw SQLiteStoreError.injected(point) }
@@ -2257,10 +2286,13 @@ public actor SQLiteRunJournal: RuntimeRepository {
         "budget_reservations", "usage_ledger", "external_claims", "external_intents",
         "external_outcomes", "artifact_metadata", "artifact_refs", "artifact_deletion_intents",
         "deletion_intents", "run_submissions", "run_input_snapshots", "budget_ledgers",
-        "run_admissions", "agent_commands",
+        "run_admissions", "agent_commands", "agent_sessions", "agent_session_events", "agent_session_runs",
     ]
 
     private static let schemaStatements: [String] = [
+        "CREATE TABLE IF NOT EXISTS agent_sessions(session_id TEXT PRIMARY KEY, seed_run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE, conversation_id TEXT NOT NULL) STRICT",
+        "CREATE TABLE IF NOT EXISTS agent_session_events(session_id TEXT NOT NULL REFERENCES agent_sessions(session_id) ON DELETE CASCADE, revision INTEGER NOT NULL CHECK(revision > 0), payload BLOB NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(session_id, revision)) STRICT",
+        "CREATE TABLE IF NOT EXISTS agent_session_runs(run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES agent_sessions(session_id) ON DELETE CASCADE) STRICT",
         "CREATE TABLE IF NOT EXISTS runs(run_id TEXT PRIMARY KEY, conversation_id TEXT, request_id TEXT NOT NULL UNIQUE, execution_handle_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL, state_version INTEGER NOT NULL CHECK(state_version > 0), next_sequence INTEGER NOT NULL CHECK(next_sequence > 0), terminal_event_id TEXT UNIQUE, last_digest TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, deletion_blocked INTEGER NOT NULL DEFAULT 0 CHECK(deletion_blocked IN (0,1))) STRICT",
         "CREATE TABLE IF NOT EXISTS events(event_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED, sequence INTEGER NOT NULL CHECK(sequence > 0), state_version INTEGER NOT NULL CHECK(state_version > 0), timestamp INTEGER NOT NULL, record_digest TEXT NOT NULL UNIQUE, previous_digest TEXT, payload_version INTEGER NOT NULL CHECK(payload_version > 0), payload BLOB NOT NULL, is_terminal INTEGER NOT NULL CHECK(is_terminal IN (0,1)), UNIQUE(run_id, sequence)) STRICT",
         "CREATE UNIQUE INDEX IF NOT EXISTS one_terminal_event_per_run ON events(run_id) WHERE is_terminal = 1",

@@ -135,7 +135,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.example.mobileLLMDeviceE2ETests
         SWIFT_VERSION: "6.0"
         TARGETED_DEVICE_FAMILY: "1"
-        SUPPORTED_PLATFORMS: iphoneos
+        SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
     preBuildScripts:
       - name: Embed OpenAI test config
         script: scripts/embed-openai-test-config.sh
@@ -143,12 +143,10 @@ targets:
     dependencies:
       - target: mobileLLM
 
-  # App-level Tool V2 adapter unit tests (AH-TOOLS-005) + lifecycle bridge seams. Hosted on macOS so
-  # the full app module (adapters included) is testable without a booted iOS simulator; the iOS build
-  # path is covered by the generic-device build gate.
+  # App adapters, lifecycle seams and opt-in live workflows use the same host on Mac or Simulator.
   mobileLLMUnitTests:
     type: bundle.unit-test
-    platform: macOS
+    supportedDestinations: [iOS, macOS]
     sources:
       - AppUnitTests
     settings:
@@ -156,9 +154,9 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: com.example.mobileLLMUnitTests
         SWIFT_VERSION: "6.0"
-        # macOS app bundles put the executable under Contents/MacOS; XcodeGen's inferred TEST_HOST
-        # points at the bundle root, which xcodebuild rejects.
-        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/mobileLLM.app/Contents/MacOS/mobileLLM"
+        # Keep the app-unit entry point available both on Simulator and on the native Mac host.
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/mobileLLM.app/mobileLLM"
+        "TEST_HOST[sdk=macosx*]": "$(BUILT_PRODUCTS_DIR)/mobileLLM.app/Contents/MacOS/mobileLLM"
         BUNDLE_LOADER: "$(TEST_HOST)"
     dependencies:
       - target: mobileLLM
@@ -210,8 +208,8 @@ schemes:
       testPlans:
         - path: Verification/AgentHarness/TestPlans/SimulatorCI.xctestplan
           defaultPlan: true
-  # Full clean-install/download/inference matrix. Run only on the connected phone, with one worker and
-  # no randomized ordering because the provisioning phase intentionally creates the model artifacts.
+  # Online scenarios also run on Simulator. The full provisioning/local-weight matrix uses a phone,
+  # one worker, and ordered cases because provisioning intentionally creates the model artifacts.
   DeviceE2E:
     build:
       targets:

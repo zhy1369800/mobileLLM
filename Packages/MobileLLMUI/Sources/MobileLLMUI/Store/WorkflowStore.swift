@@ -30,6 +30,63 @@ public final class WorkflowStore: WorkflowRecording {
     public var dynamicReconcileHandler: (@MainActor (UUID, AgentReconciliationDecision) async throws -> Void)?
     public var dynamicStopHandler: (@MainActor (UUID) async throws -> Void)?
     public var dynamicRestartHandler: (@MainActor (UUID, WorkflowAgentCallID) async throws -> Void)?
+    public var dynamicResultHandler: (@MainActor (UUID, WorkflowAgentCallID) async throws -> String?)?
+    public var savedFilesHandler: (@MainActor (UUID, WorkflowAgentCallID) async throws -> [WorkflowSavedFile])?
+    public var dynamicObserverHandler: (@MainActor (UUID, WorkflowAgentCallID) async throws -> AgentRunStore?)?
+    public var planningObserverHandler: (@MainActor (UUID) async throws -> AgentRunStore?)?
+    public var taskSessionHandler: (@MainActor (UUID, WorkflowAgentCallID) async throws -> AgentSessionView)?
+    public var taskMessageHandler: (@MainActor (UUID, WorkflowAgentCallID, MessageID, String) async throws -> Void)?
+    public var taskSessionResumeHandler: (@MainActor (UUID, WorkflowAgentCallID) async throws -> Void)?
+    public var goalUpdateHandler: (@MainActor (UUID, MessageID, String) async throws -> Void)?
+
+    public func updateGoal(workflowID: UUID, id: MessageID, text: String, resumeAfterSave: Bool) async throws {
+        guard let dynamic = workflows[workflowID]?.dynamic, dynamic.goal != nil,
+              ![.completed, .failed, .cancelled].contains(dynamic.state),
+              !actioningWorkflowIDs.contains(workflowID), let goalUpdateHandler else { throw WorkflowStoreActionError.unavailable }
+        actioningWorkflowIDs.insert(workflowID)
+        defer { actioningWorkflowIDs.remove(workflowID) }
+        try await goalUpdateHandler(workflowID, id, text)
+        if resumeAfterSave {
+            do {
+                guard let dynamicResumeHandler else { throw WorkflowStoreActionError.unavailable }
+                try await dynamicResumeHandler(workflowID)
+            } catch { throw WorkflowStoreActionError.goalSavedCannotResume(error.localizedDescription) }
+        }
+    }
+
+    public func taskSession(workflowID: UUID, callID: WorkflowAgentCallID) async throws -> AgentSessionView {
+        guard workflows[workflowID] != nil, let taskSessionHandler else { throw WorkflowStoreActionError.unavailable }
+        return try await taskSessionHandler(workflowID, callID)
+    }
+
+    public func sendTaskMessage(workflowID: UUID, callID: WorkflowAgentCallID, id: MessageID, text: String) async throws {
+        guard workflows[workflowID] != nil, let taskMessageHandler else { throw WorkflowStoreActionError.unavailable }
+        try await taskMessageHandler(workflowID, callID, id, text)
+    }
+
+    public func resumeTaskSession(workflowID: UUID, callID: WorkflowAgentCallID) async throws {
+        guard workflows[workflowID] != nil, let taskSessionResumeHandler else { throw WorkflowStoreActionError.unavailable }
+        try await taskSessionResumeHandler(workflowID, callID)
+    }
+
+    public func observePlanning(workflowID: UUID) async throws -> AgentRunStore? {
+        guard workflows[workflowID] != nil, let planningObserverHandler else { throw WorkflowStoreActionError.unavailable }
+        return try await planningObserverHandler(workflowID)
+    }
+
+    public func observeTask(workflowID: UUID, callID: WorkflowAgentCallID) async throws -> AgentRunStore? {
+        guard workflows[workflowID] != nil, let dynamicObserverHandler else {
+            throw WorkflowStoreActionError.unavailable
+        }
+        return try await dynamicObserverHandler(workflowID, callID)
+    }
+
+    public func result(workflowID: UUID, callID: WorkflowAgentCallID) async throws -> String? {
+        guard workflows[workflowID] != nil, let dynamicResultHandler else {
+            throw WorkflowStoreActionError.unavailable
+        }
+        return try await dynamicResultHandler(workflowID, callID)
+    }
 
     private let fileURL: URL
     private let encoder: JSONEncoder
@@ -168,6 +225,7 @@ public final class WorkflowStore: WorkflowRecording {
     }
 
     public func save(_ summary: WorkflowSummary) async throws {
+        guard workflows[summary.id] != summary else { return }
         workflows[summary.id] = summary
         if summary.dynamic == nil, summary.status == .running {
             executingWorkflowIDs.insert(summary.id)
@@ -231,6 +289,12 @@ public final class WorkflowStore: WorkflowRecording {
 
 private enum WorkflowStoreActionError: LocalizedError {
     case unavailable
+    case goalSavedCannotResume(String)
 
-    var errorDescription: String? { "This workflow action is unavailable." }
+    var errorDescription: String? {
+        switch self {
+        case .unavailable: "This workflow action is unavailable."
+        case .goalSavedCannotResume(let reason): "Your update is saved. Work could not resume: \(reason)"
+        }
+    }
 }

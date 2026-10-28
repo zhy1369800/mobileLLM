@@ -20,6 +20,8 @@ public struct AgentRunRequestSnapshot: Sendable {
     public let systemPrompt: String
     public let memoryFacts: [MemoryFact]
     public let activeSkill: Skill?
+    /// Built-in packs and the explicitly selected custom pack available to online agent tasks.
+    public let availableSkills: [Skill]
     public let model: LLMModel
     public let variant: LLMVariant
     public let weightsDirectory: URL
@@ -68,6 +70,8 @@ public struct AgentRunRequestSnapshot: Sendable {
     public let approvalMode: AgentApprovalMode
     /// Per-conversation reasoning effort (nil = service default; medium is the product default).
     public let onlineReasoningEffort: ReasoningEffort?
+    public let deepSeekWebServiceID: String?
+    public let executionEnvironment: OpenSandboxConnection?
 
     public init(
         conversationID: UUID,
@@ -105,7 +109,10 @@ public struct AgentRunRequestSnapshot: Sendable {
         onlineOutputBudgetAuto: Bool,
         onlineMaximumOutputTokens: Int?,
         approvalMode: AgentApprovalMode,
-        onlineReasoningEffort: ReasoningEffort?
+        onlineReasoningEffort: ReasoningEffort?,
+        deepSeekWebServiceID: String? = nil,
+        availableSkills: [Skill] = [],
+        executionEnvironment: OpenSandboxConnection? = nil
     ) {
         self.conversationID = conversationID
         self.userTurnID = userTurnID
@@ -115,6 +122,8 @@ public struct AgentRunRequestSnapshot: Sendable {
         self.systemPrompt = systemPrompt
         self.memoryFacts = memoryFacts
         self.activeSkill = activeSkill
+        self.availableSkills = availableSkills
+        self.executionEnvironment = executionEnvironment
         self.model = model
         self.variant = variant
         self.weightsDirectory = weightsDirectory
@@ -143,6 +152,7 @@ public struct AgentRunRequestSnapshot: Sendable {
         self.onlineMaximumOutputTokens = onlineMaximumOutputTokens
         self.approvalMode = approvalMode
         self.onlineReasoningEffort = onlineReasoningEffort
+        self.deepSeekWebServiceID = deepSeekWebServiceID
     }
 }
 
@@ -182,9 +192,8 @@ extension AgentRunRequestSnapshot {
             locationSeamAvailable: locationSeamAvailable,
             mcpToolDescriptors: mcpToolDescriptors,
             webSearchDestinations: webSearchDestinations,
-            // Candidate/repair generation is a pure source-compilation pass. When its caller turns
-            // tools off, discard the conversation policy too; otherwise the frozen manifest could
-            // still advertise policy entries from the parent even though its catalog is empty.
+            // Explicitly disabling tools also discards the conversation policy. Generator-only
+            // suppression is separate: it must preserve the user's policy for delegated work.
             toolPolicy: resolvedToolsEnabled ? toolPolicy : nil,
             onlineModelEnabled: onlineModelEnabled,
             onlineModelID: onlineModelID,
@@ -195,7 +204,10 @@ extension AgentRunRequestSnapshot {
             onlineOutputBudgetAuto: maximumOutputTokens == nil && onlineOutputBudgetAuto,
             onlineMaximumOutputTokens: onlineMaximumOutputTokens,
             approvalMode: approvalMode,
-            onlineReasoningEffort: onlineReasoningEffort
+            onlineReasoningEffort: onlineReasoningEffort,
+            deepSeekWebServiceID: deepSeekWebServiceID,
+            availableSkills: availableSkills,
+            executionEnvironment: executionEnvironment
         )
     }
 }
@@ -327,7 +339,8 @@ struct AppFrozenInputBuilder: Sendable {
     func frozenInputs(
         snapshot: AgentRunRequestSnapshot,
         artifactReferences: [ArtifactReference],
-        historyArtifacts: [UUID: [ArtifactReference]] = [:]
+        historyArtifacts: [UUID: [ArtifactReference]] = [:],
+        suppressModelTools: Bool = false
     ) throws -> FrozenAgentRunInputs {
         let online = Self.isOnline(snapshot: snapshot)
         // Online providers report their own ceilings (200k context); clamping to a local checkpoint's
@@ -361,7 +374,8 @@ struct AppFrozenInputBuilder: Sendable {
             repetitionPenalty: snapshot.repetitionPenalty,
             thinkingMode: thinkingMode,
             seed: nil,
-            outputBudgetMode: outputBudget.mode
+            outputBudgetMode: outputBudget.mode,
+            reasoningEffort: online ? snapshot.onlineReasoningEffort.flatMap { AgentModelReasoningEffort(rawValue: $0.rawValue) } : nil
         )
 
         let baseSystem = try BaseSystemContextSource(
@@ -410,7 +424,9 @@ struct AppFrozenInputBuilder: Sendable {
             memoryAvailable: snapshot.memorySeamAvailable,
             eventSeamAvailable: snapshot.eventSeamAvailable,
             locationSeamAvailable: snapshot.locationSeamAvailable,
-            mcpDescriptors: snapshot.toolsEnabled ? snapshot.mcpToolDescriptors : []
+            mcpDescriptors: snapshot.toolsEnabled ? snapshot.mcpToolDescriptors : [],
+            deepSeekWebServiceID: snapshot.deepSeekWebServiceID,
+            sandboxConnection: snapshot.toolsEnabled ? snapshot.executionEnvironment : nil
         )
         let rawPolicy = try snapshot.toolPolicy ?? ConversationToolPolicy(
             masterEnabled: snapshot.toolsEnabled,
@@ -450,19 +466,23 @@ struct AppFrozenInputBuilder: Sendable {
             // behind exact-approval receipts (web/MCP).
             availableToolCapabilities: AgentCapabilitySet([
                 .networkRead, .localRead, .localWrite, .unknownExternal,
-            ]),
+            ] + (snapshot.executionEnvironment != nil && snapshot.toolsEnabled ? [.codeExecution] : [])),
             activeSkillToolHints: [],
-            explicitlyRequestedToolIDs: [],
+            explicitlyRequestedToolIDs: toolCatalog.descriptors.filter {
+                $0.id.logicalID.providerID == "sandbox" && policy.allowedToolIDs.contains($0.id.logicalID)
+            }.map(\.id.logicalID),
             maximumAdvertisedTools: online ? 16 : 8,
-            contextPolicyVersion: 1,
-            approvalPolicyVersion: 1
+            contextPolicyVersion: 2,
+            approvalPolicyVersion: 1,
+            suppressModelTools: suppressModelTools
         )
     }
 
     func request(
         snapshot: AgentRunRequestSnapshot,
         artifactReferences: [ArtifactReference],
-        responseMessageID: UUID? = nil
+        responseMessageID: UUID? = nil,
+        sandboxWorkspaceID: SandboxWorkspaceHandleID? = nil
     ) throws -> AgentRequest {
         let selection = try selection(snapshot: snapshot)
         let online = Self.isOnline(snapshot: snapshot)
@@ -517,10 +537,15 @@ struct AppFrozenInputBuilder: Sendable {
         if enabledTools.contains("fetch_webpage") {
             // The webpage reader reads user-supplied links: any public https host, enforced by the
             // tool's SSRF guards inside the boundary. http is never covered by this wildcard.
-            ceilingDestinations.append(try ExternalDestination(
-                kind: .networkEndpoint,
-                normalizedIdentity: ExternalDestination.anyHTTPSNetworkEndpoint
-            ))
+            if snapshot.deepSeekWebServiceID != nil {
+                let destination = try AppDeepSeekWebToolAdapter.destination()
+                if !ceilingDestinations.contains(destination) { ceilingDestinations.append(destination) }
+            } else {
+                ceilingDestinations.append(try ExternalDestination(
+                    kind: .networkEndpoint,
+                    normalizedIdentity: ExternalDestination.anyHTTPSNetworkEndpoint
+                ))
+            }
             ceilingDataCategories.append(try AgentDataCategory(rawValue: "web.page"))
         }
         if snapshot.eventSeamAvailable {
@@ -559,10 +584,18 @@ struct AppFrozenInputBuilder: Sendable {
                 normalizedIdentity: stableID.uuidString
             ))
         }
+        var workspaceIDs: [SandboxWorkspaceHandleID] = []
+        if snapshot.toolsEnabled, let environment = snapshot.executionEnvironment {
+            ceilingCapabilities = AgentCapabilitySet(ceilingCapabilities.values + [.codeExecution])
+            ceilingDestinations += [environment.destination] + environment.networkDestinations
+            ceilingDataCategories.append(OpenSandboxConnection.dataCategory)
+            workspaceIDs = [sandboxWorkspaceID ?? SandboxWorkspaceHandleID(rawValue: snapshot.conversationID)]
+        }
         let ceilingAuthority = try AgentAuthorityScope(
             capabilities: ceilingCapabilities,
             destinations: ceilingDestinations,
-            dataCategories: ceilingDataCategories
+            dataCategories: ceilingDataCategories,
+            workspaceIDs: workspaceIDs
         )
         return try AgentRequest(
             id: AgentRequestID(rawValue: UUID()),

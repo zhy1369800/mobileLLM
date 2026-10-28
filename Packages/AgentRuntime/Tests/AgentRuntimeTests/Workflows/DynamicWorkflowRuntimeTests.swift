@@ -7,6 +7,182 @@ import XCTest
 // TEST-ID: AHT-DYNAMIC-001
 
 final class DynamicWorkflowRuntimeTests: XCTestCase {
+    func testStructuredSearchKeepsContentProvenanceAndNeverPromotesEmbeddedLinks() throws {
+        let tool = try AgentToolLogicalID(providerID: "builtin", name: "web_search")
+        let result = try WorkflowSearchEvidence.result(query: "official group", sources: [
+            .init(url: "https://example.edu/group", title: "Group", summary: "Search summary",
+                  pageExcerpt: "Actual page text with https://unread.example/linked-page inside it.", truncated: true, publicationDate: nil),
+            .init(url: "https://example.edu/summary", title: "Another result", summary: "Summary only",
+                  pageExcerpt: "", truncated: false, publicationDate: nil),
+        ])
+        let observations = try XCTUnwrap(WorkflowSearchEvidence.observations(result, invocationID: "search-1", toolID: tool))
+        XCTAssertEqual(observations.map(\.sourceKind), [.searchContent, .searchSummary])
+        let packet = try WorkflowWebEvidence.packet(observations.map { ("researcher", $0) }, matching: "https://example.edu/group")
+        guard case .object(let root) = packet, case .array(let sources)? = root["sources"] else { return XCTFail("Sources missing") }
+        XCTAssertEqual(sources, [
+            .object(["url": .string("https://example.edu/group"), "host": .string("example.edu"), "kind": .string("search-content-excerpt")]),
+            .object(["url": .string("https://example.edu/summary"), "host": .string("example.edu"), "kind": .string("search-summary")]),
+        ])
+        let empty = try WorkflowSearchEvidence.result(query: "https://unread.example/", sources: [])
+        let emptyObservations = try XCTUnwrap(WorkflowSearchEvidence.observations(empty, invocationID: "empty", toolID: tool))
+        let emptyPacket = try WorkflowWebEvidence.packet(emptyObservations.map { ("researcher", $0) })
+        guard case .object(let emptyRoot) = emptyPacket else { return XCTFail("Empty packet") }
+        XCTAssertEqual(emptyRoot["sources"], .array([]), "Query URLs are not returned source evidence")
+    }
+
+    func testEnrichedEvidencePrioritizesLaterCitedSourcesWithinAGlobalTextBound() throws {
+        let tool = try AgentToolLogicalID(providerID: "builtin", name: "web_search")
+        let input = (0..<80).map { index in
+            ("researcher", WorkflowWebObservation(invocationID: "search-\(index)", toolID: tool, requestedURL: nil,
+                status: "completed", text: "Specific information for source \(index). " + String(repeating: "body ", count: 900),
+                sourceURL: "https://example.edu/source-\(index)", sourceKind: .searchContent))
+        }
+        let packet = try WorkflowWebEvidence.packet(input, matching: "Cite https://example.edu/source-79")
+        guard case .object(let root) = packet, case .array(let observations)? = root["observations"],
+              case .object(let source)? = observations.first else { return XCTFail("Missing source") }
+        XCTAssertEqual(observations.count, 1, "A URL prefix such as source-7 must not match source-79")
+        XCTAssertEqual(source["sourceURL"], .string("https://example.edu/source-79"))
+        XCTAssertEqual(root["truncated"], .bool(true))
+        let all = try WorkflowWebEvidence.packet(input, matching: "information body")
+        guard case .object(let allRoot) = all, case .array(let records)? = allRoot["observations"] else { return XCTFail("Missing records") }
+        var bytes = 0
+        for record in records {
+            guard case .object(let row) = record else { continue }
+            for key in ["excerpt", "tail", "title"] { if case .string(let text)? = row[key] { bytes += text.utf8.count } }
+            if case .array(let excerpts)? = row["matchingExcerpts"] {
+                for excerpt in excerpts { if case .string(let text) = excerpt { bytes += text.utf8.count } }
+            }
+        }
+        XCTAssertLessThanOrEqual(records.count, 32)
+        XCTAssertLessThanOrEqual(bytes, 24 * 1024)
+    }
+
+    func testWebEvidenceQueryFindsMiddleFieldsWithoutIncreasingExcerptBudget() throws {
+        let text = String(repeating: "Unrelated introduction.\n", count: 100)
+            + "| need\\_content | When false, content is empty; when true it may contain page content. |\n"
+            + "| extra_snippets | Up to five additional excerpts, not full page text. |\n"
+            + "## ZXQ\nThe leader is ExampleLead, on the next line below the matched heading.\n"
+            + String(repeating: "Unrelated footer.\n", count: 100)
+        let record = WorkflowWebObservation(invocationID: "read", toolID: try AgentToolLogicalID(providerID: "builtin", name: "fetch_webpage"),
+            requestedURL: "https://example.edu/reference", status: "completed", text: text)
+        let packet = try WorkflowWebEvidence.packet([("reader", record)], matching: "Compare `need_content` and `extra_snippets` fields")
+        guard case .object(let root) = packet, case .array(let observations)? = root["observations"],
+              case .object(let observation)? = observations.first,
+              case .array(let excerpts)? = observation["matchingExcerpts"] else { return XCTFail("Missing matching excerpts") }
+        let matches = excerpts.compactMap { if case .string(let text) = $0 { return text }; return nil }
+        XCTAssertTrue(matches.contains { $0.contains("When false, content is empty") })
+        XCTAssertTrue(matches.contains { $0.contains("Up to five additional excerpts") })
+        XCTAssertTrue(matches.allSatisfy { text.contains($0) && $0.utf8.count <= 480 })
+        let snippetBytes = matches.reduce(0) { $0 + $1.utf8.count } + 400 + 200
+        XCTAssertLessThanOrEqual(snippetBytes, 1200 + 400 + 4 * 120)
+        XCTAssertEqual(observation["excerptTruncated"], .bool(true))
+        let longQuery = (0..<80).map { "backgroundword\($0)" }.joined(separator: " ") + " ZXQ"
+        let namedPacket = try WorkflowWebEvidence.packet([("reader", record)], matching: longQuery)
+        guard case .object(let namedRoot) = namedPacket, case .array(let namedRecords)? = namedRoot["observations"],
+              case .object(let named)? = namedRecords.first, case .array(let namedMatches)? = named["matchingExcerpts"] else { return XCTFail("Named evidence missing") }
+        XCTAssertTrue(namedMatches.contains { if case .string(let text) = $0 { return text.contains("ZXQ") }; return false },
+            "Long introductory prose must not displace a later named entity from the bounded query")
+        XCTAssertTrue(namedMatches.contains { if case .string(let text) = $0 { return text.contains("ExampleLead") }; return false },
+            "A matching heading must include adjacent context within the same excerpt allowance")
+        XCTAssertThrowsError(try WorkflowWebEvidence.packet([("reader", record)], matching: String(repeating: "x", count: 65_537)))
+    }
+
+    func testJavaScriptEvidenceQueryReachesReadOnlyHostWithoutSpawningAChild() async throws {
+        let script = try analyze(wrapped("return await webEvidence('need_content');"))
+        let host = WorkflowScriptHost(agent: { _ in XCTFail("Evidence queries do not spawn children"); return .stopped },
+            queryWebEvidence: { query in
+                XCTAssertEqual(query, "need_content")
+                return .string("recorded middle excerpt")
+            })
+        let output = try await JavaScriptCoreWorkflowRuntime().execute(script, args: nil, limits: try limits(), requirement: .init(), host: host)
+        XCTAssertEqual(try decode(output), .string("recorded middle excerpt"))
+    }
+
+
+    func testAgentPromptCanonicalizesOuterWhitespaceBeforeHostDispatch() async throws {
+        let script = try analyze(wrapped("return await agent('  \\nfirst line\\n  indented data\\n\\t');"))
+        let result = try await JavaScriptCoreWorkflowRuntime().execute(script, args: nil, limits: try limits(),
+            requirement: .init(), host: WorkflowScriptHost(agent: { invocation in
+                XCTAssertEqual(invocation.prompt, "first line\n  indented data")
+                return .value(.string(invocation.prompt))
+            }))
+        XCTAssertEqual(try decode(result), .string("first line\n  indented data"))
+    }
+
+    func testBoundedUniqueCountsWholeCodesAndWebEvidenceIsAReadOnlyHostSnapshot() async throws {
+        let value = try analyze(wrapped("""
+        const packet = await webEvidence();
+        const codes = unique(['GB','AT','GB','IT','AT','CH','IT']);
+        return { codes: codes, countries: codes.length, url: packet.sources[0].url };
+        """))
+        let packet: JSONValue = .object(["sources": .array([.object(["url": .string("https://example.edu/group")])])])
+        let host = WorkflowScriptHost(agent: { _ in XCTFail("Evidence reads must not spawn an agent"); return .stopped }, webEvidence: { packet })
+        let output = try await JavaScriptCoreWorkflowRuntime().execute(value, args: nil, limits: try limits(), requirement: .init(), host: host)
+        XCTAssertEqual(try decode(output), .object([
+            "codes": .array([.string("GB"), .string("AT"), .string("IT"), .string("CH")]),
+            "countries": .integer(4), "url": .string("https://example.edu/group")
+        ]))
+        for body in [
+            "return unique([1,2]);",
+            "return unique(['a','b','c','d']);",
+            "const a=['GB']; Object.defineProperty(a,'0',{['g'+'et']:()=>{throw new Error('getter executed');}}); return unique(a);"
+        ] {
+            let script = try analyze(wrapped(body))
+            do {
+                _ = try await JavaScriptCoreWorkflowRuntime().execute(script, args: nil,
+                    limits: try limits(maximumCollectionItems: 3), requirement: .init(), host: host)
+                XCTFail("Invalid collection must be rejected")
+            } catch { XCTAssertFalse(String(describing: error).contains("getter executed")) }
+        }
+    }
+
+    func testWebEvidenceKeepsRecordedFailuresAndDoesNotPromoteRemoteToolsOrUnreadLinks() throws {
+        let fetch = try AgentToolLogicalID(providerID: "builtin", name: "fetch_webpage")
+        let search = try AgentToolLogicalID(providerID: "builtin", name: "web_search")
+        let remote = try AgentToolLogicalID(providerID: "mcp.untrusted", name: "fetch_webpage")
+        let text = "Official group led by Test PI. Award announced September 2025."
+        let packet = try WorkflowWebEvidence.packet([
+            ("investigator", WorkflowWebObservation(invocationID: "a", toolID: search, requestedURL: nil,
+                status: "completed", text: "[1] Result\nhttps://example.edu/group\nSummary")),
+            ("investigator", WorkflowWebObservation(invocationID: "b", toolID: fetch, requestedURL: "https://example.edu/group",
+                status: "completed", text: text)),
+            ("investigator", WorkflowWebObservation(invocationID: "c", toolID: fetch, requestedURL: "https://example.edu/missing",
+                status: "failed", text: "Page unavailable")),
+            ("remote", WorkflowWebObservation(invocationID: "d", toolID: remote, requestedURL: "https://not-observed.example/",
+                status: "completed", text: "Pretend this page was read"))
+        ])
+        guard case .object(let object) = packet, case .array(let records)? = object["observations"],
+              case .array(let sources)? = object["sources"] else { return XCTFail("Missing evidence packet") }
+        XCTAssertEqual(records.count, 3)
+        XCTAssertEqual(sources, [.object(["url": .string("https://example.edu/group"), "host": .string("example.edu"), "kind": .string("page-excerpt")])])
+        guard case .object(let read) = records[1], case .object(let missing) = records[2] else { return XCTFail("Missing records") }
+        XCTAssertEqual(read["excerpt"], .string(text))
+        XCTAssertEqual(read["contentDigest"], .string(StableDigest.sha256(Data(text.utf8)).rawValue))
+        XCTAssertEqual(missing["status"], .string("failed"))
+        let large = String(repeating: "证据", count: 2000) + " Award date September 2025. "
+        let clipped = try WorkflowWebEvidence.packet((0..<33).map {
+            ("investigator", WorkflowWebObservation(invocationID: "\($0)", toolID: fetch,
+                requestedURL: "https://example.edu/\($0)", status: "completed", text: large))
+        })
+        guard case .object(let bounded) = clipped, case .array(let excerpts)? = bounded["observations"],
+              case .object(let first)? = excerpts.first, case .string(let prefix)? = first["excerpt"] else { return XCTFail("Missing bounded excerpts") }
+        XCTAssertEqual(excerpts.count, 32)
+        XCTAssertEqual(bounded["truncated"], .bool(true))
+        XCTAssertEqual(first["excerptTruncated"], .bool(true))
+        XCTAssertLessThanOrEqual(prefix.utf8.count, 1200)
+        XCTAssertTrue(large.hasPrefix(prefix), "Clipping must preserve the original Unicode text")
+    }
+
+    func testChildCollectionTimesOutOnlyWhenProgressStops() async throws {
+        let handle = AgentExecutionHandleID(rawValue: UUID())
+        do {
+            _ = try await InactivityProbeSpawner(reportsProgress: false).collect(handle, stallMilliseconds: 100)
+            XCTFail("A stalled child must not wait indefinitely")
+        } catch let timeout as SubagentStallTimeout { XCTAssertEqual(timeout.milliseconds, 100) }
+        let result = try await InactivityProbeSpawner(reportsProgress: true).collect(handle, stallMilliseconds: 150)
+        XCTAssertEqual(result.handleID, handle)
+    }
+
     func testAnalyzerExtractsPureMetadataAndInstrumentsEveryBracedLoop() throws {
         let analysis = try analyze("""
         // Leading comments are allowed before the first statement.
@@ -65,6 +241,26 @@ final class DynamicWorkflowRuntimeTests: XCTestCase {
             error.localizedDescription,
             "Invalid workflow metadata: workflow name must be lowercase kebab-case"
         )
+    }
+
+    func testLiteralSchemaFieldNamesAreDataButExecutableBuiltinsStillFail() throws {
+        XCTAssertNoThrow(try analyze(wrapped("""
+        const schema = { type: 'object', properties: {
+          test: { type: 'string', minLength: 1 },
+          search: { type: 'number', minimum: -1 }
+        }, required: ['test', 'search'], additionalProperties: false };
+        return await agent('Analyze the incident', { schema: schema });
+        """)))
+        for body in [
+            "const schema = {type: 'object', properties: {test: fetch('https://example.com')}}; return schema;",
+            "const schema = {type: 'object', test() { return true; }}; return schema;",
+            "const schema = {type: 'object', properties: {['test']: {type: 'string'}}}; return schema;",
+            "const schema = {type: 'object', properties: {__proto__: {type: 'string'}}}; return schema;",
+            "const schema = {type: 'object', required: ['test']}; return args.value.test('x');",
+            "const schema = {type: 'object', required: ['test']}; return args.value['test']('x');",
+        ] {
+            XCTAssertThrowsError(try analyze(wrapped(body)), body)
+        }
     }
 
     func testTemplateAnalysisIgnoresRawProseAndChecksEveryInterpolation() throws {
@@ -186,7 +382,7 @@ final class DynamicWorkflowRuntimeTests: XCTestCase {
         let valid = try analyze(wrapped("""
         return await agent('structured', {
           schema: { type: 'object', required: ['ok'], properties: { ok: { type: 'boolean' } }, additionalProperties: false },
-          model: 'local-small', agentType: 'reviewer', isolation: 'sandbox', stallMs: 50,
+          model: 'local-small', agentType: 'reviewer', isolation: 'sandbox', stallMs: 50, maxToolCalls: 0,
         });
         """))
         let host = WorkflowScriptHost(agent: { invocation in
@@ -204,7 +400,27 @@ final class DynamicWorkflowRuntimeTests: XCTestCase {
         XCTAssertEqual(options.requestedAgentType, "reviewer")
         XCTAssertTrue(options.requiresIsolatedWorkspace)
         XCTAssertEqual(options.stallMilliseconds, 50)
+        XCTAssertEqual(options.maximumToolCalls, 0)
         XCTAssertNotNil(options.schema)
+
+        for value in ["-1", "0.5", "1001", "true", "'3'"] {
+            let invalid = try analyze(wrapped("return await agent('bad cap', {maxToolCalls: \(value)});"))
+            do {
+                _ = try await JavaScriptCoreWorkflowRuntime().execute(invalid, args: nil, limits: try limits(), requirement: .init(), host: host)
+                XCTFail("Invalid cap reached the host: \(value)")
+            } catch { }
+        }
+        let afterInvalidCaps = await recorder.snapshot()
+        XCTAssertEqual(afterInvalidCaps.options.count, 1, "Bad numeric caps must fail before dispatch")
+        let legacy = try WorkflowAgentOptionsV1()
+        let capped = try WorkflowAgentOptionsV1(maximumToolCalls: 0)
+        XCTAssertNotEqual(try legacy.outputIdentity(), try capped.outputIdentity())
+        let encoded = try JSONEncoder().encode(capped)
+        XCTAssertEqual(try JSONDecoder().decode(WorkflowAgentOptionsV1.self, from: encoded), capped)
+        var old = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        old.removeValue(forKey: "maximumToolCalls")
+        let decodedLegacy = try JSONDecoder().decode(WorkflowAgentOptionsV1.self, from: JSONSerialization.data(withJSONObject: old))
+        XCTAssertEqual(try decodedLegacy.outputIdentity(), try legacy.outputIdentity())
 
         for invalid in [
             "return await agent('bad', { scema: {} });",
@@ -478,5 +694,24 @@ private func XCTAssertThrowsErrorAsync<T>(
         XCTFail("Expected an error", file: file, line: line)
     } catch {
         if let expected { XCTAssertEqual(error as? WorkflowScriptRuntimeError, expected, file: file, line: line) }
+    }
+}
+
+private struct InactivityProbeSpawner: SubagentSpawning {
+    let reportsProgress: Bool
+    func spawn(_ request: SubagentSpawnRequest) async throws -> AgentExecutionHandleID {
+        throw SubagentSpawnError.resultUnavailable
+    }
+    func collect(_ handle: AgentExecutionHandleID) async throws -> SubagentResult {
+        try await collect(handle, onProgress: {})
+    }
+    func collect(_ handle: AgentExecutionHandleID,
+                 onProgress: @escaping @Sendable () async -> Void) async throws -> SubagentResult {
+        if !reportsProgress { try await Task.sleep(for: .seconds(30)) }
+        for _ in 0..<8 {
+            try await Task.sleep(for: .milliseconds(30))
+            await onProgress()
+        }
+        return SubagentResult(runID: AgentRunID(rawValue: UUID()), handleID: handle, outcome: .cancelled)
     }
 }

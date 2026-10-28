@@ -171,7 +171,9 @@ struct ExecutorTestHarness {
         repositoryFactory: ((SQLiteRunJournal) -> any RuntimeRepository)? = nil,
         parallelToolBatchLimit: UInt16 = 1,
         localOnly: Bool = true,
-        approvalMode: AgentApprovalMode = .ask
+        approvalMode: AgentApprovalMode = .ask,
+        conversation: [ConversationTurnContextSource] = [],
+        skillCatalog: [WorkflowSkillDefinition] = []
     ) throws {
         self.model = model
         let runID = ExecutorTestID.run(offset)
@@ -215,6 +217,7 @@ struct ExecutorTestHarness {
                 revision: "executor-test-v1",
                 content: "Follow the user's instructions and return one normalized action."
             ),
+            conversation: conversation,
             currentUser: CurrentUserContextSource(
                 userTurnID: userTurnID,
                 revision: "executor-test-v1",
@@ -231,7 +234,8 @@ struct ExecutorTestHarness {
             availableToolCapabilities: availableToolCapabilities,
             explicitlyRequestedToolIDs: explicitlyRequestedToolIDs,
             contextPolicyVersion: 1,
-            approvalPolicyVersion: 1
+            approvalPolicyVersion: 1,
+            skillCatalog: skillCatalog
         )
 
         let unique = "\(offset)-\(UUID().uuidString)"
@@ -1050,7 +1054,8 @@ struct ExecutorTestToolDefinition: Sendable {
         retryPolicy: ExternalRetryPolicy = .never,
         idempotency: ExternalIdempotency = .pureRead,
         supportsProgress: Bool = false,
-        destinationKind: ExternalDestination.Kind? = nil
+        destinationKind: ExternalDestination.Kind? = nil,
+        providerID: String = "executor-test"
     ) throws {
         let input = try JSONSchemaDocument(
             root: .object([
@@ -1060,7 +1065,7 @@ struct ExecutorTestToolDefinition: Sendable {
                 "additionalProperties": .bool(false),
             ])
         )
-        let logicalID = try AgentToolLogicalID(providerID: "executor-test", name: name)
+        let logicalID = try AgentToolLogicalID(providerID: providerID, name: name)
         let required = AgentCapabilitySet(effect.minimumCapability.map { [$0] } ?? [])
         descriptor = try AgentToolDescriptor(
             id: AgentToolDescriptorID(

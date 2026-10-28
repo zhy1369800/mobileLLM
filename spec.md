@@ -1,29 +1,30 @@
 # iOS Agent Harness Specification
 
-**Status:** Dynamic Workflows implementation and consolidated audit remediation complete; physical-device release matrix pending
+**Status:** Durable agents, Dynamic Workflows, and production Memory integration implemented; release evidence remains open
 
-**Date:** 2026-08-09
+**Date:** 2026-10-27
 
 **Scope:** Full-featured iOS agent harness, local-first with optional online providers
 
-**Out of scope:** the private Agent Sandbox Runtime implementation, visual graph editing, and remote/cross-device execution
+**Out of scope:** the private Agent Sandbox Runtime implementation, visual graph editing, and remote/cross-device agent orchestration
 
 ## 1. Executive summary
 
 mobileLLM is evolving from an in-process chat tool loop into a durable, policy-driven iOS agent runtime.
-The current release includes a complete root-agent harness, bounded child runs, staged workflows, and the P0
-Claude-style Dynamic Workflows runtime specified in §34. It must reliably execute
+The current implementation includes the root-agent harness, bounded child runs, legacy staged workflows, and the
+Dynamic Workflows runtime specified in §34. Section 33 records remaining integration gaps; implementation does not
+mean release acceptance. The harness must reliably execute
 multi-step model and tool interactions, request user input and approval, survive interruption, manage local-model
 resources, preserve a complete operational record, and remain responsive in the existing unified chat UI.
 
 The current release is local-first, supports explicitly configured online providers, and retains the iOS 17 target.
 Local and online providers share run semantics. The runtime implements bounded subagents and reserves a seam
 for a separately developed, commercial Agent Sandbox Runtime, without linking or imitating that
-private runtime today.
+private runtime today. An optional OpenSandbox HTTP adapter executes isolated guest code on a user-configured server.
 
 iOS is the product and acceptance scope. Because the repository shares packages and `ChatStore` with macOS, the
 MLX-free runtime must continue to compile on macOS and existing Mac chat behavior must not regress; Mac-specific agent
-features and sandbox integration are not part of this release.
+features beyond the shared runtime remain outside the acceptance scope. The optional execution adapter uses the same HTTP contract on both platforms.
 
 The staged workflow orchestrator and Dynamic Workflows runtime both coordinate bounded instances of the same
 `AgentExecutor`. The former remains a compatibility path; the latter executes analyzed, approved JavaScript
@@ -44,8 +45,8 @@ The following decisions are requirements, not open questions:
    and budgets. Recursive self-delegation and unbounded agent teams are prohibited.
 6. Chat and agent execution share one UI. Simple answers remain visually simple; execution detail is progressively
    disclosed when a run performs work.
-7. The open-source target exposes a versioned Agent Sandbox API but includes no sandbox implementation. A future
-   private module may supply that implementation through dependency injection.
+7. AgentSandboxAPI remains implementation-neutral. AgentRuntime includes an optional OpenSandbox HTTP provider;
+   a future private iOS runtime can use the same seam. No host shell or private-runtime implementation ships in the app.
 8. A bounded staged workflow orchestrator remains for compatibility. Full Dynamic Workflows use the Claude-style
    JavaScript ABI in §34, saved immutable versions, durable replay, and one fair parallel-subagent scheduler.
 9. App launch must not load a model, reopen the previous conversation, or silently resume a suspended run. Pending
@@ -103,7 +104,7 @@ The current release must not implement:
 - recursive delegation, unbounded agent teams, or child-created approval authority;
 - parallel local-model decoding presented as parallel agents;
 - silent cloud fallback or online requests outside the prepared authorization boundary;
-- the commercial Agent Sandbox Runtime or a production substitute for it;
+- the commercial Agent Sandbox Runtime, an embedded iOS VM, or a host-shell substitute for isolation;
 - arbitrary shell, process, or unrestricted filesystem access;
 - cross-device task distribution or synchronization;
 - KV-cache serialization as a recovery mechanism;
@@ -124,23 +125,27 @@ The existing system has valuable components that must be preserved:
 - `ConversationStore`, `DurableStore`, `MemoryStore`, and attachment persistence already establish defensive local
   storage patterns.
 
-The migration must address these limitations:
+The migration originally addressed these limitations of the legacy path, which remains for tests and previews:
 
-- `ChatStore.startGeneration` currently owns UI state, context construction, memory injection, tool assembly,
+- Legacy `ChatStore.startGeneration` owns UI state, context construction, memory injection, tool assembly,
   execution, recovery, and persistence.
 - `ToolLoop` holds its run state only in local variables and cannot resume after process loss.
 - `Tool.execute(argumentsJSON:) -> String` cannot express typed errors, progress, effects, approvals, deadlines,
   artifacts, or idempotency.
 - the current schema model loses nested JSON Schema structure, especially for MCP tools;
 - conversation persistence stores only the final message and a flattened tool history, not an execution journal;
-- app backgrounding currently unloads the resident model without a durable agent checkpoint protocol.
+- the original background path unloaded the resident model without a durable agent checkpoint protocol.
+
+Production sends now use frozen requests, `DurableAgentExecutor`, and journal/outbox projections.
+The 2026-10-22 correction applies Memory controls, relevance ranking, and committed-store freshness
+at app-side frozen-input construction; see §33.
 
 The migration must preserve current user data and ordinary chat behavior. It must not require a destructive
 conversation migration.
 
 ## 6. Target package boundaries
 
-The implementation should introduce three small MLX-free packages and keep platform implementations injectable.
+The implementation uses three MLX-free agent packages with injectable platform implementations.
 
 ### 6.1 `AgentContracts`
 
@@ -301,6 +306,7 @@ A run terminates with exactly one reason:
 
 ```text
 completed
+completedWithFailures
 cancelledByUser
 budgetExceeded
 noProgress
@@ -311,6 +317,10 @@ contextUnsatisfiable
 externalResultUncertain
 internalFailure
 ```
+
+`completedWithFailures` means a final answer was committed after one or more intermediate tool failures.
+The UI presents it as "Completed with issues"; it does not authorize continuation past an unresolved
+external effect.
 
 Nonterminal waits (`waitingForApproval`, `waitingForUser`, `waitingForForeground`, `waitingForReconciliation`, and
 `paused`) remain resumable. Background expiration normally transitions to `waitingForForeground`; it is not itself a
@@ -412,32 +422,33 @@ on platform encryption and key destruction.
 
 ## 10. Model-provider abstraction
 
-The first implementation adapts the current local `LLMEngine` into `AgentModelProvider`.
+Local `LLMEngine` adapters and the online provider both implement the `AgentModelProvider` boundary.
 
 ```swift
 protocol AgentModelProvider: Sendable {
     var descriptor: AgentModelProviderDescriptor { get }
-    func capabilities(for model: AgentModelSelection) async -> AgentModelCapabilities
+    func capabilities(for selection: AgentModelSelection) async throws -> AgentModelCapabilities
     func prepare(
         _ request: AgentModelRequest,
         context: ModelPreparationContext
     ) async throws -> PreparedModelRequest
     func generate(
-        _ request: AuthorizedModelRequest
-    ) -> AsyncThrowingStream<AgentModelEvent, Error>
+        _ request: AgentModelRequest,
+        emitter: AgentModelBoundaryEmitter
+    ) async throws -> AgentModelBoundaryCompletion
 }
 ```
 
 `capabilities(for:)` and `prepare` may read only local registered or cached metadata; they perform no network or
 private-data access. A future capability refresh is itself a separately prepared external operation.
 
-`PreparedModelRequest` contains the immutable compiled-request manifest plus an `ExternalOperationPlan`. A local
-provider produces a `localPure` plan with no approval requirement. A future online provider's plan declares its exact
-endpoint and redirect bounds, provider/model, prompt and artifact data categories or payload digests, maximum request
-and response bytes, retention-policy metadata, and credential reference. Only `ApprovalPolicyEngine` can construct
-`AuthorizedModelRequest`, binding authorization to the plan hash. `generate` may transmit or process only that bound
-request; any expansion requires a new plan and approval. This makes online-provider support an additive adapter rather
-than a future breaking change to the provider contract.
+`PreparedModelRequest` binds the exact model request and its compiled-manifest digest to an
+`ExternalOperationPlan`. Local providers use a `localPure` plan; online providers declare their scoped
+destination, payload/data category, byte limits, timeout, and effects. The runtime binds policy authorization
+into `AuthorizedModelRequest`. `AgentModelExecutor` creates the gate-owned emitter only inside
+`performGenerationBoundary`, after current authorization checks. The provider receives that emitter rather
+than an authorization bearer. Events and byte accounting stay within the bound operation, and any expansion
+requires a new prepare/approval transaction.
 
 Capabilities include:
 
@@ -475,7 +486,7 @@ request manifests; rerunning stochastic inference is not promised to reproduce i
 Tool dialect parsing is an adapter concern. The run state machine does not contain model-family conditionals.
 
 Provider and model selection are pinned for the run. The first release must never fall back from a local model to an
-online provider. A future online provider requires explicit setup, Keychain-backed credentials, provider-specific
+online provider. An online provider requires explicit setup, Keychain-backed credentials, provider-specific
 data-egress consent, and a visible run snapshot of what may leave the device.
 
 ## 11. Single-model resource arbitration
@@ -490,13 +501,14 @@ The current invariant of at most one resident local engine remains authoritative
 - foreground/background transitions;
 - thermal and memory-pressure policy;
 - expensive model switching;
-- future independent provider lanes.
+- independent online-provider lanes within the same admitted root family.
 
 Bounded independent tool calls may execute concurrently, but multiple local decodes are never presented as physically
-parallel on iPhone. Future versions may add logically concurrent subagents, but every
+parallel on iPhone. Subagent scheduling is logically concurrent and online sibling requests can overlap, while every
 local model pass remains queued through the single decode lane.
 
-Across the app, only one root run may own the actively progressing execution slot. Waiting, paused, and reconciliation
+Across the app, only one root family may actively progress. `RunGroupAdmission` admits bounded sibling lanes
+for that root; unrelated roots wait. Waiting, paused, and reconciliation
 runs own no model lease and may coexist durably. Starting or resuming another run either queues it or requires an
 explicit user switch; it never silently preempts the current owner. Approving or responding to a waiting older run
 makes that run eligible to continue but does not steal the slot from a newer owner.
@@ -718,13 +730,13 @@ Examples:
 - app-owned Memory is `localRead`/`localWrite` and remains separately gated by the Memory setting;
 - web, Wikipedia, webpage fetch, and remote MCP reads are `networkRead`;
 - calendar, reminders, location, Photos, and user-selected documents cross a user/system data boundary;
-- future online inference is a data-egress operation even if the model performs no tool call;
+- online inference is a data-egress operation even if the model performs no tool call;
 - deletion, publication, payment, and messages to third parties use the strongest applicable class.
 
 ### 15.2 Approval defaults
 
 Every boundary-crossing operation, not only a tool call, uses `prepare -> authorize -> execute`. This includes MCP
-discovery/calls, future online-model requests, private-data and user-file access, artifact export, security-scoped
+discovery/calls, online-model requests, private-data and user-file access, artifact export, security-scoped
 bookmark creation, and future sandbox operations. The approval engine evaluates locally trusted policy plus the
 prepared operation; model output and remote metadata cannot grant or reduce authority.
 
@@ -807,7 +819,7 @@ must all produce it rather than implementing parallel approval formats.
 ### 15.5 Server-side native tools (design decision, NOT yet implemented)
 
 Some online services execute tools on the server instead of returning a function call for the app to run
-(e.g. DeepSeek's Responses API supports `web_search` / `web_search_2025_08_26` executed server-side).
+(e.g. DeepSeek's Responses API supports `web_search` on supported models, executed server-side).
 This section fixes the policy for when such support is added; no production code implements it today.
 
 - Each online service declares its native server-side tools as per-service capability metadata
@@ -832,6 +844,27 @@ hashes, and user decision. The run capability ceiling is immutable for the run; 
 subset. Approval authorizes an operation inside that ceiling and never expands it. Future child agents may receive
 only a subset of the parent's ceiling. Any time-of-check/time-of-use mismatch invalidates authorization before
 external I/O.
+
+### 15.6 Standalone authenticated web APIs
+
+DeepSeek's independent Search and Fetch JSON APIs are client-invoked Tool V2 operations, separate from
+the provider-hosted model tools in §15.5. A user may select a configured official DeepSeek account for
+search/page reading while using either a local or online model. Public search engines remain the default.
+
+The selected service identity is frozen in the tool descriptor and approval binding. Each logical
+capability has one advertised implementation. Query/URL arguments cross the existing `networkRead`
+authorization boundary before credential resolution or HTTP I/O. Credentials remain in Keychain and
+may only be used against the fixed official HTTPS API origin; redirects are rejected. Responses are
+bounded, budget-accounted, and framed as untrusted content. Missing or removed accounts, invalid keys,
+service errors, and empty results must not trigger a silent switch to another provider. The settings
+UI must disclose that successful Search/Fetch requests are billed by DeepSeek.
+
+A versioned Search descriptor may request `need_content` and expose bounded, attributed page excerpts
+returned by Search. Summary-only requests remain available, and archived descriptors retain their pinned
+behavior. Search-returned content is distinct from a separate Fetch and does not establish freshness or
+completeness. URL identity and retrieval kind must be bound to typed result fields, not inferred from
+hyperlinks or statements inside untrusted page text. Source excerpts must remain bounded and available
+to dependent analysis without repeating network operations. Existing authorization and byte ceilings apply.
 
 ## 16. Context compiler, Memory, and Skills
 
@@ -978,8 +1011,9 @@ There is one chat UI, with progressive disclosure:
 - workflow presentation is MESSAGE-ANCHORED: a workflow initiated at a message renders a live record
   row directly below that message while it runs (Claude Code style) and a clickable completed record
   (e.g. "workflow: 完成任务 B") after it finishes; the record opens that workflow's summary page.
-  The top-right Workflow entry shows only the LIVE summary of workflows currently running in this
-  conversation; with no running workflow it is visible but disabled;
+  The top-right Workflow entry includes running and completed workflows in this conversation.
+  With no records it opens an explanatory empty state. The composer also offers Work with agents,
+  which prepares a workflow draft without sending it;
 - New Chat remains available from the conversation list and the keyboard shortcut (macOS ⌘N);
 - waiting states clearly distinguish user input, approval, foreground, model, and resource waits;
 - submitting text to an active `InteractionRequestRecord` sends a Respond command and does not create a new root run;
@@ -997,17 +1031,28 @@ Approval previews, destinations, data categories, and destructive warnings must 
 VoiceOver and at the largest Dynamic Type sizes; critical text may scroll but may not truncate. Primary approval and
 denial actions require distinct labels, stable focus order, and protection against accidental double activation.
 
-The workflow summary page follows the Claude Code subagent pattern: a tree of run nodes, each showing
-status (running spinner / completed / failed / waiting for approval), elapsed time (live while running),
-consumed input/output tokens, tool-invocation count, and an expandable step list reusing the agent
-activity panel's step rows. Progress may add a mini per-node activity timeline (one dot per tool call)
-once the workflow runtime lands; the page must not show anything while no workflow is running.
+The workflow summary groups logical tasks by their recorded work stage. It distinguishes worker tasks,
+coordination calls, continuations, and retries. Success counts include only successful outcomes. A task
+opens its public result, source-result links, assignment, elapsed time, usage, and call history. Links
+resolve the source that had settled before the consumer was prepared, using journal sequence rather
+than the latest retry. Older records with missing or ambiguous metadata show that limitation.
+
+Actual child states distinguish model work, tools, approval, user input, pause, foreground waits, and
+uncertain effects. Planning also exposes the initial coordinator's real state before a script exists.
+Inspectors attach to validated existing handles without submitting, resuming, or approving work.
+Decisions use the existing command surface and remain isolated from the main chat projection; workflow
+reconciliation continues through the workflow journal. Rejected commands show their safe failure.
+Results are read from verified stored values, never regenerated by opening a view. Provider prompts
+and private reasoning are not exposed as task results. Source and call-level diagnostics remain
+available under Execution details. History reads do not reorder conversations or rewrite activity time.
 
 ## 21. Agent Sandbox Runtime compatibility seam
 
 ### 21.1 Isolation from the private implementation
 
-The open-source repository defines only `AgentSandboxAPI`. It must compile and function with no sandbox provider.
+`AgentSandboxAPI` defines implementation-neutral contracts. The app must compile and function with no configured provider.
+The optional `AgentRuntime/Adapters/OpenSandbox` implementation talks to a configured gateway, which uses the official
+OpenSandbox SDK. The SDK and guest processes run outside the app, never as an app-host shell.
 The future commercial runtime may be integrated as a private Swift package, binary XCFramework, or another adapter,
 but the harness must not depend on its concrete types, implementation details, storage, or entitlements.
 
@@ -1063,14 +1108,45 @@ Commands are explicitly targeted and idempotent. A sandbox execution receives an
 cannot request broader authority. Its output and self-described capabilities are untrusted until checked against the
 locally registered provider policy.
 
-Mount representation, snapshot mechanics, process model, transport, resource accounting implementation, binary ABI,
-and distribution remain deferred until the real private provider is integrated. The current contract fake verifies
-versioning, authority attenuation, idempotent start/commands, detach/reattach, event cursors, and typed outcomes only;
-no placeholder production sandbox is built.
+The private runtime's mounts, snapshots, process model, binary ABI and distribution remain deferred.
+Contract fakes establish contract behavior only. The OpenSandbox adapter is validated separately against actual
+containers. It does not advertise checkpoints or arbitrary process-limit negotiation.
+
+### 21.3 Optional OpenSandbox execution
+
+A user explicitly connects an endpoint in Settings. HTTPS is required except for loopback development. Discovery is
+authenticated, redirects are rejected, responses are bounded, and the exact non-secret server identity, image,
+capabilities and egress allowlist are frozen into the tool trust revision. Credentials remain in Keychain and never
+enter guest environments, model inputs or durable execution requests. Ordinary app launch does not probe the server.
+
+Tool V2 prepares and authorizes every operation. One workflow owns one opaque workspace shared by its workers;
+model arguments cannot select another workspace, image or host mount. File replacement checks the observed SHA-256.
+File paths are relative or absolute under the goal's project root; traversal and sibling roots are rejected.
+Commands, service startup, browser assertions and exports run inside OpenSandbox. The Docker development deployment
+binds lifecycle, gateway and guest ports to loopback, denies guest egress except configured package hosts, and limits
+CPU, memory, processes, job duration and workspace lifetime. Docker secureAccess is unsupported and is not claimed.
+
+Provider handles persist before submission. Reattachment observes an existing command and does not replay uncertain
+submission. Detaching an observer does not cancel the command. Explicit cancellation stops its child process group.
+Confirmed test failures retain bounded diagnostics and the complete guest result. Failed browser observations retain
+page/control state, script output and a screenshot. Immediate identical calls are blocked; intervening workspace work
+permits a retest, including dependency or runtime-data changes without a source edit. Every attempt consumes the
+original cumulative budget. Startup rejects occupied ports, checks the new process and stop waits for its exit.
+
+Executable deliverables require native receipts from the goal's workspace and latest source digest, plus a passing
+independent review of current task artifacts. A running application requires a successful service start, browser
+check and immutable source ZIP. Reuse successful evidence for unchanged source across workers; do not force the
+reviewer to repeat the same check or export. Source changes invalidate older execution receipts. These receipts prove execution; independent task-specific outcome checks establish correctness.
+Task details read verified artifact bytes and allow saving source and screenshots without rerunning tools.
+Stop and data erase close only scopes recorded by this app. A disconnected service retains its bounded server TTL.
+
+The development setup and cleanup procedure is documented in `docs/OPENSANDBOX.md`. It reuses a locally installed
+Docker runtime and isolates downloads, Python packages, credentials, logs and service state under a task-owned
+temporary directory. Cleanup never prunes unrelated containers, images, volumes or build caches.
 
 ## 22. Subagent compatibility seam
 
-The root agent itself uses the future durable execution unit:
+Root and child agents use the same durable execution unit:
 
 ```swift
 protocol AgentExecutor: Sendable {
@@ -1082,6 +1158,7 @@ protocol AgentExecutor: Sendable {
 protocol AgentExecutionHandle: Sendable {
     var id: AgentExecutionHandleID { get }
     func events(after cursor: AgentEventCursor?) -> AsyncThrowingStream<AgentEventEnvelope, Error>
+    func ephemeralEvents() async -> AsyncThrowingStream<AgentEphemeralEventEnvelope, Error>
     func status() async throws -> AgentRunStatus
     func result() async throws -> AgentResult?
     func send(_ command: AgentCommandEnvelope) async throws -> AgentCommandReceipt
@@ -1104,9 +1181,10 @@ Respond command changes the run. Commands carry target run/request IDs and expec
 - optional sandbox requirement;
 - labels and provenance.
 
-The current release advertises `SubagentSpawner` only when the spawner is available and executes independent children
-in deterministic batches of at most four. Local decoding remains serialized by the resource arbiter, while online or
-non-model work may overlap. Every batch drains at a deterministic barrier before its phase advances. Subagents:
+The legacy staged orchestrator executes independent children in deterministic batches of at most four. Dynamic
+Workflows use the shared dispatch scheduler from §34, with a default of `max(1, min(4, processorCount - 2))`
+and a hard limit of sixteen concurrent agents. Local decoding remains serialized by the resource arbiter, while
+online or non-model work may overlap. Parallel results preserve proposal order at the barrier. Subagents:
 
 - inherit only a strict subset of parent capabilities;
 - receive independent contexts and budgets;
@@ -1115,14 +1193,14 @@ non-model work may overlap. Every batch drains at a deterministic barrier before
 - pass local model generation through the same single-resource arbiter;
 - remain visible as child runs in the journal.
 
-Workflow triggering is harness-supported: the harness starts a multi-subagent workflow when the user
-asks for multi-agent work in a message, and a standalone `/workflow` marker is the deterministic trigger
+The current app starts a workflow from a standalone `/workflow` marker in the user
+message. That marker is the deterministic trigger
 whether it appears before, within, or after the goal. The marker is removed before generation; longer
 slash commands and URL path components do not match. Every workflow remains durably anchored to its
 initiating message so the journal can reconstruct the full child-run tree after relaunch.
 
 Implementation order (see §30): the subagent spawner landed first, then bounded parallel tool batches,
-then the staged orchestrator, and now bounded parallel child execution.
+then staged orchestration and bounded parallel child execution, followed by the Dynamic Workflows runtime.
 
 ## 23. Unified staged and Dynamic Workflows boundary
 
@@ -1194,14 +1272,14 @@ through the message-anchored record and summary page fixed in §20.
 
 ## 24. Security and privacy requirements
 
-- Local inference remains local. Future online inference is opt-in and visibly classified as data egress.
+- Local inference remains local. Online inference is opt-in and visibly classified as data egress.
 - Run capability ceilings are deny-by-default and immutable for a run; step grants are auditable immutable subsets
-  and future child ceilings are attenuated subsets.
+  and child ceilings are attenuated subsets.
 - External content is separated from control instructions and labeled untrusted.
 - Tool names are namespaced; schema hashes prevent silent tool substitution during resume.
 - Approval receipts bind normalized scope and policy version.
 - Network tools retain scheme, public-address, redirect, and response-size protections.
-- MCP credentials and future provider secrets live in Keychain and are exposed only by opaque references.
+- MCP credentials and online provider secrets live in Keychain and are exposed only by opaque references.
 - Logs redact secrets, personal data, approval payloads where required, and large external content.
 - Artifacts are root-confined, integrity-checked, and purged according to ownership and retention.
 - User-selected file access uses security-scoped URLs and resists path traversal and symlink escape.
@@ -1388,10 +1466,12 @@ All such seeded mutations must be killed before release.
 
 Verification runs in four enforced tiers:
 
-1. Every change: deterministic unit, contract, state-machine, migration, and property tests for affected MLX-free
-   packages, with a fixed reproducible seed and a separately recorded rotating seed.
-2. Pull request: the complete MLX-free suite with coverage gates, app and engine builds, engine tests, simulator UI
-   tests, integration tests, schema/persistence fuzz smoke tests, and representative crash-injection shards.
+1. Every change: select checks from the changed behavior and reverse package dependencies. Prose-only edits
+   require document/metadata validation, not product builds or smoke tests. Code changes run relevant existing
+   unit, contract, migration, property, and integration tests; generated cases retain their reproducible seeds.
+2. Pull request: affected package suites and the app, engine, UI, coverage, or crash-injection checks needed
+   to establish the changed behavior. A cross-cutting runtime integration runs one complete offline baseline.
+   Live online tests are explicit, credentialed checks; they are excluded from ordinary and coverage runners.
 3. Nightly and before a release candidate: the full fuzz corpus, all crash points, storage/device-lock faults,
    concurrency stress, leak/resource checks, and bounded long-run/thermal tests.
 4. Release candidate: the complete required physical-device/model matrix, clean-install and upgrade paths, followed by
@@ -1459,13 +1539,15 @@ The first release is complete only when all of the following are true:
 
 Implementation is one dependency-ordered program, followed by one consolidated independent audit:
 
-**Status (2026-08-09):** the runtime, SQLite journal and idempotent conversation outbox projection, Tool V2/MCP/
-online adapters, approvals, budgets, subagents, bounded parallel tool batches, staged workflow orchestrator,
+**Status (2026-10-22):** the runtime, SQLite journal and idempotent conversation outbox projection, Tool V2/MCP/
+online adapters, approvals, budgets, subagents, bounded parallel tool batches, dynamic and legacy staged workflows,
 explicit workflow recovery, progressive UI, static traceability gate, and a deterministic model-free simulator
 gate (`SimulatorCI` plan) are implemented. Maximum-Dynamic-Type approval coverage, complete semantic-registry evaluation, a curated
 six-mutant source gate, and commit/spec-bound coverage freshness enforcement are also implemented. The implementation
-is not release-green: matched device performance evidence, the complete physical-device matrix, and consolidated
-release evidence remain open. Step 6 is in progress; steps 7-8 remain pending.
+is not release-green: matched device performance evidence, the complete
+physical-device matrix, complex-goal evaluation, and consolidated release evidence remain open. The September
+hardening PR closed specific integration defects but was not the final release audit. The October corrections
+close the production Memory follow-up; step 6 remains in progress, and steps 7-8 remain pending.
 
 1. Establish stable requirement/test IDs, risk tiers, semantic registries, coverage collection, deterministic fixtures,
    and CI discovery gates; then freeze value types, IDs, state machine, event envelope, Tool V2, model-provider,
@@ -1501,8 +1583,8 @@ remains or remediation would require a material architectural change, stop and r
 than entering an unbounded `implement -> audit -> implement -> audit` loop. Non-blocking improvements are deferred to a
 later explicitly scoped release.
 
-No production implementation begins until this specification has completed independent review and its blocking
-findings have been resolved.
+The original pre-implementation specification review completed on 2026-08-01 (§31). That review is separate
+from the consolidated release audit required after implementation and evidence are complete.
 
 ## 30. Deferred decisions after the Dynamic Workflows milestone
 
@@ -1517,15 +1599,15 @@ These decisions are intentionally deferred because the corresponding capability 
 - alternate hard-isolated workflow providers, richer saved-workflow distribution, and private-runtime packaging;
 - distributed or cross-device execution.
 
-The multi-agent implementation order is fixed and has shipped: (1) `SubagentSpawner` with durable
+The implemented multi-agent foundation followed this order: (1) `SubagentSpawner` with durable
 child runs, attenuated ceilings, independent budgets/contexts, structured results and artifacts, and
 child visibility in the journal (§22); (2) bounded parallel tool batches inside one run under the same
 ceiling, budget ledger, duplicate suppression, and reconciliation invariants (§12); (3) the staged
 workflow orchestrator with phase decomposition, fan-out/fan-in, `WorkflowPhaseRecord`, and
 `WorkflowHandoff` dataflow (§23/§23.1); and (4) bounded parallel subagent batches with deterministic
-fan-in. The current P0 implementation adds the Claude-style Dynamic Workflows analyzer, replaceable script provider,
-event-sourced scheduler, saved versions, and exact recovery (§34). Only remote/cross-device execution and
-private-runtime integration details remain priority-deferred.
+fan-in. The Dynamic Workflows analyzer, replaceable script provider, event-sourced scheduler, saved versions,
+and prefix recovery (§34) are also implemented. The open gaps in §33 and the release matrix still apply.
+Deferred capabilities are those listed above, not unfinished acceptance work for implemented features.
 
 Their future implementations must honor the contracts and authority boundaries established here.
 
@@ -1556,15 +1638,16 @@ remaining blocker.
 ## 32. References
 
 - Current repository architecture: `docs/ARCHITECTURE.md`
+- Dated implementation and verification status: `docs/STATUS.md`
 - Historical product design: `docs/DESIGN.md`
 - Security boundary: `SECURITY.md`
 - Apple background execution strategies: <https://developer.apple.com/documentation/backgroundtasks/choosing-background-strategies-for-your-app>
 - Apple continued processing: <https://developer.apple.com/documentation/backgroundtasks/performing-long-running-tasks-on-ios-and-ipados/>
 - Public Dynamic Workflows behavior: <https://code.claude.com/docs/en/workflows>
 
-## 33. Current implementation conformance (2026-08-08)
+## 33. Current implementation conformance (2026-10-22)
 
-This section records known gaps between the normative requirements above and the current `main` implementation. It
+This section records known gaps between the normative requirements above and the current implementation. It
 does not waive or redefine those requirements. A gap remains open until implementation and required evidence agree.
 
 Implemented foundations:
@@ -1573,10 +1656,10 @@ Implemented foundations:
 - local providers plus explicitly configured OpenAI-compatible Responses providers;
 - Tool V2 adapters, MCP, per-conversation tool policy and approval mode;
 - durable subagent runs with strict authority/budget attenuation and bounded parallel child batches;
-- bounded parallel tool batches and a message-anchored staged workflow orchestrator;
+- bounded parallel tool batches, Dynamic Workflows, and legacy staged-workflow recovery;
 - iOS 17 quiescence and iOS 26 continued-processing integration seams.
 
-Open conformance gaps:
+Implementation checkpoints and remaining gaps:
 
 1. **Workflow tool policy:** CLOSED (2026-08-08). Workflow roots and children inherit the initiating
    conversation's exact manually selected tool policy and never widen it. Workflows have no hard-coded dependency
@@ -1606,8 +1689,10 @@ Open conformance gaps:
    `AgentRuntimeAssembly` attempt. Failure records the diagnostic, disables sending, and presents a visible
    restart-required composer state; it never silently executes the legacy `ToolLoop`. Tests/previews may still
    construct an intentionally unwired `ChatStore` to cover legacy compatibility in isolation.
-5. **Verification enforcement:** the checked-in pull-request simulator gate executes deterministic, model-free
-   neutral-launch/navigation and maximum-Dynamic-Type approval XCUITests. The approval test asserts full action,
+5. **Verification enforcement:** the checked-in `SimulatorCI` plan defines deterministic, model-free
+   neutral-launch/navigation and maximum-Dynamic-Type approval XCUITests, run locally on a Mac. Hosted PR
+   CI runs document validation and portable Swift suites on Linux; it does not execute this simulator plan.
+   The approval test asserts full action,
    destination, data, effects, warning, distinct decisions, and one-shot activation. The complete registry oracle
    evaluates all 6,328 cells with fixed and rotating seeds, while the curated mutation runner requires six real
    production-source mutants to be killed by six distinct executed tests; compile/setup failures cannot count as kills.
@@ -1626,11 +1711,43 @@ Open conformance gaps:
 7. **Accepted-send execution snapshot:** CLOSED (2026-08-08). `ChatStore` now asks `AgentRunStore` to capture an
    immutable submission recipe synchronously after appending the accepted user/assistant identities and before the
    first attachment write or model-residency await. Deferred artifact resolution builds only from that captured value.
-   Snapshot lookup derives model, variant, sampling, context, skill, tool policy, approval mode, and reasoning settings
-   from the requested conversation rather than the visible conversation. The freezer handoff is keyed by run ID so
+   Snapshot lookup derives model identity, sampling, context, skill, tool policy, approval mode, and online
+   reasoning configuration from the requested conversation. The local thinking toggle still comes from
+   `ChatStore`. The freezer handoff is keyed by run ID so
    concurrent preparations cannot replace one another. Online selections also carry a digest identity for the exact
    accepted service endpoint/reasoning/output configuration, so later settings edits or another service cannot redirect
    an in-flight or recovered run; the API key remains a Keychain reference resolved only at execution.
+
+8. **September runtime hardening:** IMPLEMENTED (2026-09-06, merge `82933a0`). MCP discovery persists no
+   credentials, erasure drains producers and removes runtime stores with recoverable intent, stale UI work
+   is rejected after erasure, adopted models register without replacing frozen identities, and online siblings
+   can overlap within one root family. Workflow background quiescence is wired into app lifecycle. Online
+   transport counts response bytes and retry usage, refuses redirects, and workflow analysis instruments
+   callback and loop boundaries. The Linux contract/API/verifier tests are part of hosted CI. The PR's
+   reported build, test, mutation, and simulator results are historical evidence, not a fresh device matrix.
+9. **Production Memory composition:** CLOSED (2026-10-22). `makeAgentSnapshot` applies the Memory
+   switch and shared relevance ranking to an immutable snapshot published after durable saves. Disabled
+   Memory excludes both facts and its tools from new runs. `ProductionRegressionTests` exercises this
+   actual assembly for exclusion, relevant-only selection, and next-turn freshness. The real online
+   simulator case also saves a Chinese fact and recalls it in a new conversation without visiting the
+   Memory screen or invoking a recall tool. `AH-CONTEXT-002` and `AHT-CONTEXT-APP-001` are active.
+10. **Product surfaces:** `stallMs` now enforces child inactivity with progress resets and durable
+    cancellation. The conversation Tools menu supports up to eight allowed-tool pins. Files and Terminal
+    remain explicit empty-state pages. Optional OpenSandbox tools expose workspace execution and verified files
+    through task details; no general-purpose host `run_js` tool is present.
+    Provider-hosted native tools remain deferred under §15.5. Client-executed native function calls now
+    retain provider identities and reasoning state across durable call/result continuation.
+11. **Current evidence:** `docs/STATUS.md` separates the original `82933a0` package baseline from the
+    October fixes and actual online simulator results. Original failures and environment skips remain
+    recorded. Simulator results establish app behavior and online task outcomes; local GPU performance,
+    thermal behavior, and OS-specific background scheduling require hardware evidence. A final independent
+    audit and commit/spec-bound release coverage are still separate acceptance gates.
+12. **Recovery and model integration:** accepted-message payload v2 restores attachments with digest
+    checks, and recovered model requests use durable artifact references. A continued-processing exemption
+    requires an actual unexpired grant. Context policy 2 prioritizes current state and recent tool results;
+    old policy-1 runs keep their allocation order. Local llama.cpp text decoding can reuse an exact KV
+    prefix, and MLX statistics use real completion tokens and timing. Online structured output requests
+    carry the full frozen JSON Schema as instructions as well as the provider's JSON-mode hint.
 
 Terminology: **staged multi-agent workflows v1** remains the compatibility planner. **Dynamic Workflows** is the P0
 Claude Code-style JavaScript orchestration runtime with branching, repetition, saved versioned scripts, parallel
@@ -1670,38 +1787,60 @@ Primary references inspected for these constraints:
   <https://developers.openai.com/api/docs/guides/latest-model>
 - OpenCode agent model, permissions, child-session navigation, and task permissions:
   <https://opencode.ai/docs/agents/>
-- OpenCode task implementation for durable parent/child sessions, resumption, depth limits, background execution, and
-  transitive child permission derivation:
-  <https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/tool/task.ts>
+- OpenCode job implementation for child-session resumption, background lifecycle, and parent completion notification:
+  <https://github.com/anomalyco/opencode/blob/24b5ed8bcc60aa9a20cf4e3edf1444470e0e6464/packages/core/src/session/subagent-job.ts>
 
 ### 34.2 Compatibility target and script contract
 
 The public authoring model follows Claude Code Dynamic Workflows rather than exposing a graph editor or a serialized
-DAG. A model writes one plain JavaScript script; the script owns loops, branches, intermediate variables, and fan-out.
-The trusted host owns subagent execution, policy, persistence, limits, and side effects. The first statement may be a
+DAG. The runtime accepts a plain JavaScript script that owns loops, branches, intermediate variables, and fan-out.
+Default app launches use the versioned coordination program described below; archived authored scripts remain replayable.
+The trusted host owns subagent execution, policy, persistence, limits, and side effects. The first statement must be a
 statically extractable pure-literal `export const meta = { ... }` with `name`, `description`, optional `whenToUse`, and
 optional phase descriptors. The remaining body supports top-level `await` and `return`.
 
 The injected V1 surface is deliberately small:
 
 - `agent(prompt, options?)` starts one isolated child agent and returns text, a schema-validated JSON value, or `null`
-  only for an explicitly classified model/provider availability failure; every other failure remains typed and fatal;
+  only for an explicitly classified model/provider availability failure; other failures retain their typed, durable
+  outcomes. Handling a child failure cannot bypass cancellation or a required reconciliation;
 - `parallel(thunks)` starts independent thunks concurrently, applies a full barrier, and preserves input result order;
 - `pipeline(items, ...stages)` lets each item advance through its stages independently with no global stage barrier;
 - `phase(title)` and `log(value)` publish bounded observability events but grant no authority;
 - `serialize(value)` converts a JSON-compatible value to bounded JSON handoff text only after checkpointed
   node, depth, collection, and conservative byte-limit validation; raw `JSON.stringify`, array `join`, and other
   non-preemptible amplification APIs remain unavailable;
+- `unique(strings)` returns distinct string values in first-occurrence order using bounded, checkpointed traversal;
+  getters, non-string entries and oversized collections are rejected without invoking user iterators;
+- `webEvidence(query?)` reads bounded excerpts and source URLs from settled children reached by the current execution
+  prefix. Later journaled calls cannot leak into earlier prompts during replay. It reads recorded built-in web operations. It cannot read another workflow or perform new network requests. Source content stays untrusted;
+  tool status and retrieval kind come from the journal, and failed reads never count as retrieved page evidence.
+  An optional text query up to 64 KiB selects bounded verbatim matching excerpts from recorded text, without
+  network access or a larger excerpt allowance. Query-dependent packets preserve deterministic replay;
 - `args` is the immutable JSON input supplied at launch;
 - `budget.total`, `budget.spent()`, and `budget.remaining()` expose read-only run accounting;
 - a saved-workflow call primitive may be enabled only with one-level nesting and a registry-pinned script digest. It
   shares the root run's hard agent/concurrency/token ceilings and cannot widen permissions.
 
 `agent` options are a direct object literal whose only V1 keys are `label`, `phase`, `schema`, `model`, `agentType`,
-`isolation`, and `stallMs`. Unknown, computed, shorthand, duplicate, or indirect options fail static analysis before
+`isolation`, `stallMs`, `maxToolCalls`, and `task`. Unknown, computed, shorthand, duplicate, or indirect options fail static analysis before
 launch or dispatch. Model substitution is policy-owned and observable. Schema
-validation is host-side and receives at most two bounded corrective turns before the call settles to `null`; structural
-budget, cancellation, and policy failures remain fatal and are never converted to ordinary data.
+validation is host-side with at most two bounded corrective turns under the child budget. Invalid output after
+repair exhaustion remains a typed child failure. Only a classified model/provider availability failure may
+settle to `null`; budget, cancellation, schema, and policy failures cannot be converted into a successful child.
+A workflow may retain a known failed result while continuing independent work. Required reconciliation blocks
+new dispatch and successful completion even if the script catches its error.
+
+`maxToolCalls` is an optional integer from 0 to 1000 that can only reduce the child's host-owned tool budget.
+It cannot enable tools or expand authority. Zero disables tool advertisement; missing values retain host policy.
+Generated candidates must declare each child's allowance, including zero for a synthesis that only writes from
+provided evidence. This output-affecting cap participates in prefix identity; legacy omitted caps retain their identity.
+
+`task` is optional, bounded display metadata: a logical task ID, its assignment, input artifact IDs,
+and its output artifact ID. It does not grant authority or participate in output identity. The default
+coordinator records the IDs of the artifacts actually supplied to the worker. Call preparation and
+settlement sequence numbers preserve historical handoffs across retries; metadata does not replace
+the executor's result or state. Older omitted metadata retains its encoded identity.
 
 Scripts have no direct filesystem, shell, network, model, tool, secret, process, module-loader, clock, random-number,
 timer, native-object, or sandbox-provider access. Agents perform all effects through `AgentExecutor`, and every external
@@ -1719,10 +1858,33 @@ explicit `/workflow` command is converted into a non-reusable, digest-bound appr
 app starts it immediately; it does not expose redundant Once / Always / Deny launch choices. A crash-recovered candidate
 that never reached launch remains inert until Run or Cancel. Script approval never pre-approves agents' external operations.
 
-If the first generated candidate alone fails static analysis, the app may request exactly one size-bounded repair from
-the same frozen model/policy context. The rejected source is quoted as untrusted data, the replacement crosses the
-entire analyzer and immutable digest-bound launch boundary again, and a second rejection ends candidate preparation.
-Repair never executes either source, never manufactures approval, and never widens authority or budgets.
+Default `/workflow` launches use model decisions as data inside a versioned supervisor program.
+The host freezes the original goal, first decision and enabled tool IDs. The supervisor may delegate independent
+work, read existing artifact ranges, query recorded web evidence, continue a logical task, deliver its answer or
+report a blocking condition. Dependencies refer only to settled artifacts. A task ID is unique within a wave;
+reusing it in a later wave supplies that logical task's prior instructions and outputs. Continuations remain separate
+durable child runs and do not imply provider-session or KV reuse. No decision expands frozen authority.
+
+Actual worker results, rather than only summaries, return to the supervisor. Bounded previews expose offsets and
+truncation; the original outputs remain available for local reads without another model worker or network request.
+`inputRanges` provides explicit original offsets for dependent handoffs, so reading a late section does
+not degrade to passing only the beginning to another worker. `await budget.snapshot()` exposes frozen
+limits and actual usage from settled calls reached by the current execution prefix. It must not count
+reserved-but-unused allowances as consumption or leak later recovered settlements into earlier prompts.
+The durable ledger remains authoritative for admission, including consumed work from invalidated attempts.
+Independent workers settle behind a barrier. Evidence views for a wave are resolved before dispatch, so concurrent
+completion cannot change a sibling's inputs. Failed workers do not erase useful siblings. Supervisor working notes
+and automatically retained observations persist through recorded decisions and results. Repeated identical actions without progress stop visibly.
+
+The supervisor produces the final deliverable. Writer, reviewer and consolidation agents are optional task choices,
+not mandatory phases. Execution completion is not a model-issued certificate of correctness. External task oracles
+and primary-source audits assess whether the result meets the original goal. Limits on worker invocations,
+supervisor turns and allocated tool calls are fixed in the saved program and never enlarge the runtime budget.
+Blocked or exhausted execution fails visibly. A caught child reconciliation error cannot permit more dispatch or
+completion. Saved earlier programs retain their original source and replay contract.
+
+Schema repair retains actual provider usage when available and supplies a bounded diagnostic without echoing
+private output values or reasoning. Repeating a generic instruction without the observed constraint is insufficient.
 
 ### 34.3 Runtime isolation and replaceable sandbox provider
 
@@ -1822,7 +1984,10 @@ durable engine, child executor, selected-tool policy, approvals, and final chat 
 matrix covers at least five materially different problem shapes: current-fact feasibility research with a strict local-vs-
 cloud distinction, multi-constraint planning with fallbacks, architecture and security tradeoffs, crash-boundary incident
 analysis, and an untrusted-goal/prompt-injection boundary. `/workflow` is exercised at both the beginning and end of the
-message. A parameterized ad-hoc probe must accept newly reported complex goals without requiring a new test harness.
+message. The matrix also includes closed-corpus coverage and alias resolution, constrained optimization with exact
+arithmetic, dependency scheduling with a feasibility/optimality oracle, and primary-source API comparisons. Expected
+answers belong only to the evaluator. Each autonomous run receives one original goal with no external corrective prompts
+or transfer of intermediate answers. A parameterized ad-hoc probe accepts future goals without a separate harness.
 
 An exploratory run passes only when the candidate reaches execution, independent work is genuinely decomposed (and uses
 parallel fan-out when requested), the durable projection exposes the expected child calls, the run completes, and the
@@ -1836,3 +2001,283 @@ Live-model results are intentionally nondeterministic evidence and never replace
 handled with repeated evidence or an explicit time-bounded quarantine, not by weakening semantic assertions. Simulator
 coverage is the fast path for online workflows; physical-device evidence remains required for release claims involving
 local models, device resources, suspension, or hardware-specific behavior.
+
+
+## 35. Persistent agent sessions
+
+A session identifies one agent conversation across distinct immutable runs. Versioned session snapshots,
+accepted inputs, activation reservations and input inclusions live in the same SQLite database as the
+run journal. Session facts append with revision comparison; a stale writer cannot replace accepted input.
+Bodies and prepared activation material use protected artifacts owned by the conversation. Conversation
+removal cascades session records through their seed run. Schema 6 adds session tables; schema 5 run history
+remains readable without a write or migration, and the next explicit write upgrades it with a backup.
+
+The initial session API admits explicit human messages through the trusted host. A steering message targets
+a current activation. A queued message starts a later activation. Acceptance is committed before the host
+acknowledges it. The model context and its exact included-message identities commit atomically. Inclusion
+means the immutable request contains the input, not that the model processed it successfully. A pending
+input prevents a completed terminal commit. A final answer racing accepted steering therefore triggers
+another bounded model pass through the existing executor. Neither a model request already in flight nor
+its authority is mutated.
+
+Completed, failed and cancelled runs remain immutable. A subsequent explicitly requested human turn
+reserves one new activation and its exact input material before submission, then uses the ordinary
+idempotent executor. Unconsumed input from an interrupted activation carries into that next turn ahead
+of the newer user instruction. A session has one current activation. Queued inputs in explicit follow-up
+activations advance after normal completion, while pause and cancellation require explicit resume. The
+seed activation remains owned by its original workflow controller; queuing a follow-up never bypasses
+that controller's dispatch authority. Observation and application startup do not resume work.
+
+Follow-up activations retain the session's frozen model, tool policy and attenuated capability ceiling.
+Each explicitly requested human turn receives the existing bounded per-turn budget. These human turns
+are separate from the original workflow's closed usage report; automatic agents cannot use this host API
+to obtain fresh budgets. Workflow calls may now carry a stable session key. A later call continues that
+session only after its previous activation settles, and uses the exact attenuated request reserved by
+WorkflowBudgetCoordinator. The runtime records the actual sending coordinator run, validates common
+parent and conversation membership, and retains immutable activation material for submission replay.
+An automatic activation never triggers the human queue's fresh-budget continuation. The sandbox
+provider remains optional. General peer messaging and task scheduling remain separate work.
+
+Focused acceptance covers message idempotency, commit interruption, stale writers, unchanged historical
+runs, steering during generation, pending input after pause/restart, and repeated turns in one session.
+
+
+## 36. Event-driven workflow collaboration
+
+Root orchestration scripts can start a child with `spawn(prompt, options)` and await one selected
+settlement with `waitAny(handles)`. Waiting holds no worker permit or model residency lease and
+spends no model calls. Journal changes wake waiters. The choice commits before delivery and records
+the ordered candidate call identities and chosen call. Recovery uses that choice even when multiple
+children are now settled. Only delivered results enter replay-visible evidence and budget snapshots.
+A failed detached call is a recorded result, so recovery does not silently retry it. A new explicit
+invocation is required for another attempt. Existing awaited calls keep their original replay behavior.
+
+The asynchronous API is scoped to the root script realm, accepts outstanding handles only, and allows
+one active selection at a time. Native admission, cumulative reservations, tool approvals, cancellation
+and reconciliation remain shared with ordinary workflow calls. Wait selection is not task completion.
+A controlled acceptance case starts a dependent worker while an unrelated sibling remains unfinished;
+a replay case verifies original result order and excludes later sibling usage from earlier prompts.
+
+
+Collaboration receipts persist the model-facing task graph at each host operation. A graph retains the
+original objective, human amendments, required tasks, per-task revisions, assigned agent identities,
+dependency edges, call ownership and immutable output versions. Updates compare revisions and reject
+cycles, missing dependencies, competing claims and removal of an existing required-task obligation.
+Dispatch claims the task in the same journal append that prepares its call. Source reopening invalidates
+downstream results; an already running consumer keeps its original inputs and settles as needing review
+when those inputs are stale. Historical output bytes and dependency identities remain available.
+
+Goal completion requires all required tasks to be completed and every submitted child to be settled,
+with no reconciliation pending. A blocked or exhausted goal retains its partial task results and pauses
+the workflow. Explicit resume records a continuation grant at that pause boundary. Replay returns the
+recorded grant and continues past the pause without repeating previous calls. Reading the graph or
+launching the application grants no continuation. Human amendments use a separate trusted host API;
+model-facing operations cannot rewrite the original objective or manufacture a human amendment.
+These guards enforce lifecycle facts; independent task outcomes still require evaluation.
+
+
+The `collaborative-workflow-v6` program uses these operations to assign persistent agent identities,
+dispatch ready dependencies, read exact source ranges and keep coordinating after individual results.
+The model may create or revise tasks, read, wait, deliver or record a blocker. Waiting is driven by actual
+results. Repeated decisions without task or evidence progress and exhausted budgets preserve unfinished
+work at a durable pause. Large source outputs retain original artifacts; a dependency may explicitly
+select a later range instead of receiving only a truncated prefix. The frozen v4 program remains
+unchanged for historical replay. Deterministic tests establish control flow and source handoff, not
+real-model task quality.
+
+
+Team messaging and original-artifact reads also use ordinary Tool V2 adapters. `agent.send_message`,
+`agent.read_artifact` and `agent.list_agents` derive membership from the executing run and durable
+workflow records. Models cannot supply sender identities, conversation IDs or filesystem paths.
+Preparation binds the exact conversation-local destination and data category. Message writes use an
+invocation-bound idempotency key and the normal authorization boundary. Accepted peer messages use the
+same session inbox as human input, retain their actual sender, and cannot create a fresh-budget turn.
+A terminal recipient queues input for a later workflow-budgeted activation. The coordinator itself is a
+persistent session anchored on its initial planning run. Human and agent input remain distinguishable.
+
+These tools are added only to explicit collaboration launches. Disabled external tools remain disabled;
+coordinator activations may expose only team-local tools. All actual tool calls consume the shared tool
+budget. A zero-tool activation advertises none. Goal delivery snapshots pending inboxes and serializes its
+completion cut against message acceptance, including lazily registered sessions. An earlier acknowledged
+input blocks completion until included. A later accepted human follow-up remains a separate pending turn.
+Task conversations show the actual sender and keep full automatic assignment details collapsed.
+
+
+Task updates may pin immutable historical artifact inputs in addition to dependencies on current task
+versions. This permits a draft to be revised using its previous review without creating a cycle between
+current task nodes. The review is invalidated and must inspect the new draft before completion. Exact
+historical inputs remain visible in the resulting artifact record. Coordinator and worker artifact
+reads share one reader with source digests and Unicode-safe ranges. An offset inside a surrogate pair
+is rejected; a page end is shortened to a valid boundary instead of inventing replacement characters.
+
+
+New session activation snapshots carry a bounded recent conversation window instead of repeatedly
+copying their entire transcript. Worker and human follow-up windows retain at most 24 messages and
+128 KiB. Coordinator windows retain at most four messages and 16 KiB because the current frame already
+contains the authoritative goal, amendments, task graph and working notes. A large assistant answer does
+not evict a concise preceding instruction. Pruned input and output remain in immutable run records.
+`agent.read_context` lists and reads only the executing agent's original history, including prior tool
+observations, through the same scoped Tool V2 boundary. Stored observations do not repeat external I/O.
+Exact source revisions and digests accompany reads. A fresh process can retrieve an early requirement
+that is absent from the working window while the latest correction remains in its current context.
+This deterministic reduction uses no additional summarizer model calls or synthetic replacement answers.
+
+
+An optional per-agent profile narrows enabled tools, selects allowed instruction packs and requests a
+supported reasoning effort within the user's ceiling. Model selection remains inside the parent model
+policy. Profiles enter replay identity; unsupported tools, skills and effort requests fail before model
+submission. Effort is frozen in generation parameters and authorization payloads. A missing effort field
+keeps old payload fingerprints and provider-configuration behavior. DeepSeek low effort stays low on the
+wire; medium maps to high according to its current documented compatibility contract.
+
+Online agent tasks may discover built-in skills and the custom skill explicitly selected for the chat.
+Unselected custom packs are excluded. On-device tasks retain explicit skill selection. The catalog is
+frozen at goal admission, bounded to 32 definitions and 1 MiB of instruction text, and is part of policy
+binding. Discovery returns metadata; read_skill retrieves only requested ranges through Tool V2.
+Loading guidance never enables a disabled tool or execution environment. New goal admissions remove
+unavailable definitions while old frozen snapshots remain reproducible. Context policy 3 retains selected
+skill instructions in full as user guidance, below the current request; insufficient space fails admission
+instead of silently discarding instructions. Historical context policy versions retain their semantics.
+
+
+New workflow creation atomically records the settled preparation run's actual usage with the launch.
+The same ledger then admits all child and coordinator activations against the remaining parent budget.
+Planning cannot become an uncharged extra allowance, including after recovery. Legacy records without
+this event retain their historical accounting semantics; presentation adds their preparation usage once.
+New records already include it and never add it again in the UI or evaluation summary.
+
+
+Human goal updates record their recipients at acceptance, enter the same durable inboxes, and remain
+scoped to the existing goal budget. Recovery and post-submission delivery retry the same message IDs.
+Completion flushes outstanding deliveries before its input fence. A stale task/goal claim records a
+rejected call with no execution, allowing bounded dispatch of the current revision; rejected calls never
+become session seeds. New task prompts identify their human-amendment version. Goal-owned messages
+cannot start automatic standalone turns. A human may explicitly request a separate continuation.
+
+The mobile workspace presents planned task dependencies before dispatch, current ownership, actual
+execution state, saved result links and the remaining budget. Result-ready and task-completed states
+remain distinct. Goal updates and explicit continuation are available in the existing workspace. Model
+and tool counters include preparation and known usage from active children without double-counting.
+Presentation snapshots contain artifact identities rather than duplicate result bodies. Old results
+retain their exact producer links through retries and revisions. Opening, closing or refreshing a view
+never starts work; a late asynchronous read cannot replace a newer task result.
+
+
+Team message admission has its own `agent.message` capability and `agentMessage` effect. It grants
+only durable inbox admission through the scoped team adapter. It grants no local file, canonical memory,
+calendar or workspace write authority. The child validator continues to require an isolated provider
+for `local.write`. Safe preset treats authorized team admission as an app-owned effect; each invocation
+still binds the actual sender, team destination, payload, idempotency key and shared tool budget.
+The send_message descriptor is version 2. Historical version 1 results remain readable, while fresh
+admissions use version 2. Old frozen tool descriptors are never silently rewritten.
+
+
+Accepted input for a completed workflow agent reopens its latest completed task through the recorded
+CAS graph update before further dispatch. This uses its existing session and the goal's remaining
+activation/model/tool budget, retains its prior result as an exact input, and invalidates downstream
+consumers. It never grants a separate allowance or drops an input to permit delivery. Active, pending
+or failed assignments retain their existing control path.
+
+The shared artifact reader also resolves `observations:<artifactID>` into the producer's settled tool
+observation catalog. A returned observation ID reads its exact sanitized arguments, typed outcome and
+record digest. The producer must belong to this goal and an immutable artifact, including historical
+versions. Reads cannot address an arbitrary run, access hidden reasoning, or repeat an external call.
+
+
+Invalid native tool JSON, out-of-schema arguments or an unadvertised tool name reject the entire
+model-proposed batch before any tool dispatch. The online provider returns a confirmed-no-effect
+malformed-action failure with measured usage and bounded schema feedback. The existing run controller
+records the originating failure code and owns at most one constrained repair of that invalid action.
+Repair consumes the original model/repair budget; a second invalid attempt terminates without dispatch.
+The transport does not retry, alter arguments, authorize a new tool, or execute a valid batch prefix.
+
+
+Reassigning a task does not discard the former agent's accepted input. When that agent has no current
+assignment, `continueInbox` creates one required follow-up in the same session, using its original
+profile/model and the existing goal allowance. It consumes pending messages without taking ownership
+back from the replacement agent. The transition and resulting task are journaled. Historical scripts
+retain their original control flow; new launches use this continuation rule.
+
+
+Goal-session replay reuses settled failed coordinator outcomes as well as completed outcomes. It must
+reach the recorded pause and explicit resumption grant before starting a new activation. Retrying the
+failed coordinator while reconstructing the prefix would change later collaboration-command identities.
+Non-session archived programs keep their established retry semantics. An unrelated replay or host
+invariant failure retains its own diagnostic instead of being mislabeled with an earlier child failure.
+
+
+Agent-authored `notice` messages retain their durable body and unread/included status, but do not
+require a new activation or block completion. They join a later real assignment or an already-needed
+model step. Human input and goal amendments cannot use notice mode and remain mandatory. `steer` and
+`nextTurn` retain their existing semantics. The message tool's 2.1 schema advertises this distinction;
+the exact 2.0 adapter remains available for frozen requests through the same execution implementation.
+
+New Work with agents preparation admits only actual nonempty assignments or an explicit blocker.
+It cannot report a final answer without delegation. Later coordination still permits delivery when
+required work is complete. Artifact catalogs contain references and provenance, not duplicate full
+result bodies beside selected previews. Ordinary chat and historical workflows retain their paths.
+
+
+The host advances an already-declared dependency chain without asking the coordinator to poll between
+every result. A failed result, a result without a planned consumer, a coordinator instruction, or a new
+human amendment returns control to the coordinator. Consumers still start as soon as their own inputs
+arrive, including while unrelated work remains active. Waiting never holds a model or worker permit.
+
+
+New app goals freeze a versioned `_mobileLLMOutputLimitsV1` policy from explicit human formatting
+directives before planning. It recognizes scoped English final/worker word limits, common Chinese
+character-limit directives and a direct JSON-only final-output request. Quoted examples, code and
+blockquotes are excluded. This is a bounded recognizer, not a general natural-language proof checker.
+Only actual human amendments may change these limits. Historical goals without the policy retain
+their original execution semantics.
+
+Checks count the entire returned body, including headings, tables and appendices. Words are
+whitespace-separated tokens containing a Unicode letter/digit; character limits count non-whitespace
+Swift characters. JSON-only output must parse as a complete JSON value. The model cannot exempt an
+appendix or substitute its own claimed count. A rejected worker result remains immutable and labeled;
+one automatic correction per task and human-amendment revision reuses its session and existing budget.
+Another invalid result stays failed. Final delivery permits two bounded corrections, then pauses with
+partial work retained. No checker truncates or rewrites the answer. Accepted delivery binds the exact
+answer digest, which is checked again before publishing. Rejected originals remain inspectable in UI.
+
+
+New collaboration launches freeze a native acceptance requirement before execution. The coordinator
+derives tasks and review criteria from the user's goal without requiring the user to name stages or
+agents. Independent tasks can run concurrently at every dependency level. Required review tasks name
+criteria, their direct producer dependencies, and any enabled tools whose execution is necessary. A
+producer cannot review itself under the same persistent agent identity. Existing required review
+contracts cannot be removed or weakened by model task updates.
+
+A review result reports each declared criterion exactly once as pass, revise or blocked with an
+explanation. The host binds this judgement to the actual input artifact versions and human-amendment
+revision. Required tool evidence comes from the reviewer's successful, settled tool journal records,
+with invocation identities and record digests. A model's report cannot create that evidence. Tool
+execution establishes an execution fact; semantic correctness remains the reviewer's assessment or
+a separate domain-specific check. A missing required tool record blocks acceptance.
+
+A revise verdict retains the failed original report and automatically reopens only producers named
+by the failed criteria. Their original outputs and the review become immutable correction inputs.
+Ordinary dependency invalidation schedules fresh reviews of revised outputs while unrelated accepted
+branches remain settled. At most two automatic corrections per producer and human-amendment revision
+share the existing goal budget. Missing capabilities do not trigger blind producer retries. Exhausted
+corrections or blocked reviews remain visible and prevent completion. An amended goal invalidates
+earlier acceptance while retaining its historical records.
+
+Delivery requires passing current reviews covering all required artifacts directly or through their
+reviewed source ancestry, plus the existing input, effect and output-format fences. The published
+answer must match the accepted answer digest. Old launches without the acceptance requirement keep
+their frozen execution semantics. The task detail presents declared criteria, the original assessment,
+and actual tool execution metadata separately. Reading it starts no work. Unavailable file, execution,
+browser or deployment capabilities must be reported as blockers rather than represented by a completed
+outline or invented test run.
+
+
+Preparation also declares the requested outcome: an answer, explicitly requested source text, a saved
+workspace artifact, a running application, or a published service. The launch freezes this declaration
+and the execution capabilities actually supplied by the registered environment. A model cannot assert
+provider availability or downgrade a running-application request to source text during execution. The
+host blocks unsupported delivery before worker dispatch and checks the policy again on publication,
+including direct script returns. Source-only and information tasks remain available without a provider.
+Intent classification is model-inferred and must be evaluated against the original human request. The
+current app registers no production workspace/execution provider. Ordinary chat and explicit
+collaboration entry remain distinct; this change does not automatically route every chat into a team.

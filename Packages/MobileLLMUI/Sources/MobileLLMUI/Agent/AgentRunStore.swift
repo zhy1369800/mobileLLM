@@ -82,7 +82,7 @@ public final class AgentRunStore {
     public var onProgressTick: (@MainActor (UUID) -> Void)?
 
     private let executor: any AgentExecutor
-    private let requestBuilder: any AgentRunRequestBuilding
+    private let requestBuilder: (any AgentRunRequestBuilding)?
     private let recovery: (any AgentRunRecoveryListing)?
     private var handles: [AgentRunID: any AgentExecutionHandle] = [:]
     private var eventTasks: [AgentRunID: Task<Void, Never>] = [:]
@@ -98,6 +98,14 @@ public final class AgentRunStore {
         self.recovery = recovery
     }
 
+    /// An isolated inspector can attach and forward explicit decisions, but cannot submit a run.
+    /// It has no answer callbacks into the main conversation.
+    public init(observing executor: any AgentExecutor) {
+        self.executor = executor
+        requestBuilder = nil
+        recovery = nil
+    }
+
     // MARK: - Submitting
 
     /// Captures one root run synchronously. The caller has already appended the user message and
@@ -109,6 +117,9 @@ public final class AgentRunStore {
         text: String,
         imageRefs: [ImageRef]
     ) throws -> PreparedAgentRunStart {
+        guard let requestBuilder else {
+            throw AgentContractError.invalidName("An observed task cannot submit another run")
+        }
         let submission = try requestBuilder.prepareSubmission(
             conversationID: conversationID,
             userTurnID: userMessageID,
@@ -235,9 +246,9 @@ public final class AgentRunStore {
     /// idempotent foreground-lost pause at its next safe boundary. Recovery never assumes the OS
     /// granted enough time; the run durably lands in a waiting state and resumes only through an
     /// explicit user Resume.
-    public func quiesceForBackground() async {
+    public func quiesceForBackground(excluding conversationToContinue: UUID? = nil) async {
         let activeConversations = runs.compactMap { conversationID, run -> UUID? in
-            run.isActive ? conversationID : nil
+            run.isActive && conversationID != conversationToContinue ? conversationID : nil
         }
         for conversationID in activeConversations {
             await send(conversationID: conversationID) { status, runID in
@@ -630,6 +641,7 @@ public final class AgentRunStore {
     ) async {
         guard let run = runs[conversationID] else { return }
         let epoch = projectionEpoch
+        recoveryError = nil
         do {
             let status = try await status(of: run)
             guard epoch == projectionEpoch else { return }
@@ -651,8 +663,11 @@ public final class AgentRunStore {
     private func sendCommand(_ command: AgentCommand, conversationID: UUID) async throws {
         guard let run = runs[conversationID], let handle = handles[run.runID] else { return }
         let receipt = try await handle.send(try AgentCommandEnvelope(payload: command))
-        if receipt.disposition == .accepted,
-           let updated = try? await handle.status(),
+        guard receipt.disposition == .accepted else {
+            recoveryError = receipt.failure?.safeMessage ?? "The task changed. Review its current state and try again."
+            return
+        }
+        if let updated = try? await handle.status(),
            runs[conversationID]?.runID == run.runID
         {
             applyStatus(updated, conversationID: conversationID)

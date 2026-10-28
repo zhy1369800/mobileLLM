@@ -4,6 +4,7 @@ import Foundation
 import Observation
 import AppRuntime
 import LLMCore
+import AgentRuntime
 
 /// User preferences (DESIGN §4 Settings): the default model, chat behavior, sampling, and appearance.
 /// `@Observable` so SwiftUI bindings drive it directly; changes persist to `UserDefaults` as one small
@@ -42,6 +43,34 @@ public final class AppSettings {
     /// Web-search engine priority — the first that returns results wins, the rest are fall-through. At least
     /// one is kept while `web_search` is on (the UI enforces it); an empty list falls back to both.
     public var searchEngines: [SearchEngine] { didSet { persist() } }
+    /// nil retains public search engines/direct page reads. A selected account stays selected if
+    /// removed or made unavailable, so an in-flight or future request cannot silently change service.
+    public var deepSeekWebServiceID: String? { didSet { persist() } }
+    public private(set) var sandboxConnection: OpenSandboxConnection? { didSet { persist(); notifySandboxChange() } }
+    public var sandboxEnabled: Bool { didSet { persist(); notifySandboxChange() } }
+    @ObservationIgnored public var onSandboxConfigurationChanged: (@MainActor () -> Void)?
+    @ObservationIgnored private var sandboxSessionKey: String?
+
+    public func configureSandbox(_ connection: OpenSandboxConnection, apiKey: String) throws {
+        guard !apiKey.isEmpty, apiKey.utf8.count <= 4096 else { throw OpenSandboxError.invalidConfiguration }
+        try keychain?.save(apiKey, account: "sandbox." + connection.id.uuidString)
+        if let old = sandboxConnection, old.id != connection.id { try keychain?.delete(account: "sandbox." + old.id.uuidString) }
+        sandboxSessionKey = apiKey
+        sandboxConnection = connection
+        sandboxEnabled = true
+    }
+
+    public func sandboxAPIKey() throws -> String? {
+        guard let connection = sandboxConnection else { return nil }
+        return try sandboxSessionKey ?? keychain?.readString(account: "sandbox." + connection.id.uuidString)
+    }
+
+    public func disconnectSandbox() throws {
+        if let connection = sandboxConnection { try keychain?.delete(account: "sandbox." + connection.id.uuidString) }
+        sandboxSessionKey = nil; sandboxEnabled = false; sandboxConnection = nil
+    }
+
+    private func notifySandboxChange() { if !loading { onSandboxConfigurationChanged?() } }
 
     // MARK: Online models
     /// Configured OpenAI-compatible services. Each keeps its own base URL / model id / Keychain key,
@@ -227,6 +256,9 @@ public final class AppSettings {
             loadedEngines = [.duckduckgo, .bing, .brave]
         }
         searchEngines = loadedEngines
+        deepSeekWebServiceID = snap?.deepSeekWebServiceID
+        sandboxConnection = snap?.sandboxConnection
+        sandboxEnabled = snap?.sandboxEnabled ?? false
         if let services = snap?.onlineServices, !services.isEmpty {
             onlineServices = services
         } else if snap?.openAIBaseURL != nil || snap?.openAIModelID != nil
@@ -396,6 +428,9 @@ public final class AppSettings {
         /// defaults (privacy tools off; both search engines on).
         var disabledBuiltInTools: Set<String>? = nil
         var searchEngines: [SearchEngine]? = nil
+        var deepSeekWebServiceID: String? = nil
+        var sandboxConnection: OpenSandboxConnection? = nil
+        var sandboxEnabled: Bool? = nil
         var openAIBaseURL: String? = nil
         var openAIModelID: String? = nil
         var openAIOnlineEnabled: Bool? = nil
@@ -428,6 +463,8 @@ public final class AppSettings {
                             toolsEnabled: toolsEnabled, dictationLocale: dictationLocale,
                             mcpServers: scrubbed, mcpTokenMarkers: markers,
                             disabledBuiltInTools: disabledBuiltInTools, searchEngines: searchEngines,
+                            deepSeekWebServiceID: deepSeekWebServiceID,
+                            sandboxConnection: sandboxConnection, sandboxEnabled: sandboxEnabled,
                             openAIBaseURL: defaultService?.baseURL,
                             openAIModelID: defaultService?.modelID,
                             openAIOnlineEnabled: defaultService?.isEnabled ?? false,
@@ -471,6 +508,8 @@ public final class AppSettings {
         onlineServices = []
         disabledBuiltInTools = Self.defaultDisabledBuiltInTools
         searchEngines = [.duckduckgo, .bing, .brave, .yahoo, .marginalia]
+        deepSeekWebServiceID = nil
+        sandboxConnection = nil; sandboxEnabled = false; sandboxSessionKey = nil
         temperature = 0.7
         topP = 0.95
         topK = 20
@@ -484,6 +523,7 @@ public final class AppSettings {
         appearance = .system
         loading = false
         defaults.removeObject(forKey: key)
+        onSandboxConfigurationChanged?()
 
         if let keychainFailure { throw keychainFailure }
     }

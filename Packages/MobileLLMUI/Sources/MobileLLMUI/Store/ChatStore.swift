@@ -544,6 +544,21 @@ public final class ChatStore {
         return activeModel?.subtitle ?? "No model"
     }
 
+    public var activeModelTitle: String {
+        if let model = settings.onlineActiveService?.modelID, !model.isEmpty { return model }
+        return activeModelLabel
+    }
+
+    public var isWorkflowDraft: Bool { Self.workflowGoal(in: draft) != nil }
+
+    public func prepareWorkflowDraft() {
+        if !isWorkflowDraft { draft = "/workflow " + draft }
+    }
+
+    public func useRegularChatDraft() {
+        if let goal = Self.workflowGoal(in: draft) { draft = goal }
+    }
+
     /// The durable generation identity for the current selection: online when active, else the local
     /// model. Also used to stamp conversations so a thread remembers its model across relaunch.
     private func currentGenerationModel() -> GenerationModel? {
@@ -551,7 +566,7 @@ public final class ChatStore {
             return GenerationModel(
                 modelID: OnlineModelIdentity.conversationModelID(service.id, model: service.modelID ?? ""),
                 variantID: OnlineModelIdentity.variantID,
-                displayName: OnlineModelIdentity.displayLabel(service.name),
+                displayName: OnlineModelIdentity.displayLabel(service.modelID ?? service.name),
                 engine: .online
             )
         }
@@ -636,20 +651,22 @@ public final class ChatStore {
 
     /// Builds the current user selection into a conversation tool policy. Shared by the one-time
     /// global template copy and the Chat options menu's explicit per-conversation edits.
-    private func currentToolPolicy(materializedFromGlobalTemplate: Bool) -> ConversationToolPolicy? {
+    private func currentToolPolicy(materializedFromGlobalTemplate: Bool, preservingPins: [AgentToolLogicalID] = []) -> ConversationToolPolicy? {
         // The policy is the USER's selection (Tools screen), mapped to logical ids; the runtime's
         // selector and catalog decide which of those are adapted and advertised for a pass.
         var allowed = settings.builtInToolConfig.enabled.compactMap { id in
             try? AgentToolLogicalID(providerID: "builtin", name: id.rawValue)
         }
         allowed.append(contentsOf: agentMCPToolLogicalIDs?() ?? [])
+        if settings.sandboxEnabled, let connection = settings.sandboxConnection,
+           let tools = try? OpenSandboxTool.descriptors(connection: connection) {
+            allowed.append(contentsOf: tools.map(\.id.logicalID))
+        }
         let deduped = Array(Set(allowed)).sorted()
         return try? ConversationToolPolicy(
             masterEnabled: settings.toolsEnabled,
             allowedToolIDs: deduped,
-            // A visible switch grants availability. Pinning is a separate selector override and the
-            // current UI has no pin control, so selected tools must remain eligible for smart ranking.
-            pinnedToolIDs: [],
+            pinnedToolIDs: preservingPins.filter { deduped.contains($0) },
             selectionPolicyVersion: 1,
             materializedFromGlobalTemplate: materializedFromGlobalTemplate
         )
@@ -661,10 +678,29 @@ public final class ChatStore {
     /// explicit edit that does.
     public func applyCurrentToolSelectionToActiveConversation() {
         guard let idx = conversations.firstIndex(where: { $0.id == activeID }),
-              let policy = currentToolPolicy(materializedFromGlobalTemplate: false)
+              let policy = currentToolPolicy(materializedFromGlobalTemplate: false, preservingPins: conversations[idx].toolPolicy?.pinnedToolIDs ?? [])
         else { return }
         conversations[idx].toolPolicy = policy
         persist(conversations[idx])
+    }
+
+    public func setToolPinned(_ tool: AgentToolLogicalID, pinned: Bool) {
+        guard let index = conversations.firstIndex(where: { $0.id == activeID }),
+              let policy = conversations[index].toolPolicy, policy.allowedToolIDs.contains(tool) else { return }
+        var pins = Set(policy.pinnedToolIDs)
+        if pinned {
+            guard pins.contains(tool) || pins.count < 8 else {
+                showToast(Toast("You can pin up to eight tools.", kind: .warning))
+                return
+            }
+            pins.insert(tool)
+        } else { pins.remove(tool) }
+        guard let updated = try? ConversationToolPolicy(
+            masterEnabled: policy.masterEnabled, allowedToolIDs: policy.allowedToolIDs, pinnedToolIDs: pins,
+            selectionPolicyVersion: policy.selectionPolicyVersion, materializedFromGlobalTemplate: false
+        ) else { return }
+        conversations[index].toolPolicy = updated
+        persist(conversations[index])
     }
 
     /// One-time materialization for a legacy conversation on its first agent-runtime edit/run
@@ -1244,6 +1280,9 @@ public final class ChatStore {
         materializeToolPolicyIfNeeded(at: idx)
         let workflowID = UUID()
         let user = Message(role: .user, answer: goal)
+        if conversations[idx].title == "New Chat" {
+            conversations[idx].title = ConversationText.title(goal)
+        }
         conversations[idx].messages.append(user)
         conversations[idx].updatedAt = Date()
         persist(conversations[idx])
@@ -1283,8 +1322,8 @@ public final class ChatStore {
         }),
         let mi = conversations[ci].messages.firstIndex(where: { $0.id == messageID })
         else { return }
+        guard conversations[ci].messages[mi].workflowRecord != record else { return }
         conversations[ci].messages[mi].workflowRecord = record
-        conversations[ci].updatedAt = Date()
         persist(conversations[ci])
     }
 
@@ -1307,9 +1346,8 @@ public final class ChatStore {
             guard let mi = conversations[ci].messages.firstIndex(where: {
                 $0.workflowRecord?.workflowID == workflowID
             }) else { continue }
-            conversations[ci].messages[mi].workflowRecord = record
-            conversations[ci].updatedAt = Date()
-            persist(conversations[ci])
+            var changed = conversations[ci].messages[mi].workflowRecord != record
+            if changed { conversations[ci].messages[mi].workflowRecord = record }
             // Project the workflow's final result into the chat exactly once (spec §20: the record
             // is the live row; the committed answer lands as a normal assistant message).
             if record.status == .completed,
@@ -1319,13 +1357,17 @@ public final class ChatStore {
             {
                 let assistant = Message(
                     role: .assistant,
+                    createdAt: record.endTime ?? Date(),
                     answer: answer,
                     workflowResultID: workflowID
                 )
-                conversations[ci].messages.append(assistant)
-                conversations[ci].updatedAt = Date()
-                persist(conversations[ci])
+                let index = conversations[ci].messages.firstIndex { $0.createdAt > assistant.createdAt }
+                    ?? conversations[ci].messages.endIndex
+                conversations[ci].messages.insert(assistant, at: index)
+                conversations[ci].updatedAt = max(conversations[ci].updatedAt, assistant.createdAt)
+                changed = true
             }
+            if changed { persist(conversations[ci]) }
             return
         }
     }
@@ -2093,7 +2135,7 @@ public final class ChatStore {
     /// composing, and the meter shows whatever the last refresh left.
     private func memoryBlock(for query: String, enabled: Bool? = nil) -> String? {
         guard enabled ?? settings.memoryEnabled,
-              let facts = memoryBook?.facts, !facts.isEmpty else { return nil }
+              let facts = memoryBook?.snapshotFacts, !facts.isEmpty else { return nil }
         return Self.memoryBlock(facts, query: query)
     }
 

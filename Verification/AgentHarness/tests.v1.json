@@ -904,6 +904,22 @@
         {
           "kind": "xctest",
           "value": "AgentRuntimeTests.AgentExecutorRecoveryIntegrationTests/testMalformedActionGetsExactlyOneConstrainedRepairAndReleasesFailedDecode"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentExecutorRecoveryIntegrationTests/testOnlineToolProtocolTextGetsOneRecordedRepairInsteadOfACompletedAnswer"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentExecutorRecoveryIntegrationTests/testSuccessfulRepairedToolCallDoesNotChargeLaterAnswerAsAnotherRepair"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentExecutorRecoveryIntegrationTests/testDistinctMalformedActionsRepairOnlyWithinTheTotalBudget"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentExecutorToolIntegrationTests/testOnlyLocallyTrustedPageMissContinuesTheBatchAndKeepsToolsAvailable"
         }
       ],
       "platforms": [
@@ -940,6 +956,22 @@
         {
           "kind": "xctest",
           "value": "AgentRuntimeTests.RuntimeRepositorySQLiteTests/testBudgetReserveSettleReleaseLimitsDuplicatesAndConservativeReopen"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentContractsTests.BudgetLedgerTests/testAvailableCapacitySubtractsSettledAndInflightWorkButRetainsOperationCeilings"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentExecutorToolIntegrationTests/testZeroToolCapacitySuppressesAdvertisementsWithoutErasingTheFrozenCatalog"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentExecutorToolIntegrationTests/testOversizedToolBatchCanReplanOnceWithoutExecutingRejectedCallsOrIncreasingCapacity"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentExecutorToolIntegrationTests/testModelContinuationUsesRemainingActiveTimeWithoutIncreasingTheRunBudget"
         }
       ],
       "platforms": [
@@ -1856,7 +1888,8 @@
       "kind": "property",
       "riskTier": "P0",
       "requirementIDs": [
-        "AH-DYNAMIC-001"
+        "AH-DYNAMIC-001",
+        "AH-COLLAB-001"
       ],
       "selectors": [
         {
@@ -1878,6 +1911,250 @@
         {
           "kind": "xctest",
           "value": "AgentRuntimeTests.DynamicWorkflowStorageTests/testContentAddressedValueStoreMovesLargeCanonicalJSONOutOfJournalAndVerifiesRoundTrip"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.ToolV2AdapterTests/testWorkflowGeneratorSuppressesItsOwnToolsWithoutErasingDelegatedPolicy"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.ToolV2AdapterTests/testResearchChildCanFinishItsAdmittedModelPassesButCannotExceedTheirBudget"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.ToolV2AdapterTests/testWorkflowChildUsesRemainingToolCapacityWithoutIncreasingItsShare"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.ToolV2AdapterTests/testGeneratedStagePromisesRequireExecutableCallsNotStringsOrComments"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowAdversarialTests/testCancellationUsesCommittedResultWhenAcknowledgementIsLostAndKeepsUsage"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.ToolV2AdapterTests/testRoleCapsReserveBothVerifiersBeforeSynthesisWithoutIncreasingTotalBudget"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowRuntimeTests/testBoundedUniqueCountsWholeCodesAndWebEvidenceIsAReadOnlyHostSnapshot"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowRuntimeTests/testWebEvidenceKeepsRecordedFailuresAndDoesNotPromoteRemoteToolsOrUnreadLinks"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentExecutorToolIntegrationTests/testWebEvidenceComesFromDurableToolRecordsWithoutRepeatingExecution"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowAdversarialTests/testFailedParallelWorkflowWaitsForDelayedCancellationCommitWithoutRespawning"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowRuntimeTests/testAgentPromptCanonicalizesOuterWhitespaceBeforeHostDispatch"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.CoordinatedWorkflowTests/testSupervisorReceivesActualParallelResultsAndContinuesExistingTask"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.CoordinatedWorkflowTests/testSupervisorReadsUntruncatedArtifactLocallyWithoutAnotherWorkerOrWebCall"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.CoordinatedWorkflowTests/testInvalidReferencesAreRejectedAndFailedWorkersStayVisible"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.CoordinatedWorkflowTests/testRepeatedLocalReadsStopWithoutSpawningWorkers"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.CoordinatedWorkflowTests/testFrozenProgramAndSchemasPassTheSameAnalyzerAndSchemaEnforcement"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.CoordinatedWorkflowTests/testUnusedToolAllowancesRemainAvailableForDependentWork"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.CoordinatedWorkflowTests/testDependentWorkerReceivesSelectedOriginalRangeInsteadOfAnotherPrefix"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testRecoveredBudgetExcludesFutureSettlementsAndUsesActualConsumption"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.CoordinatedWorkflowTests/testStructuredRepairDiagnosticLocatesTheConstraintWithoutEchoingOutput"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testRecoveredEvidenceContainsOnlyCallsReachedByTheReplayedPrefix"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowAdversarialTests/testUncertainChildStopsForReconciliationWithoutSettlingOrRetrying"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testShrinkingAdmissionWaitsForReservedCapacityButNotTrueExhaustion"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testFailedAdmissionIsDurableInsteadOfLeavingAnUnsettledPreparedCall"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowRuntimeTests/testWebEvidenceQueryFindsMiddleFieldsWithoutIncreasingExcerptBudget"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowRuntimeTests/testJavaScriptEvidenceQueryReachesReadOnlyHostWithoutSpawningAChild"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowRuntimeTests/testStructuredSearchKeepsContentProvenanceAndNeverPromotesEmbeddedLinks"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowRuntimeTests/testEnrichedEvidencePrioritizesLaterCitedSourcesWithinAGlobalTextBound"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testWaitAnyStartsDependentWorkBeforeUnrelatedSiblingFinishes"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testWaitSelectionReplaysOriginalChoiceAndDoesNotLeakOtherCompletedResults"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testTaskGraphPausesWithUnfinishedGoalAndExplicitResumeContinuesWithoutRepeatingWork"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testGoalDeliveryCannotHideAcceptedPendingAgentInput"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testPreparationUsageIsRecordedBeforeApprovalAndCannotBecomeFreshChildCapacity"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testV5CoordinatorRunsDeclaredDependenciesAndExactSourceRangesThroughProductionEngine"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testOversizedArgumentsFailWithoutAccessingADisposedJavaScriptRealm"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.WorkflowTaskGraphTests/testCycleAndStaleAssignmentRejectionLeaveTheWholeGraphUnchanged"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.WorkflowTaskGraphTests/testClaimOwnershipAndReopeningRetainOriginalArtifactsAndInvalidateConsumers"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.WorkflowTaskGraphTests/testGoalAmendmentAndModelUpdatesCannotRemoveOriginalRequirements"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.WorkflowTaskGraphTests/testHistoricalReviewCanReviseTheSameTaskWithoutACurrentDependencyCycle"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.WorkflowTaskGraphTests/testArtifactReadsPreserveUnicodeAndRejectSurrogateInteriorOffsets"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.WorkflowAgentProfileTests/testRoleProfileNarrowsToolsLoadsOnlyAllowedSkillAndRespectsReasoningCeiling"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.WorkflowAgentProfileTests/testNewCatalogAdmissionRemovesUnavailableSkillsWithoutMutatingFrozenSources"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.ToolV2AdapterTests/testOnlineSkillDiscoveryKeepsUnselectedCustomPacksPrivateAndLocalSelectionExplicit"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testRejectedTaskClaimIsDurableAndRetryDoesNotContinueAnUnsubmittedSeed"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testHumanGoalUpdateRecordsRecipientsAndSteersAnActiveTaskWithoutRestartingIt"
+        },
+        {
+          "kind": "xctest",
+          "value": "MobileLLMUITests.WorkflowGoalPresentationTests/testPlannedDependenciesAndReadyResultReflectDifferentRuntimeStates"
+        },
+        {
+          "kind": "xctest",
+          "value": "MobileLLMUITests.WorkflowGoalPresentationTests/testViewingGoalNeverResumesAndExplicitUpdateIsSavedBeforeResume"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testV5LateInboxReopensItsOwnerWithinTheGoalInsteadOfRepeatingDelivery"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.ToolV2AdapterTests/testDelegatedMessagingKeepsItsCapabilityWithoutGrantingCanonicalWrites"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.ResponsesAPIModelProviderTests/testInvalidNativeArgumentsRejectTheWholeBatchAndRetainMeteredRepairFeedback"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.ResponsesAPIModelProviderTests/testDeepSeekNativeHistoryKeepsExplicitEmptyReasoningAcrossANonThinkingRepair"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testV5ReassignedAgentConsumesItsInboxWithoutTakingBackTaskOwnership"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testV5FailedCoordinatorReplaysItsPauseBeforeResumingWithoutRepeatingWorkers"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testV5PreparationRequiresDelegationOrARealBlocker"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.ToolV2AdapterTests/testTeamCatalogRetainsTheOldMessageAdapterWithoutAdvertisingDuplicateTools"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testV5DeclaredChainRunsWithoutCoordinatorPollingBetweenEveryResult"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.WorkflowOutputLimitsTests/testHumanLimitsCountTheWholeDeliverableAndIgnoreQuotedExamples"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.WorkflowOutputLimitsTests/testChineseCharacterLimitsAndJSONHaveDirectChecks"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testV5WorkerOutputLimitRetainsRejectedOriginalAndBoundsCorrection"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testFinalOutputCorrectionUsesTheSameGoalAndHasABound"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.DynamicWorkflowDurabilityTests/testDeliveryCannotReplaceItsValidatedAnswerWithDifferentText"
         }
       ],
       "platforms": [
@@ -1981,6 +2258,81 @@
       }
     },
     {
+      "id": "AHT-DYNAMIC-LIVE-001",
+      "title": "Native production runtime live multi-stage task evaluation",
+      "status": "active",
+      "kind": "integration",
+      "riskTier": "P0",
+      "requirementIDs": [
+        "AH-DYNAMIC-001"
+      ],
+      "selectors": [
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.AutonomousWorkflowLiveTests/test11TransactionalMigrationWithDependentReview"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.AutonomousWorkflowLiveTests/test12MaintenancePlanAndOutageReplanning"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.AutonomousWorkflowLiveTests/test13IncidentEvidenceAndSafeRecovery"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.AutonomousWorkflowLiveTests/testExecutableOracleRejectsDataLossNonatomicityAndWeakUniqueness"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.AutonomousWorkflowLiveTests/test14SourceResearchAndAttribution"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.AutonomousWorkflowLiveTests/test15InteractiveCorrectionAndMessaging"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.AutonomousWorkflowLiveTests/test16OriginalContextAndLaterCorrection"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.AutonomousWorkflowLiveTests/test20FrozenSixFamilyQualification"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.AutonomousWorkflowLiveTests/testSourceQuoteCheckHandlesRenderedEscapesWithoutAcceptingAnotherPageOrParaphrase"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.AutonomousWorkflowLiveTests/testPlanningOracleAcceptsAProofWithoutRelaxingCostOrFeasibility"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.AutonomousWorkflowLiveTests/test17WholeDeliverableAndWorkerLimits"
+        }
+      ],
+      "platforms": [
+        "ios-simulator",
+        "ios-device"
+      ],
+      "verificationTiers": [
+        "nightly",
+        "release-candidate"
+      ],
+      "requiredEvidence": [
+        "Original goal and final artifact, real online provider identity, exact source digest, actual usage and durable call sequences",
+        "At least three completed dependency stages, exact original artifact handoffs and at least three distinct agent identities",
+        "Executable SQLite migration invariants including atomic failure and idempotency; optimal baseline/outage schedules and actual Calculator result; evidence-bounded incident decisions",
+        "Original retrieved support, interactive amendment inclusion, original context reads, and all eighteen held-out attempts at one frozen runtime with disclosed evaluator rechecks"
+      ],
+      "determinism": {
+        "fixedSeedRequired": false,
+        "rotatingSeedRequired": false
+      },
+      "notes": "Real model calls require MOBILELLM_LIVE_WORKFLOWS=1. Chat and evaluations share prepareCoordinatedWorkflow. Ordinary test runs skip model calls; the offline oracle counterexample test remains cheap and deterministic."
+    },
+    {
       "id": "AHT-DYNAMIC-EXPLORATION-001",
       "title": "Real-model Dynamic Workflow complex-goal decomposition and answer quality matrix",
       "status": "active",
@@ -2013,6 +2365,26 @@
         {
           "kind": "ui-test",
           "value": "DynamicWorkflowExplorationUITests/test99AdHocGoalFromEnvironment"
+        },
+        {
+          "kind": "ui-test",
+          "value": "DynamicWorkflowExplorationUITests/test06ClosedCorpusCoverageAndAliases"
+        },
+        {
+          "kind": "ui-test",
+          "value": "DynamicWorkflowExplorationUITests/test07ConstrainedProcurementOptimality"
+        },
+        {
+          "kind": "ui-test",
+          "value": "DynamicWorkflowExplorationUITests/test08DependencyScheduleFeasibilityAndLowerBound"
+        },
+        {
+          "kind": "ui-test",
+          "value": "DynamicWorkflowExplorationUITests/test09SearchServiceComparisonFromPrimarySources"
+        },
+        {
+          "kind": "ui-test",
+          "value": "DynamicWorkflowExplorationUITests/test10EuropeanResearchIncludesHeldOutKnownGroup"
         }
       ],
       "platforms": [
@@ -2024,8 +2396,9 @@
         "release-candidate"
       ],
       "requiredEvidence": [
-        "Exact generated JavaScript, durable child-call projection, terminal state, actual final assistant answer, semantic-oracle failures, and screenshot retained in xcresult",
-        "Feasibility, constrained planning, architecture, incident, injection-boundary, prefix/suffix command, and parameterized future-goal scenarios"
+        "Exact versioned JavaScript and model-created decisions, durable child-call projection, terminal state, actual final assistant answer, semantic-oracle failures, and screenshot retained in xcresult",
+        "Feasibility, constrained planning, architecture, incident, injection-boundary, prefix/suffix command, and parameterized future-goal scenarios",
+        "Closed-corpus recall/alias oracle, exhaustive feasible-pair optimum, dependency/resource schedule checks, and primary-source comparison; no maintainer-supplied intermediate answers"
       ],
       "determinism": {
         "fixedSeedRequired": false,
@@ -2580,6 +2953,26 @@
         {
           "kind": "xctest",
           "value": "LLMCoreTests.ToolSchemaConsistencyTests/testStaticSchemasMatchInstanceSchemas"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.ToolV2AdapterTests/testDeepSeekSelectionIsFrozenAndReconstructsWithoutDuplicatePublicTools"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.ToolV2AdapterTests/testDeepSeekReadsCredentialsOnlyAfterAuthorizationAndFailsWithoutFallback"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.ToolV2AdapterTests/testDeepSeekInvalidPageBecomesAToolFailureWithoutReadingCredentials"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.ToolV2AdapterTests/testOnlyMissingFetchedPagesReceiveTheLocalNonessentialMissClassification"
+        },
+        {
+          "kind": "xctest",
+          "value": "LLMCoreTests.DeepSeekWebClientTests/testSearchCanReturnBoundedPageContentWithoutCallingFetchOrInventingFreshness"
         }
       ],
       "platforms": [
@@ -2595,6 +2988,157 @@
       ],
       "determinism": {
         "fixedSeedRequired": false,
+        "rotatingSeedRequired": false
+      }
+    },
+    {
+      "id": "AHT-CONTEXT-APP-001",
+      "title": "Preserve Memory controls and freshness through production app submission",
+      "status": "active",
+      "kind": "integration",
+      "riskTier": "P0",
+      "requirementIDs": [
+        "AH-CONTEXT-002"
+      ],
+      "selectors": [
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.ProductionRegressionTests/testMemoryOffExcludesSavedFactsFromProductionFrozenInput"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.ProductionRegressionTests/testToolSavedFactAppearsOnTheNextProductionSend"
+        },
+        {
+          "kind": "xctest",
+          "value": "mobileLLMUnitTests.ProductionRegressionTests/testProductionMemorySelectionOmitsUnrelatedFacts"
+        }
+      ],
+      "platforms": [
+        "macos",
+        "ios-simulator"
+      ],
+      "verificationTiers": [
+        "pull-request",
+        "release-candidate"
+      ],
+      "requiredEvidence": [
+        "Tests through makeAgentSnapshot and AppFrozenInputBuilder: Memory off excludes saved facts, irrelevant facts are omitted, and a tool-saved fact is available on the next send",
+        "Existing legacy ChatStoreMemoryInjectionTests and pure ContextCompiler tests do not replace app assembly coverage"
+      ],
+      "determinism": {
+        "fixedSeedRequired": false,
+        "rotatingSeedRequired": false
+      }
+    },
+    {
+      "id": "AHT-SESSION-001",
+      "title": "Retain accepted session inputs across commit interruption",
+      "status": "active",
+      "kind": "fault-injection",
+      "riskTier": "P0",
+      "requirementIDs": [
+        "AH-SESSION-001"
+      ],
+      "selectors": [
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentSessionJournalTests/testInterruptedAcknowledgementIsAtomicAndCanBeReplayed"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentSessionJournalTests/testStaleWriterCannotLoseAnAcceptedMessage"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentSessionJournalTests/testVersionFiveMigrationPreservesRunHistory"
+        }
+      ],
+      "platforms": [
+        "swiftpm",
+        "ios-simulator"
+      ],
+      "verificationTiers": [
+        "pull-request",
+        "nightly"
+      ],
+      "requiredEvidence": [
+        "Real journal and executor assertions with controlled model boundary"
+      ],
+      "determinism": {
+        "fixedSeedRequired": true,
+        "rotatingSeedRequired": false
+      }
+    },
+    {
+      "id": "AHT-SESSION-002",
+      "title": "Continue and steer durable agent sessions",
+      "status": "active",
+      "kind": "integration",
+      "riskTier": "P0",
+      "requirementIDs": [
+        "AH-SESSION-001",
+        "AH-COLLAB-001"
+      ],
+      "selectors": [
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentSessionExecutionTests/testSteeringDuringGenerationCannotBeLostByFinalAnswerAndRetryDoesNotDuplicate"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentSessionExecutionTests/testThreeTurnsKeepSessionAndHistoryAcrossExecutorRecreation"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentSessionExecutionTests/testPausedSteerRemainsPendingAfterRecreationUntilExplicitResume"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentSessionExecutionTests/testUnconsumedInputSurvivesCancellationAndIsCarriedIntoNextExplicitTurn"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentSessionExecutionTests/testBackgroundQuiescenceCoversUnobservedFollowupsAndKeepsQueuedInput"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentSessionExecutionTests/testAutomaticContinuationKeepsReservedBudgetSenderAndSessionWithoutHumanTurnAdmission"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentSessionExecutionTests/testGoalCompletionBarrierOrdersConcurrentMessageAcceptance"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentSessionExecutionTests/testReducedHistoryKeepsOriginalRequirementReadableAndRecentCorrectionInContextAfterRestart"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.WorkflowAgentToolExecutionTests/testModelMessageUsesAuthorizedBoundaryAndWaitsForBudgetedCoordinatorActivation"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.AgentSessionExecutionTests/testGoalOwnedInputCannotAutomaticallyMintAStandaloneHumanTurnBudget"
+        },
+        {
+          "kind": "xctest",
+          "value": "AgentRuntimeTests.WorkflowAgentToolExecutionTests/testNoticeIsRetainedWithoutRequiringAnActivationAndJoinsTheNextRealAssignment"
+        }
+      ],
+      "platforms": [
+        "swiftpm",
+        "ios-simulator"
+      ],
+      "verificationTiers": [
+        "pull-request",
+        "nightly"
+      ],
+      "requiredEvidence": [
+        "Real journal and executor assertions with controlled model boundary"
+      ],
+      "determinism": {
+        "fixedSeedRequired": true,
         "rotatingSeedRequired": false
       }
     }

@@ -169,6 +169,85 @@ final class AgentExecutorRecoveryIntegrationTests: XCTestCase {
         )
     }
 
+    func testOnlineToolProtocolTextGetsOneRecordedRepairInsteadOfACompletedAnswer() async throws {
+        try await assertTrustedStructuredFailureIsRepaired(code: "model.online.malformed-action", offset: 104)
+    }
+
+    func testSuccessfulRepairedToolCallDoesNotChargeLaterAnswerAsAnotherRepair() async throws {
+        let offset = 105
+        let model = try ExecutorTestModelDefinition(offset: offset)
+        let definition = try ExecutorTestToolDefinition(name: "repair-followup")
+        let call = try definition.call(offset: offset)
+        let failure = try AgentFailure(code: "model.online.malformed-action", classification: .permanent,
+            safeMessage: "Malformed tool protocol", retryAdvice: .never, externalEffect: .confirmedNone,
+            requiredUserAction: .none, redaction: RedactionMetadata(classification: .publicMetadata, policyVersion: 1))
+        let provider = SequencedModelOutcomeProvider(model: model, outcomes: [
+            .failed(failure),
+            .completed(try AgentModelCompletion(action: .callTools([call]), usage: modelUsage(input: 8, output: 3, milliseconds: 4, memory: 48))),
+            .completed(try AgentModelCompletion(action: .finalAnswer(AgentAnswer(text: "Finished after the tool")), usage: modelUsage(input: 9, output: 4, milliseconds: 4, memory: 48)))
+        ])
+        let tool = ExecutorTestTool(definition: definition, behavior: .complete("observed result"))
+        let harness = try ExecutorTestHarness(offset: offset, provider: provider, model: model,
+            toolDescriptors: [definition.descriptor], tools: SingleExecutorTestToolCatalog(tool: tool),
+            explicitlyRequestedToolIDs: [definition.descriptor.id.logicalID])
+        let handleID = try await harness.executor.submit(harness.request, commandID: ExecutorTestID.command(offset))
+        let handle = try await harness.executor.attach(to: handleID)
+        let events = try await collectTerminalEvents(from: handle)
+        let result = try await handle.result()
+        XCTAssertEqual(result?.status.state, .completed)
+        XCTAssertEqual(result?.usage.quantities[.structuredRepairs], 1)
+        XCTAssertEqual(result?.usage.quantities[.toolInvocations], 1)
+        XCTAssertEqual(result?.usage.quantities[.modelAttempts], 3)
+        XCTAssertGreaterThan(result?.usage.quantities[.inputTokens] ?? 0, 17, "Unmetered failed inference is not free")
+        let requests = await provider.script.capturedRequests()
+        XCTAssertEqual(requests.count, 3)
+        XCTAssertEqual(requests.last?.generationParameters.temperature, 0.7, "A normal continuation is not another repair")
+        let recorded = events.compactMap { event -> AgentFailure? in
+            guard case .modelAttemptOutcome(.failed(let failure)) = event.payload.event else { return nil }
+            return failure
+        }
+        XCTAssertTrue(recorded.contains { $0.safeMessage.contains("model.online.malformed-action") })
+    }
+
+    func testDistinctMalformedActionsRepairOnlyWithinTheTotalBudget() async throws {
+        for allowance in [UInt64(1), 2] {
+            let offset = 110 + Int(allowance)
+            let model = try ExecutorTestModelDefinition(offset: offset)
+            let definition = try ExecutorTestToolDefinition(name: "independent-repair")
+            let call = try definition.call(offset: offset)
+            let failure = try AgentFailure(code: "model.online.malformed-action", classification: .permanent,
+                safeMessage: "Malformed tool protocol", retryAdvice: .never, externalEffect: .confirmedNone,
+                requiredUserAction: .none, redaction: RedactionMetadata(classification: .publicMetadata, policyVersion: 1))
+            let provider = SequencedModelOutcomeProvider(model: model, outcomes: [
+                .failed(failure),
+                .completed(try AgentModelCompletion(action: .callTools([call]), usage: modelUsage(input: 8, output: 3, milliseconds: 4, memory: 48))),
+                .failed(failure),
+                .completed(try AgentModelCompletion(action: .finalAnswer(AgentAnswer(text: "Recovered after progress")), usage: modelUsage(input: 9, output: 4, milliseconds: 4, memory: 48)))
+            ])
+            let defaults = try AgentBudget.firstReleaseDefaults(contextTokensPerAttempt: 4096, outputTokens: 1024, peakMemoryBytes: 1_073_741_824)
+            var limits = Dictionary(uniqueKeysWithValues: defaults.limits.entries.map { ($0.dimension, $0.value) })
+            limits[.structuredRepairs] = allowance
+            let budget = try AgentBudget(limits: BudgetQuantities(limits), maximumThermalState: defaults.maximumThermalState, memoryPressureResponse: defaults.memoryPressureResponse)
+            let tool = ExecutorTestTool(definition: definition, behavior: .complete("observed result"))
+            let harness = try ExecutorTestHarness(offset: offset, provider: provider, model: model,
+                toolDescriptors: [definition.descriptor], tools: SingleExecutorTestToolCatalog(tool: tool),
+                explicitlyRequestedToolIDs: [definition.descriptor.id.logicalID], budget: budget)
+            let id = try await harness.executor.submit(harness.request, commandID: ExecutorTestID.command(offset))
+            let handle = try await harness.executor.attach(to: id)
+            _ = try await collectTerminalEvents(from: handle)
+            let result = try await handle.result()
+            let requests = await provider.script.capturedRequests()
+            XCTAssertEqual(requests.count, allowance == 2 ? 4 : 3)
+            XCTAssertEqual(result?.usage.quantities[.structuredRepairs], allowance)
+            if allowance == 2 {
+                XCTAssertEqual(result?.status.state, .completed)
+                XCTAssertEqual(result?.answer?.text, "Recovered after progress")
+            } else {
+                XCTAssertEqual(result?.status.terminalReason, .budgetExceeded)
+            }
+        }
+    }
+
     func testNonRetryableModelFailureClassificationMapsToStableTerminalReason() async throws {
         let cases: [(AgentFailureClassification, ExternalEffectDisposition, AgentTerminalReason)] = [
             (.budgetRelated, .confirmedNone, .budgetExceeded),

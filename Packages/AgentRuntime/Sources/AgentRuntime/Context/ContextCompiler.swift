@@ -70,21 +70,20 @@ public struct ContextCompiler: Sendable {
         let candidates = ContextRendering.candidates(snapshot)
         var selections: [String: ContextSelection] = [:]
 
-        let base = candidates.first { $0.kind == .baseSystem }!
-        let current = candidates.first { $0.kind == .currentUser }!
-        let baseSelection = try fullSelection(base)
-        let currentSelection = try fullSelection(current)
-        let (mandatoryTokens, mandatoryOverflow) = baseSelection.estimatedTokens.addingReportingOverflow(
-            currentSelection.estimatedTokens
-        )
-        guard !mandatoryOverflow, mandatoryTokens <= budget.maximumInputTokens else {
-            throw ContextCompilationError.contextUnsatisfiable(
-                requiredTokens: mandatoryOverflow ? UInt64.max : mandatoryTokens,
-                availableTokens: budget.maximumInputTokens
-            )
+        let mandatory = candidates.filter {
+            $0.kind == .baseSystem || $0.kind == .currentUser || (snapshot.contextPolicyVersion == 3 && $0.kind == .skill)
         }
-        selections[base.key] = baseSelection
-        selections[current.key] = currentSelection
+        var mandatoryTokens: UInt64 = 0
+        for candidate in mandatory {
+            let selection = try fullSelection(candidate)
+            let (total, overflow) = mandatoryTokens.addingReportingOverflow(selection.estimatedTokens)
+            guard !overflow, total <= budget.maximumInputTokens else {
+                throw ContextCompilationError.contextUnsatisfiable(requiredTokens: overflow ? UInt64.max : total,
+                    availableTokens: budget.maximumInputTokens)
+            }
+            mandatoryTokens = total
+            selections[candidate.key] = selection
+        }
 
         var consumedTokens = mandatoryTokens
         var consumedToolTokens: UInt64 = 0
@@ -117,8 +116,8 @@ public struct ContextCompiler: Sendable {
             }
         }
 
-        let mandatoryKeys = Set([base.key, current.key])
-        let optionalAllocationOrder = ContextRendering.optionalAllocationOrder(candidates)
+        let mandatoryKeys = Set(mandatory.map(\.key))
+        let optionalAllocationOrder = ContextRendering.optionalAllocationOrder(candidates, policyVersion: snapshot.contextPolicyVersion)
         for candidate in optionalAllocationOrder where !mandatoryKeys.contains(candidate.key) {
             let available = budget.maximumInputTokens - consumedTokens
             let selection = try bestSelection(candidate, availableTokens: available)
@@ -315,6 +314,7 @@ struct ContextCandidate {
     let toolInvocationID: ToolInvocationID?
     let toolDescriptorID: AgentToolDescriptorID?
     let toolResultDigest: StableDigest?
+    let nativeToolCall: NativeToolCallContext?
 }
 
 struct ContextToolEvidence {
@@ -332,7 +332,7 @@ enum ContextRendering {
             untrusted: false
         )]
         result.append(contentsOf: snapshot.skills.map {
-            candidate(kind: .skill, frozen: $0.frozen, role: .system, untrusted: false)
+            candidate(kind: .skill, frozen: $0.frozen, role: snapshot.contextPolicyVersion == 3 ? .user : .system, untrusted: false)
         })
         result.append(contentsOf: snapshot.memories.map {
             candidate(kind: .canonicalEnglishMemory, frozen: $0.frozen, role: .user, untrusted: true)
@@ -374,16 +374,27 @@ enum ContextRendering {
                 untrusted: true,
                 toolInvocationID: $0.invocationID,
                 toolDescriptorID: $0.descriptorID,
-                toolResultDigest: $0.resultDigest
+                toolResultDigest: $0.resultDigest,
+                nativeToolCall: $0.nativeToolCall
             )
         })
         return result
     }
 
-    static func optionalAllocationOrder(_ candidates: [ContextCandidate]) -> [ContextCandidate] {
+    static func optionalAllocationOrder(_ candidates: [ContextCandidate], policyVersion: UInt32 = 1) -> [ContextCandidate] {
         func values(_ kinds: Set<ContextSourceKind>, reversed: Bool = false) -> [ContextCandidate] {
             let selected = candidates.filter { kinds.contains($0.kind) }
             return reversed ? selected.reversed() : selected
+        }
+        if policyVersion >= 2 {
+            // The current tool observation and active task state take precedence over background
+            // memory and old conversation. Version 1 remains reproducible for persisted runs.
+            return values([.runState])
+                + values([.untrustedToolResult], reversed: true)
+                + values([.skill])
+                + values([.canonicalEnglishMemory])
+                + values([.conversationUser, .conversationAssistant], reversed: true)
+                + values([.artifactExcerpt])
         }
         return values([.skill])
             + values([.canonicalEnglishMemory])
@@ -402,7 +413,8 @@ enum ContextRendering {
         artifact: ArtifactReference? = nil,
         toolInvocationID: ToolInvocationID? = nil,
         toolDescriptorID: AgentToolDescriptorID? = nil,
-        toolResultDigest: StableDigest? = nil
+        toolResultDigest: StableDigest? = nil,
+        nativeToolCall: NativeToolCallContext? = nil
     ) -> ContextCandidate {
         ContextCandidate(
             key: "\(kind.rawValue):\(frozen.sourceID)",
@@ -414,7 +426,8 @@ enum ContextRendering {
             artifact: artifact,
             toolInvocationID: toolInvocationID,
             toolDescriptorID: toolDescriptorID,
-            toolResultDigest: toolResultDigest
+            toolResultDigest: toolResultDigest,
+            nativeToolCall: nativeToolCall
         )
     }
 
@@ -445,7 +458,8 @@ enum ContextRendering {
             role: candidate.role,
             content: content,
             isUntrustedData: candidate.isUntrustedData,
-            artifacts: candidate.artifacts
+            artifacts: candidate.artifacts,
+            nativeToolCall: candidate.nativeToolCall
         )
     }
 
@@ -458,7 +472,9 @@ enum ContextRendering {
                 + " reference-sha256=\(artifactDigest($0).rawValue)>"
         }.joined(separator: "\n")
         let artifacts = artifactLines.isEmpty ? "" : artifactLines + "\n"
-        return header + artifacts + message.content + "\n</message>\n"
+        let native = message.nativeToolCall.flatMap { try? CanonicalJSON($0.authorizationValue).string }
+        let continuation = native.map { "<native-tool-context>" + $0 + "</native-tool-context>\n" } ?? ""
+        return header + artifacts + continuation + message.content + "\n</message>\n"
     }
 
     static func renderPrompt(_ messages: [AgentModelMessage]) -> String {
@@ -524,6 +540,9 @@ enum ContextRendering {
         ]
         for source in candidates(snapshot) {
             components.append(Data(source.key.utf8))
+            if let native = source.nativeToolCall, let bytes = try? native.authorizationValue.canonicalData() {
+                components.append(bytes)
+            }
             components.append(Data(source.frozen.revision.utf8))
             components.append(Data(source.frozen.contentDigest.rawValue.utf8))
             components.append(Data(source.role.rawValue.utf8))

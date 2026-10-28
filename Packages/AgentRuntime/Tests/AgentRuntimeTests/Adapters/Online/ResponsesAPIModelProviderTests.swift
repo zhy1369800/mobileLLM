@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
+// TEST-ID: AHT-DYNAMIC-001
 
 import XCTest
+import LLMCore
 @_spi(AgentRuntime) import AgentContracts
 @testable import AgentRuntime
 
@@ -52,6 +54,105 @@ final class MockResponsesURLProtocol: URLProtocol {
 }
 
 final class ResponsesAPIModelProviderTests: XCTestCase {
+
+    func testWireAliasesCannotCollideWithARealToolNameAndExcludeDots() throws {
+        func descriptor(_ name: String) throws -> AgentToolDescriptor {
+            try MCPToolV2Adapter.descriptor(spec: MCPToolSpec(name: name, description: "Lookup", inputSchemaJSON: "{\"type\":\"object\"}"),
+                                           serverStableID: UUID(), trustRevision: "test")
+        }
+        let dotted = try descriptor("lookup.v2")
+        let reserved = try XCTUnwrap(ModelToolNames.bindings(for: [dotted]).first?.wireName)
+        let spoof = try descriptor(reserved)
+        let names = ModelToolNames.bindings(for: [dotted, spoof]).map(\.wireName)
+        XCTAssertEqual(Set(names).count, 2)
+        XCTAssertFalse(names.contains { $0.contains(".") })
+        XCTAssertEqual(names[1], reserved)
+    }
+
+
+    func testNativeToolResultsReplayCallIdentityAndReasoningAfterSerialization() throws {
+        let fixture = try ModelFixture(location: .remote, providerID: ResponsesAPIModelProvider.providerID)
+        let reasoning: JSONValue = .object(["type": .string("reasoning"), "id": .string("rs_1"),
+                                            "summary": .array([]), "encrypted_content": .string("opaque")])
+        let native = try NativeToolCallContext(
+            selectionDigest: NativeToolCallContext.digest(for: fixture.request.selection),
+            callID: "call_123", name: "lookup", arguments: CanonicalJSON(.object([:])),
+            reasoningItems: [reasoning], reasoningText: "provider reasoning"
+        )
+        let message = try AgentModelMessage(role: .tool, content: "verified result", isUntrustedData: true,
+                                            nativeToolCall: native)
+        let restored = try JSONDecoder().decode(AgentModelMessage.self, from: JSONEncoder().encode(message))
+        let wire = try ResponsesAPIModelProvider.messagesPayload([restored], selection: fixture.request.selection).input
+        XCTAssertEqual(wire, [reasoning, native.functionCallItem, .object([
+            "type": .string("function_call_output"), "call_id": .string("call_123"),
+            "output": .string("verified result"),
+        ])])
+        XCTAssertThrowsError(try AgentModelMessage(role: .user, content: "x", isUntrustedData: false, nativeToolCall: native))
+        XCTAssertThrowsError(try NativeToolCallContext(selectionDigest: native.selectionDigest, callID: "c", name: "lookup",
+                                                       arguments: native.arguments, reasoningItems: [.object(["type": .string("message")])]))
+        let synthesis = try AgentModelRequest(requestID: fixture.request.requestID, runID: fixture.request.runID,
+            stepID: fixture.request.stepID, selection: fixture.request.selection,
+            compiledManifestDigest: fixture.request.compiledManifestDigest, messages: [restored],
+            advertisedTools: [], toolSelectionSnapshot: fixture.request.toolSelectionSnapshot,
+            generationParameters: fixture.request.generationParameters, outputRequirement: .text)
+        let chat = try AgentWireDecoder.decode(JSONValue.self,
+            from: ResponsesAPIModelProvider.chatCompletionsRequestBody(request: synthesis), limits: .inlineValue)
+        guard case .object(let fields) = chat else { return XCTFail("Missing Chat Completions payload") }
+        XCTAssertEqual(fields["tools"], .array([]))
+        XCTAssertEqual(fields["tool_choice"], .string("none"))
+        let synthesisMessages = try CanonicalJSON(fields["messages"]!).string
+        XCTAssertTrue(synthesisMessages.contains("call_123"), "Keep the observed call identity")
+        XCTAssertTrue(synthesisMessages.contains("verified result"), "Keep actual observations")
+        XCTAssertTrue(synthesisMessages.contains("untrusted"))
+        XCTAssertFalse(synthesisMessages.contains("\"tool_calls\""), "No native call tokens in DeepSeek's tool-free continuation")
+        XCTAssertFalse(synthesisMessages.contains("\"role\":\"tool\""))
+        XCTAssertFalse(synthesisMessages.contains("provider reasoning"), "Opaque tool reasoning is unnecessary in the read-only answer pass")
+    }
+
+    func testDeepSeekNativeHistoryKeepsExplicitEmptyReasoningAcrossANonThinkingRepair() throws {
+        let tool = try ModelFixture.tool(name: "lookup")
+        let fixture = try ModelFixture(location: .remote, thinkingMode: .enabled, reasoningEffort: .low,
+            advertisedTools: [tool], providerID: ResponsesAPIModelProvider.providerID, modelID: "deepseek-v4-flash")
+        let native = try NativeToolCallContext(selectionDigest: NativeToolCallContext.digest(for: fixture.request.selection),
+            callID: "repair_without_thinking", name: "lookup", arguments: CanonicalJSON(.object(["q": .string("source")])) )
+        let request = try AgentModelRequest(requestID: fixture.request.requestID, runID: fixture.request.runID,
+            stepID: fixture.request.stepID, selection: fixture.request.selection,
+            compiledManifestDigest: fixture.request.compiledManifestDigest,
+            messages: [AgentModelMessage(role: .assistant, content: "Earlier answer", isUntrustedData: false),
+                AgentModelMessage(role: .tool, content: "Original observation", isUntrustedData: true, nativeToolCall: native)],
+            advertisedTools: fixture.request.advertisedTools, toolSelectionSnapshot: fixture.request.toolSelectionSnapshot,
+            generationParameters: fixture.request.generationParameters, outputRequirement: .text)
+        let data = try ResponsesAPIModelProvider.chatCompletionsRequestBody(request: request)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        let assistants = messages.filter { $0["role"] as? String == "assistant" }
+        XCTAssertEqual(assistants.count, 2)
+        XCTAssertTrue(assistants.allSatisfy { $0["reasoning_content"] as? String == "" })
+        XCTAssertNil(native.reasoningText, "Only the wire projection changes; the original record remains exact")
+        XCTAssertEqual(messages.last?["tool_call_id"] as? String, native.callID)
+        XCTAssertEqual(body["reasoning_effort"] as? String, "low")
+    }
+
+    func testNativeIdentitySeparatesRepeatedCallsWithEqualArguments() {
+        let calls = [
+            ResponsesAPIModelProvider.ParsedCall(name: "lookup", argumentsJSON: "{}", callID: "a"),
+            ResponsesAPIModelProvider.ParsedCall(name: "lookup", argumentsJSON: "{}", callID: "b"),
+            ResponsesAPIModelProvider.ParsedCall(name: "lookup", argumentsJSON: "{}", callID: "a"),
+        ]
+        XCTAssertEqual(ResponsesAPIModelProvider.deduplicatedCalls(calls).map(\.callID), ["a", "b"])
+    }
+
+    func testOnlineWirePreservesUniqueNamesForTwoMCPServers() throws {
+        let spec = MCPToolSpec(name: "lookup", description: "Look up current information", inputSchemaJSON: "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}")
+        let descriptors = try [UUID(), UUID()].map { try MCPToolV2Adapter.descriptor(spec: spec, serverStableID: $0, trustRevision: "audit.v1") }
+        XCTAssertNotEqual(descriptors[0].id.logicalID, descriptors[1].id.logicalID)
+        let payload = try ResponsesAPIModelProvider.toolsPayload(descriptors)
+        let names = payload.compactMap { value -> String? in
+            guard case .object(let object) = value, case .string(let name)? = object["name"] else { return nil }; return name
+        }
+        XCTAssertEqual(Set(names).count, descriptors.count, "Distinct registered MCP tools collapse to wire names: \(names)")
+    }
+
     func testMessagesPayloadMapsRolesAndToolFallback() throws {
         let messages = try [
             AgentModelMessage(role: .system, content: "sys", isUntrustedData: false),
@@ -384,7 +485,21 @@ final class ResponsesAPIModelProviderTests: XCTestCase {
               case .object(let responseFormat)? = object["response_format"],
               case .object(let streamOptions)? = object["stream_options"]
         else { return XCTFail("expected documented Chat Completions request: \(value)") }
-        XCTAssertEqual(messages.count, 1)
+        XCTAssertEqual(messages.count, fixture.request.messages.count + 1)
+        guard case .object(let outputInstruction) = messages.first,
+              case .string(let instruction)? = outputInstruction["content"]
+        else { return XCTFail("structured calls must send their output contract") }
+        XCTAssertEqual(outputInstruction["role"], .string("system"))
+        XCTAssertTrue(instruction.contains("JSON"), "DeepSeek JSON mode requires a JSON instruction")
+        XCTAssertTrue(instruction.contains(try CanonicalJSON(descriptor.inputSchema.root).string))
+        let responsesData = try ResponsesAPIModelProvider.requestBody(
+            request: structuredRequest, baseURL: "https://gateway.example/v1"
+        )
+        let responsesValue = try AgentWireDecoder.decode(JSONValue.self, from: responsesData, limits: .inlineValue)
+        guard case .object(let responsesObject) = responsesValue,
+              case .string(let responsesInstructions)? = responsesObject["instructions"]
+        else { return XCTFail("Responses requests also need the complete output contract") }
+        XCTAssertTrue(responsesInstructions.contains(instruction))
         XCTAssertNil(object["input"])
         XCTAssertNil(object["instructions"])
         XCTAssertEqual(object["max_tokens"], .integer(1_024))
@@ -395,6 +510,7 @@ final class ResponsesAPIModelProviderTests: XCTestCase {
         XCTAssertEqual(firstTool["type"], .string("function"))
         XCTAssertEqual(function["name"], .string("web_search"))
         XCTAssertNotNil(function["parameters"])
+        XCTAssertEqual(object["tool_choice"], .string("auto"))
 
         let response = #"{"choices":[{"finish_reason":"length","message":{"content":"Answer","reasoning_content":"Plan","tool_calls":[{"function":{"name":"web_search","arguments":"{\"q\":\"Kimi K3\"}"}}]}}],"usage":{"prompt_tokens":21,"completion_tokens":8}}"#
         let parsed = try ResponsesAPIModelProvider.parseChatCompletion(Data(response.utf8))
@@ -409,104 +525,127 @@ final class ResponsesAPIModelProviderTests: XCTestCase {
     }
 
     func testGenerateUsesOfficialDeepSeekChatEndpointAndStreamsAnswer() async throws {
-        let streamBody = """
-        data: {"choices":[{"delta":{"reasoning_content":"private plan"}}]}
+        let malformedXML = "<tool_calls>\n<invoke name=\"calculator\">\n<parameter name=\"expression\">3*100 + 2*80 + 2*100 + 2*80 + 4*100 + 2*100 + 3*60 + 1*80</parameter>\n</invoke>\n</tool_calls>"
+        for (answerText, protocolOnly) in [
+            ("Kimi K3 cannot run locally on an iPhone 16 Pro.", false),
+            ("The literal marker `<｜｜DSML｜｜tool_calls>` identifies a tool envelope.", false),
+            ("<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"fetch_webpage\">\n</｜｜DSML｜｜invoke>\n</｜｜DSML｜｜tool_calls>", true),
+            (malformedXML, true),
+            ("A `<tool_calls>` element is XML protocol syntax, not execution evidence.", false),
+            ("```xml\n" + malformedXML + "\n```", false),
+        ] {
+            let encodedText = String(decoding: try JSONEncoder().encode(answerText), as: UTF8.self)
+            let streamBody = """
+            data: {"choices":[{"delta":{"reasoning_content":"private plan"}}]}
 
-        data: {"choices":[{"delta":{"content":"Kimi K3 cannot run locally on an iPhone 16 Pro."}}]}
+            data: {"choices":[{"delta":{"content":\(encodedText)}}]}
 
-        data: {"choices":[{"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":31,"completion_tokens":11}}
+            data: {"choices":[{"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":31,"completion_tokens":11}}
 
-        data: [DONE]
+            data: [DONE]
 
-        """
-        MockResponsesURLProtocol.handler = { request in
-            XCTAssertEqual(request.url?.absoluteString, "https://api.deepseek.com/v1/chat/completions")
-            let body = MockResponsesURLProtocol.requestBodyString(request)
-            XCTAssertTrue(body.contains("\"messages\""), body)
-            XCTAssertTrue(body.contains("\"thinking\":{\"type\":\"disabled\"}"), body)
-            XCTAssertFalse(body.contains("\"input\""), body)
-            return (
-                HTTPURLResponse(
-                    url: request.url!,
-                    statusCode: 200,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "text/event-stream"]
-                )!,
-                Data(streamBody.utf8)
-            )
-        }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [MockResponsesURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        defer {
-            MockResponsesURLProtocol.handler = nil
-            MockResponsesURLProtocol.capturedRequest = nil
-        }
-
-        let fixture = try ModelFixture(
-            location: .remote,
-            thinkingMode: .disabled,
-            providerID: ResponsesAPIModelProvider.providerID,
-            remoteDestination: "openai.responses:responses-api-key:deepseek-v4-flash",
-            modelID: "deepseek-v4-flash"
-        )
-        let provider = try ResponsesAPIModelProvider(
-            configurationProvider: {
-                ResponsesAPIConfiguration(
-                    baseURL: "https://api.deepseek.com/v1",
-                    apiKey: "sk-test"
+            """
+            MockResponsesURLProtocol.handler = { request in
+                XCTAssertEqual(request.url?.absoluteString, "https://api.deepseek.com/v1/chat/completions")
+                let body = MockResponsesURLProtocol.requestBodyString(request)
+                XCTAssertTrue(body.contains("\"messages\""), body)
+                XCTAssertTrue(body.contains("\"thinking\":{\"type\":\"disabled\"}"), body)
+                XCTAssertFalse(body.contains("\"input\""), body)
+                XCTAssertTrue(body.contains("\"tools\":[]"), body)
+                XCTAssertTrue(body.contains("\"tool_choice\":\"none\""), body)
+                return (
+                    HTTPURLResponse(
+                        url: request.url!,
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: ["Content-Type": "text/event-stream"]
+                    )!,
+                    Data(streamBody.utf8)
                 )
-            },
-            session: session
-        )
-        let cloudPolicy = try AgentModelPolicy(
-            localOnly: false,
-            allowedSelections: [fixture.request.selection],
-            strategy: .pinned,
-            requiredCapabilities: AgentModelCapabilitySet([])
-        )
-        let cloudContext = try ModelPreparationContext(
-            conversationID: fixture.context.conversationID,
-            modelPolicy: cloudPolicy,
-            capabilityGrant: fixture.context.capabilityGrant,
-            authorizationPayload: fixture.context.authorizationPayload,
-            maximumRequestBytes: fixture.context.maximumRequestBytes,
-            maximumResponseBytes: fixture.context.maximumResponseBytes,
-            timeoutMilliseconds: fixture.context.timeoutMilliseconds
-        )
-        let prepared = try await AgentModelRequestPreparer().prepare(
-            provider: provider,
-            request: fixture.request,
-            context: cloudContext
-        )
-        let policy = TestApprovalPolicyEngine()
-        let authorization = try await policy.bindLocalPolicy(
-            prepared: prepared.preparedRequest.externalOperation,
-            approvalID: ApprovalID(rawValue: ModelFixture.uuid(5)),
-            trustedRunAuthority: fixture.authority,
-            at: AgentTimestamp(rawValue: 1_000)
-        )
-        let authorized = AuthorizedAgentModelAttempt(
-            preparedAttempt: prepared,
-            request: try AuthorizedModelRequest(
-                request: fixture.request,
-                authorization: authorization,
-                clock: FixedAuthorizationClock(),
-                policyValidator: policy,
-                attemptLedger: TestAttemptLedger()
-            )
-        )
+            }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockResponsesURLProtocol.self]
+            let session = URLSession(configuration: configuration)
+            defer {
+                MockResponsesURLProtocol.handler = nil
+                MockResponsesURLProtocol.capturedRequest = nil
+            }
 
-        let result = try await AgentModelExecutor().execute(
-            provider: provider,
-            authorized: authorized
-        )
-        guard case .completed(let completion) = result.outcome,
-              case .finalAnswer(let answer) = completion.action
-        else { return XCTFail("expected final answer, got \(result.outcome)") }
-        XCTAssertEqual(answer.text, "Kimi K3 cannot run locally on an iPhone 16 Pro.")
-        XCTAssertEqual(completion.usage.inputTokens, 31)
-        XCTAssertEqual(completion.usage.outputTokens, 11)
+            let fixture = try ModelFixture(
+                location: .remote,
+                thinkingMode: .disabled,
+                providerID: ResponsesAPIModelProvider.providerID,
+                remoteDestination: "openai.responses:responses-api-key:deepseek-v4-flash",
+                modelID: "deepseek-v4-flash"
+            )
+            let provider = try ResponsesAPIModelProvider(
+                configurationProvider: {
+                    ResponsesAPIConfiguration(
+                        baseURL: "https://api.deepseek.com/v1",
+                        apiKey: "sk-test"
+                    )
+                },
+                session: session
+            )
+            let cloudPolicy = try AgentModelPolicy(
+                localOnly: false,
+                allowedSelections: [fixture.request.selection],
+                strategy: .pinned,
+                requiredCapabilities: AgentModelCapabilitySet([])
+            )
+            let cloudContext = try ModelPreparationContext(
+                conversationID: fixture.context.conversationID,
+                modelPolicy: cloudPolicy,
+                capabilityGrant: fixture.context.capabilityGrant,
+                authorizationPayload: fixture.context.authorizationPayload,
+                maximumRequestBytes: fixture.context.maximumRequestBytes,
+                maximumResponseBytes: fixture.context.maximumResponseBytes,
+                timeoutMilliseconds: fixture.context.timeoutMilliseconds
+            )
+            let prepared = try await AgentModelRequestPreparer().prepare(
+                provider: provider,
+                request: fixture.request,
+                context: cloudContext
+            )
+            let policy = TestApprovalPolicyEngine()
+            let authorization = try await policy.bindLocalPolicy(
+                prepared: prepared.preparedRequest.externalOperation,
+                approvalID: ApprovalID(rawValue: ModelFixture.uuid(5)),
+                trustedRunAuthority: fixture.authority,
+                at: AgentTimestamp(rawValue: 1_000)
+            )
+            let authorized = AuthorizedAgentModelAttempt(
+                preparedAttempt: prepared,
+                request: try AuthorizedModelRequest(
+                    request: fixture.request,
+                    authorization: authorization,
+                    clock: FixedAuthorizationClock(),
+                    policyValidator: policy,
+                    attemptLedger: TestAttemptLedger()
+                )
+            )
+
+            let result = try await AgentModelExecutor().execute(
+                provider: provider,
+                authorized: authorized
+            )
+            if protocolOnly {
+                guard case .failed(let failure) = result.outcome else {
+                    XCTFail("Raw tool markup must not be committed as an answer or executed as a tool")
+                    continue
+                }
+                XCTAssertEqual(failure.code, "model.online.malformed-action")
+                XCTAssertEqual(failure.externalEffect, .confirmedNone)
+                XCTAssertEqual(failure.retryAdvice, .never)
+                continue
+            }
+            guard case .completed(let completion) = result.outcome,
+                  case .finalAnswer(let answer) = completion.action
+            else { return XCTFail("expected final answer, got \(result.outcome)") }
+            XCTAssertEqual(answer.text, answerText)
+            XCTAssertEqual(completion.usage.inputTokens, 31)
+            XCTAssertEqual(completion.usage.outputTokens, 11)
+        }
     }
 
     func testStructuredDeepSeekStreamNormalizesBeforePublishingProvisionalAnswer() async throws {
@@ -519,101 +658,126 @@ final class ResponsesAPIModelProviderTests: XCTestCase {
         data: [DONE]
 
         """
-        MockResponsesURLProtocol.handler = { request in
-            let body = MockResponsesURLProtocol.requestBodyString(request)
-            XCTAssertTrue(body.contains("\"response_format\":{\"type\":\"json_object\"}"), body)
-            return (
-                HTTPURLResponse(
-                    url: request.url!,
-                    statusCode: 200,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "text/event-stream"]
-                )!,
-                Data(streamBody.utf8)
-            )
-        }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [MockResponsesURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        defer {
-            MockResponsesURLProtocol.handler = nil
-            MockResponsesURLProtocol.capturedRequest = nil
-        }
+        let emptyStreamBody = """
+        data: {"choices":[{"finish_reason":"stop","delta":{"content":""}}],"usage":{"prompt_tokens":19,"completion_tokens":0}}
 
-        let fixture = try ModelFixture(
-            location: .remote,
-            thinkingMode: .disabled,
-            providerID: ResponsesAPIModelProvider.providerID,
-            remoteDestination: "openai.responses:responses-api-key:deepseek-v4-flash",
-            modelID: "deepseek-v4-flash",
-            outputRequirement: .structured(schema)
-        )
-        let provider = try ResponsesAPIModelProvider(
-            configurationProvider: {
-                ResponsesAPIConfiguration(
-                    baseURL: "https://api.deepseek.com/v1",
-                    apiKey: "sk-test"
+        data: [DONE]
+
+        """
+        let invalidSchemaBody = streamBody.replacingOccurrences(of: #"\"value\""#, with: "17")
+        for streamBody in [streamBody, emptyStreamBody, invalidSchemaBody] {
+            MockResponsesURLProtocol.handler = { request in
+                let body = MockResponsesURLProtocol.requestBodyString(request)
+                XCTAssertTrue(body.contains("\"response_format\":{\"type\":\"json_object\"}"), body)
+                return (
+                    HTTPURLResponse(
+                        url: request.url!,
+                        statusCode: 200,
+                        httpVersion: nil,
+                        headerFields: ["Content-Type": "text/event-stream"]
+                    )!,
+                    Data(streamBody.utf8)
                 )
-            },
-            session: session
-        )
-        let cloudPolicy = try AgentModelPolicy(
-            localOnly: false,
-            allowedSelections: [fixture.request.selection],
-            strategy: .pinned,
-            requiredCapabilities: AgentModelCapabilitySet([])
-        )
-        let cloudContext = try ModelPreparationContext(
-            conversationID: fixture.context.conversationID,
-            modelPolicy: cloudPolicy,
-            capabilityGrant: fixture.context.capabilityGrant,
-            authorizationPayload: fixture.context.authorizationPayload,
-            maximumRequestBytes: fixture.context.maximumRequestBytes,
-            maximumResponseBytes: fixture.context.maximumResponseBytes,
-            timeoutMilliseconds: fixture.context.timeoutMilliseconds
-        )
-        let prepared = try await AgentModelRequestPreparer().prepare(
-            provider: provider,
-            request: fixture.request,
-            context: cloudContext
-        )
-        let policy = TestApprovalPolicyEngine()
-        let authorization = try await policy.bindLocalPolicy(
-            prepared: prepared.preparedRequest.externalOperation,
-            approvalID: ApprovalID(rawValue: ModelFixture.uuid(5)),
-            trustedRunAuthority: fixture.authority,
-            at: AgentTimestamp(rawValue: 1_000)
-        )
-        let authorized = AuthorizedAgentModelAttempt(
-            preparedAttempt: prepared,
-            request: try AuthorizedModelRequest(
-                request: fixture.request,
-                authorization: authorization,
-                clock: FixedAuthorizationClock(),
-                policyValidator: policy,
-                attemptLedger: TestAttemptLedger()
-            )
-        )
-        let sink = RecordingModelEventSink()
+            }
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.protocolClasses = [MockResponsesURLProtocol.self]
+            let session = URLSession(configuration: configuration)
+            defer {
+                MockResponsesURLProtocol.handler = nil
+                MockResponsesURLProtocol.capturedRequest = nil
+            }
 
-        let result = try await AgentModelExecutor().execute(
-            provider: provider,
-            authorized: authorized,
-            eventSink: sink
-        )
-        guard case .completed(let completion) = result.outcome,
-              case .finalAnswer(let answer) = completion.action
-        else { return XCTFail("expected structured final answer, got \(result.outcome)") }
-        XCTAssertNil(answer.text)
-        XCTAssertEqual(answer.structuredOutput, .object(["q": .string("value")]))
-        let answerDeltas = (await sink.events()).compactMap { event -> String? in
-            guard case .provisionalAnswerDelta(let delta) = event else { return nil }
-            return delta
+            let fixture = try ModelFixture(
+                location: .remote,
+                thinkingMode: .disabled,
+                providerID: ResponsesAPIModelProvider.providerID,
+                remoteDestination: "openai.responses:responses-api-key:deepseek-v4-flash",
+                modelID: "deepseek-v4-flash",
+                outputRequirement: .structured(schema)
+            )
+            let provider = try ResponsesAPIModelProvider(
+                configurationProvider: {
+                    ResponsesAPIConfiguration(
+                        baseURL: "https://api.deepseek.com/v1",
+                        apiKey: "sk-test"
+                    )
+                },
+                session: session
+            )
+            let cloudPolicy = try AgentModelPolicy(
+                localOnly: false,
+                allowedSelections: [fixture.request.selection],
+                strategy: .pinned,
+                requiredCapabilities: AgentModelCapabilitySet([])
+            )
+            let cloudContext = try ModelPreparationContext(
+                conversationID: fixture.context.conversationID,
+                modelPolicy: cloudPolicy,
+                capabilityGrant: fixture.context.capabilityGrant,
+                authorizationPayload: fixture.context.authorizationPayload,
+                maximumRequestBytes: fixture.context.maximumRequestBytes,
+                maximumResponseBytes: fixture.context.maximumResponseBytes,
+                timeoutMilliseconds: fixture.context.timeoutMilliseconds
+            )
+            let prepared = try await AgentModelRequestPreparer().prepare(
+                provider: provider,
+                request: fixture.request,
+                context: cloudContext
+            )
+            let policy = TestApprovalPolicyEngine()
+            let authorization = try await policy.bindLocalPolicy(
+                prepared: prepared.preparedRequest.externalOperation,
+                approvalID: ApprovalID(rawValue: ModelFixture.uuid(5)),
+                trustedRunAuthority: fixture.authority,
+                at: AgentTimestamp(rawValue: 1_000)
+            )
+            let authorized = AuthorizedAgentModelAttempt(
+                preparedAttempt: prepared,
+                request: try AuthorizedModelRequest(
+                    request: fixture.request,
+                    authorization: authorization,
+                    clock: FixedAuthorizationClock(),
+                    policyValidator: policy,
+                    attemptLedger: TestAttemptLedger()
+                )
+            )
+            let sink = RecordingModelEventSink()
+
+            let result = try await AgentModelExecutor().execute(
+                provider: provider,
+                authorized: authorized,
+                eventSink: sink
+            )
+            if streamBody == emptyStreamBody || streamBody == invalidSchemaBody {
+                guard case .failed(let failure) = result.outcome else {
+                    XCTFail("Empty structured output must fail instead of becoming an answer")
+                    continue
+                }
+                XCTAssertEqual(failure.code, "model.online.structured-output-invalid")
+                XCTAssertEqual(failure.externalEffect, .confirmedNone)
+                XCTAssertEqual(failure.retryAdvice, .never, "The existing controller repair owns the retry")
+                if streamBody == invalidSchemaBody {
+                    XCTAssertTrue(failure.safeMessage.contains("$.q"), failure.safeMessage)
+                    XCTAssertEqual(result.reportedUsage?.inputTokens, 19)
+                    XCTAssertEqual(result.reportedUsage?.outputTokens, 7,
+                        "A schema failure must retain actual usage instead of charging the full reserved output")
+                }
+                continue
+            }
+            guard case .completed(let completion) = result.outcome,
+                  case .finalAnswer(let answer) = completion.action
+            else { return XCTFail("expected structured final answer, got \(result.outcome)") }
+            XCTAssertNil(answer.text)
+            XCTAssertEqual(answer.structuredOutput, .object(["q": .string("value")]))
+            let answerDeltas = (await sink.events()).compactMap { event -> String? in
+                guard case .provisionalAnswerDelta(let delta) = event else { return nil }
+                return delta
+            }
+            XCTAssertTrue(
+                answerDeltas.isEmpty,
+                "structured bytes must not escape before normalization and schema validation"
+            )
         }
-        XCTAssertTrue(
-            answerDeltas.isEmpty,
-            "structured bytes must not escape before normalization and schema validation"
-        )
     }
 
     func testRequestBodyLeavesReasoningDefaultWhenThinkingIsOn() throws {
@@ -690,6 +854,7 @@ final class ResponsesAPIModelProviderTests: XCTestCase {
         XCTAssertEqual(parsed.text, "Hello world")
         XCTAssertEqual(parsed.calls.count, 1)
         XCTAssertEqual(parsed.calls[0].name, "calculator")
+        XCTAssertEqual(parsed.calls[0].callID, "c1")
         XCTAssertEqual(parsed.usage.inputTokens, 12)
         XCTAssertEqual(parsed.usage.outputTokens, 7)
         XCTAssertFalse(parsed.hasReasoning)
@@ -769,6 +934,28 @@ final class ResponsesAPIModelProviderTests: XCTestCase {
         )
         guard case .object(let fallbackObject) = fallbackValue else { return XCTFail("body object") }
         XCTAssertNil(fallbackObject["reasoning"], "fallback must omit the reasoning field entirely")
+    }
+
+    func testFrozenRoleEffortOverridesServiceDefaultAndDeepSeekPreservesLow() throws {
+        let low = try ModelFixture(thinkingMode: .enabled, reasoningEffort: .low)
+        let body = try ResponsesAPIModelProvider.requestBody(request: low.request,
+            baseURL: "https://gateway.example/v1", reasoningEffort: .high)
+        guard case .object(let fields) = try JSONDecoder().decode(JSONValue.self, from: body) else { return XCTFail() }
+        XCTAssertEqual(fields["reasoning"], .object(["effort": .string("low")]))
+        let payload = try JSONDecoder().decode(JSONValue.self, from: low.request.authorizationPayload().data)
+        guard case .object(let root) = payload, case .object(let generation)? = root["generation"] else { return XCTFail() }
+        XCTAssertEqual(generation["reasoningEffort"], .string("low"))
+        let restored = try JSONDecoder().decode(AgentModelRequest.self, from: JSONEncoder().encode(low.request))
+        XCTAssertEqual(try restored.fingerprint(), try low.request.fingerprint())
+
+        let deepSeek = try ModelFixture(thinkingMode: .enabled, reasoningEffort: .low, modelID: "deepseek-v4-flash")
+        let chat = try ResponsesAPIModelProvider.chatCompletionsRequestBody(request: deepSeek.request, reasoningEffort: .high)
+        guard case .object(let chatFields) = try JSONDecoder().decode(JSONValue.self, from: chat) else { return XCTFail() }
+        XCTAssertEqual(chatFields["reasoning_effort"], .string("low"))
+        let legacy = try ModelFixture(thinkingMode: .enabled)
+        let old = try JSONDecoder().decode(JSONValue.self, from: legacy.request.authorizationPayload().data)
+        guard case .object(let oldRoot) = old, case .object(let oldGeneration)? = oldRoot["generation"] else { return XCTFail() }
+        XCTAssertNil(oldGeneration["reasoningEffort"], "Old authorization payloads retain their original fingerprint shape")
     }
 
     func testGeneratePostsResponsesAndEmitsTextUsageCompletion() async throws {
@@ -1662,7 +1849,33 @@ final class ResponsesAPIModelProviderTests: XCTestCase {
         }
     }
 
-    private func executeTransportFixture(data: Data, type: String, limit: UInt64, status: Int = 200) async throws -> AgentModelExecutionResult {
+    func testInvalidNativeArgumentsRejectTheWholeBatchAndRetainMeteredRepairFeedback() async throws {
+        let tool = try WorkflowAgentTool.descriptor(.sendMessage)
+        for (name, arguments) in [("send_message", "{bad"),
+            ("send_message", "{\"target\":\"peer\",\"text\":\"evidence\",\"mode\":\"interrupt\"}"),
+            ("send_message", "{\"target\":\"peer\",\"text\":\"PRIVATE_VALUE_MUST_NOT_APPEAR\"}"),
+            ("unadvertised_tool", "{}")]
+        {
+            let body: [String: Any] = ["usage": ["input_tokens": 31, "output_tokens": 11], "output": [
+                ["type":"function_call", "call_id":"valid", "name":"send_message",
+                 "arguments":"{\"target\":\"peer\",\"text\":\"valid\",\"mode\":\"steer\"}"],
+                ["type":"function_call", "call_id":"invalid", "name":name, "arguments":arguments]
+            ]]
+            let result = try await executeTransportFixture(data: JSONSerialization.data(withJSONObject: body),
+                type: "application/json", limit: 65_536, tools: [tool])
+            guard case .failed(let failure) = result.outcome else { return XCTFail("No part of an invalid batch can execute") }
+            XCTAssertEqual(failure.code, "model.online.malformed-action")
+            XCTAssertEqual(failure.externalEffect, .confirmedNone)
+            XCTAssertEqual(failure.retryAdvice, .never, "The controller owns repair, not the transport")
+            XCTAssertTrue(failure.safeMessage.contains("None of this tool batch executed"))
+            XCTAssertFalse(failure.safeMessage.contains("PRIVATE_VALUE_MUST_NOT_APPEAR"))
+            XCTAssertEqual(result.reportedUsage?.inputTokens, 31)
+            XCTAssertEqual(result.reportedUsage?.outputTokens, 11)
+        }
+    }
+
+    private func executeTransportFixture(data: Data, type: String, limit: UInt64, status: Int = 200,
+                                         tools: [AgentToolDescriptor] = []) async throws -> AgentModelExecutionResult {
         MockResponsesURLProtocol.handler = { request in
             (HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": type])!, data)
         }
@@ -1673,7 +1886,7 @@ final class ResponsesAPIModelProviderTests: XCTestCase {
             configuration: ResponsesAPIConfiguration(baseURL: "https://fixture.test/v1", apiKey: "fixture-key"),
             session: URLSession(configuration: config)
         )
-        let fixture = try ModelFixture(location: .remote, providerID: ResponsesAPIModelProvider.providerID,
+        let fixture = try ModelFixture(location: .remote, advertisedTools: tools, providerID: ResponsesAPIModelProvider.providerID,
             remoteDestination: "openai.responses:responses-api-key:fixture-model")
         let context = try ModelPreparationContext(conversationID: fixture.context.conversationID,
             modelPolicy: AgentModelPolicy(localOnly: false, allowedSelections: [fixture.request.selection], strategy: .pinned, requiredCapabilities: AgentModelCapabilitySet([])),

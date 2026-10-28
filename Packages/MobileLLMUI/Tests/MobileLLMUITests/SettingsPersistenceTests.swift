@@ -3,6 +3,7 @@
 import XCTest
 @testable import MobileLLMUI
 import LLMCore
+import AgentRuntime
 
 /// Settings persistence across app versions, plus the context clamp. Both are places where a quiet
 /// regression doesn't crash — it just silently changes what the user configured.
@@ -26,7 +27,49 @@ final class SettingsPersistenceTests: XCTestCase {
 
     private func write(_ json: String) { defaults.set(Data(json.utf8), forKey: key) }
 
+    func testSandboxSettingsPersistOnlyNonsecretIdentityAndRequireExplicitEnablement() throws {
+        let settings = AppSettings(defaults: defaults, keychain: nil)
+        XCTAssertFalse(settings.sandboxEnabled)
+        let connection = try OpenSandboxConnection(id: UUID(), endpoint: URL(string: "http://127.0.0.1:18281")!,
+            image: "sha256:test", capabilities: [.workspaceFiles, .codeExecution])
+        var changes = 0
+        settings.onSandboxConfigurationChanged = { changes += 1 }
+        try settings.configureSandbox(connection, apiKey: "sandbox-test-private-key")
+        XCTAssertTrue(settings.sandboxEnabled)
+        XCTAssertEqual(try settings.sandboxAPIKey(), "sandbox-test-private-key")
+        XCTAssertFalse(String(decoding: try XCTUnwrap(defaults.data(forKey: key)), as: UTF8.self).contains("sandbox-test-private-key"))
+        let restored = AppSettings(defaults: defaults, keychain: nil)
+        XCTAssertEqual(restored.sandboxConnection, connection)
+        XCTAssertNil(try restored.sandboxAPIKey(), "An unavailable credential must not be reconstructed from preferences")
+        settings.sandboxEnabled = false
+        XCTAssertFalse(AppSettings(defaults: defaults, keychain: nil).sandboxEnabled)
+        try settings.disconnectSandbox()
+        XCTAssertNil(settings.sandboxConnection)
+        XCTAssertNil(try settings.sandboxAPIKey())
+        XCTAssertGreaterThan(changes, 2)
+    }
+
     // MARK: System prompt
+
+    func testDeepSeekWebServicePersistsWithoutSilentlySwitchingOnAccountRemoval() {
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertNil(settings.deepSeekWebServiceID)
+        settings.upsertOnlineService(OnlineService(id: "search-account", name: "DeepSeek", baseURL: "https://api.deepseek.com/v1"))
+        settings.deepSeekWebServiceID = "search-account"
+        let restored = AppSettings(defaults: defaults)
+        XCTAssertEqual(restored.deepSeekWebServiceID, "search-account")
+        XCTAssertTrue(restored.onlineServices.first!.supportsDeepSeekWebAPI)
+        restored.removeOnlineService(id: "search-account")
+        XCTAssertEqual(AppSettings(defaults: defaults).deepSeekWebServiceID, "search-account",
+                       "An unavailable selected service must fail closed rather than send the query elsewhere")
+    }
+
+    func testDeepSeekWebCredentialsAreOnlyEligibleForTheOfficialHTTPSService() {
+        for baseURL in ["http://api.deepseek.com", "https://api.deepseek.com.evil.example", "https://user@api.deepseek.com", "https://api.deepseek.com:8443", "https://gateway.example/v1"] {
+            XCTAssertFalse(OnlineService(name: "DeepSeek", baseURL: baseURL).supportsDeepSeekWebAPI, baseURL)
+        }
+        XCTAssertTrue(OnlineService(name: "DeepSeek", baseURL: "https://api.deepseek.com").supportsDeepSeekWebAPI)
+    }
 
     func testFreshInstallStartsWithTheStockPrompt() {
         let settings = AppSettings(defaults: defaults)

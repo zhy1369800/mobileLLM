@@ -16,17 +16,26 @@ final class WorkflowUITests: XCTestCase {
     func testWorkflowCommandShowsMessageAnchoredRecord() throws {
         let app = XCUIApplication()
         app.launchEnvironment["MOBILELLM_DYNAMIC_WORKFLOW_RESPONSES_FIXTURE"] = "1"
+        app.launchEnvironment["MOBILELLM_DEVICE_E2E"] = "1"
+        app.launchEnvironment["MOBILELLM_E2E_STORAGE_NAMESPACE"] = UUID().uuidString
         app.launch()
 
         let newChat = app.buttons.matching(identifier: "New chat").firstMatch
         if newChat.waitForExistence(timeout: 8) { newChat.tap() }
 
-        let field = app.textFields["composer.field"]
+        let field = app.descendants(matching: .any).matching(identifier: "composer.field").firstMatch
         XCTAssertTrue(field.waitForExistence(timeout: 20), "composer never appeared")
         let answerCount = app.descendants(matching: .any)
             .matching(identifier: "assistant.answer").count
+        let approvalMode = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Approval:")).firstMatch
+        approvalMode.tap()
+        app.buttons["Ask"].tap()
+        app.buttons["Chat options"].tap()
+        app.buttons["composer.workflow.start"].tap()
+        XCTAssertTrue(app.staticTexts["composer.workflow.mode"].waitForExistence(timeout: 5))
+        XCTAssertTrue(((field.value as? String) ?? "").contains("/workflow"))
         field.tap()
-        field.typeText("/workflow deploy Kimi K3 on iPhone 16 Pro")
+        field.typeText(" deploy Kimi K3 on iPhone 16 Pro")
         let send = app.buttons["Send"]
         XCTAssertTrue(send.waitForExistence(timeout: 5))
         send.tap()
@@ -51,61 +60,125 @@ final class WorkflowUITests: XCTestCase {
         }
         let value = readValue(row) ?? ""
         XCTAssertTrue(
-            value.contains("Generating candidate") || value.contains("Running")
+            value.contains("Planning") || value.contains("Needs approval") || value.contains("Running")
                 || value.contains("Completed"),
             "the workflow must begin generating or running, got '\(value)'"
         )
 
-        let candidateDeadline = Date().addingTimeInterval(180)
-        var candidateState = readValue(row) ?? ""
-        while Date() < candidateDeadline,
-              !candidateState.contains("Running"),
-              !candidateState.contains("Completed"),
-              !candidateState.contains("Failed")
-        {
-            Thread.sleep(forTimeInterval: 1)
-            candidateState = readValue(row) ?? candidateState
-        }
-        XCTAssertTrue(
-            candidateState.contains("Running") || candidateState.contains("Completed"),
-            "the explicit /workflow command must auto-start after validation, got '\(candidateState)'"
-        )
-
-        let workflowBar = app.navigationBars["Workflow"]
+        let workflowBar = app.navigationBars["Agent tasks"]
         for _ in 0 ..< 5 where !workflowBar.exists {
             if row.exists, row.isHittable { row.tap() }
+            else { app.swipeDown() }
             if workflowBar.waitForExistence(timeout: 2) { break }
         }
         XCTAssertTrue(workflowBar.exists, "workflow row did not open its summary page")
-        let sourceDisclosure = app.buttons["JavaScript source"]
-        XCTAssertTrue(sourceDisclosure.waitForExistence(timeout: 20), "source disclosure is missing")
-        sourceDisclosure.tap()
-        let source = app.descendants(matching: .any)["workflow.source"]
-        XCTAssertTrue(source.waitForExistence(timeout: 5), "exact JavaScript source is not inspectable")
-        XCTAssertFalse(app.buttons["Once"].exists)
-        XCTAssertFalse(app.buttons["Always"].exists)
-        XCTAssertFalse(app.buttons["Deny"].exists)
-        XCTAssertFalse(app.descendants(matching: .any)["workflow.approval"].exists)
-
-        let sourceText = (source.value as? String) ?? source.label
-        XCTAssertTrue(sourceText.contains("parallel("), "complex fixture must exercise parallel fan-out")
-        XCTAssertTrue(sourceText.contains("KIMI_SYNTHESIS_TRACK"), "complex fixture must fan in to synthesis")
-        sourceDisclosure.tap()
-
         let state = app.descendants(matching: .any)["workflow.state"]
         let deadline = Date().addingTimeInterval(180)
+        var reviewedPlanning = false
+        var reviewedTasks: Set<String> = []
         while Date() < deadline, state.label != "Completed", state.label != "Failed" {
-            Thread.sleep(forTimeInterval: 0.5)
+            let planning = app.buttons["workflow.planning.review"]
+            var opened = false
+            if !reviewedPlanning, planning.exists, planning.isHittable {
+                planning.tap()
+                reviewedPlanning = true
+                opened = true
+            } else {
+                let pending = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Needs approval"))
+                    .allElementsBoundByIndex.first { !reviewedTasks.contains($0.identifier) }
+                if let pending {
+                    for _ in 0..<6 where !pending.isHittable { app.swipeUp() }
+                    XCTAssertFalse(pending.identifier.isEmpty, "attention tasks need stable identities")
+                    reviewedTasks.insert(pending.identifier)
+                    pending.tap()
+                    opened = true
+                }
+            }
+            if opened {
+                let approve = app.buttons["approval.approve"]
+                XCTAssertTrue(approve.waitForExistence(timeout: 10), "the exact run's approval control must remain accessible")
+                approve.tap()
+                app.buttons["Done"].tap()
+            }
+            Thread.sleep(forTimeInterval: 0.2)
         }
+        XCTAssertTrue(reviewedPlanning, "the initial coordinator must not hide its approval")
+        XCTAssertFalse(reviewedTasks.isEmpty, "a child approval must be handled in its own inspector")
         XCTAssertEqual(state.label, "Completed", "complex workflow did not complete")
+        XCTAssertEqual(app.staticTexts["workflow.task.count"].label, "4 tasks · 4 completed",
+                       "coordination calls must not be counted as worker tasks")
+        let task = app.buttons["workflow.task.model"]
+        for _ in 0..<6 where !task.isHittable { app.swipeUp() }
+        XCTAssertTrue(task.exists, "task card must expose a stable accessible action")
+        task.tap()
+        let taskResult = app.descendants(matching: .any).matching(identifier: "workflow.task.result").firstMatch
+        XCTAssertTrue(taskResult.waitForExistence(timeout: 10), "saved worker output must load without regenerating it")
+        XCTAssertTrue(taskResult.label.contains("Under the fixture assumptions"))
+        app.buttons["Copy result"].tap()
+        XCTAssertTrue(app.buttons["Copied"].exists, "copy must acknowledge the action")
+        let messageAgent = app.buttons["workflow.task.conversation"]
+        for _ in 0..<4 where !messageAgent.isHittable { app.swipeDown() }
+        XCTAssertTrue(messageAgent.isHittable)
+        messageAgent.tap()
+        let sessionInput = app.descendants(matching: .any).matching(identifier: "workflow.session.input").firstMatch
+        XCTAssertTrue(sessionInput.waitForExistence(timeout: 8))
+        sessionInput.tap()
+        sessionInput.typeText("SESSION_UI_CONTINUATION: continue the saved task in this agent conversation.")
+        app.buttons["workflow.session.send"].tap()
+        let sessionAnswer = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label CONTAINS %@", "workflow.session.answer.", "SESSION_UI_ACK"
+        )).firstMatch
+        let continuationDeadline = Date().addingTimeInterval(30)
+        while Date() < continuationDeadline, !sessionAnswer.exists {
+            let approval = app.buttons["approval.approve"]
+            if approval.exists && approval.isHittable { approval.tap() }
+            else { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+        }
+        XCTAssertTrue(sessionAnswer.exists, "the same agent must return the follow-up through its actual executor")
+        XCTAssertTrue(sessionAnswer.isHittable, "the new reply must scroll into view")
+        app.navigationBars.buttons["Model"].tap()
+        XCTAssertTrue(taskResult.label.contains("Under the fixture assumptions"), "follow-ups must preserve the saved workflow result")
+        app.buttons["Done"].tap()
 
-        let callsDisclosure = app.buttons["Agent calls"]
-        XCTAssertTrue(callsDisclosure.waitForExistence(timeout: 10), "agent-call evidence is missing")
-        XCTAssertTrue(
-            ((callsDisclosure.value as? String) ?? "").hasPrefix("4 calls"),
-            "three parallel research agents plus one synthesis agent must be durably projected"
-        )
+        let reviewTask = app.buttons["workflow.task.acceptance"]
+        for _ in 0..<8 where !reviewTask.isHittable { app.swipeUp() }
+        XCTAssertTrue(reviewTask.isHittable, "the declared acceptance task must remain inspectable")
+        reviewTask.tap()
+        XCTAssertTrue(app.staticTexts["Acceptance review"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["Meets criterion"].waitForExistence(timeout: 8))
+        let reviewScreenshot = XCTAttachment(screenshot: app.screenshot())
+        reviewScreenshot.name = "Acceptance criteria and reviewed inputs"
+        reviewScreenshot.lifetime = .keepAlways
+        add(reviewScreenshot)
+        let inputs = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "workflow.input."))
+        XCTAssertEqual(inputs.count, 3, "acceptance must link all three actual reviewed producer results")
+        app.buttons["Done"].tap()
+
+        let executionDetails = app.buttons["Execution details"]
+        for _ in 0..<8 where !executionDetails.isHittable { app.swipeUp() }
+        XCTAssertTrue(executionDetails.exists)
+        executionDetails.tap()
+        let callsDisclosure = app.buttons["workflow.call.history"]
+        for _ in 0..<4 where !callsDisclosure.isHittable { app.swipeUp() }
+        // Three independent investigations feed one declared review; only final delivery needs coordination.
+        // The separate dependency-chain regression requires one final coordinator for a known chain.
+        XCTAssertEqual(callsDisclosure.value as? String, "5 calls", "all actual invocations remain inspectable")
         callsDisclosure.tap()
+        let calls = app.staticTexts.matching(identifier: "workflow.agent.call")
+        XCTAssertTrue(calls.firstMatch.waitForExistence(timeout: 5), "opening history must expose individual calls")
+        XCTAssertEqual(calls.count, 5)
+        callsDisclosure.tap()
+        let sourceDisclosure = app.buttons["Workflow source"]
+        for _ in 0..<4 where !sourceDisclosure.isHittable { app.swipeUp() }
+        XCTAssertTrue(sourceDisclosure.exists, "exact source must remain available under execution details")
+        sourceDisclosure.tap()
+        let source = app.descendants(matching: .any)["workflow.source"]
+        XCTAssertTrue(source.waitForExistence(timeout: 5))
+        let sourceText = (source.value as? String) ?? source.label
+        XCTAssertTrue(sourceText.contains("waitAny("))
+        XCTAssertTrue(sourceText.contains("MOBILELLM_COORDINATOR_V7"))
+        XCTAssertFalse(app.descendants(matching: .any)["workflow.approval"].exists)
+        sourceDisclosure.tap()
 
         workflowBar.buttons.firstMatch.tap()
         let answers = app.descendants(matching: .any).matching(identifier: "assistant.answer")

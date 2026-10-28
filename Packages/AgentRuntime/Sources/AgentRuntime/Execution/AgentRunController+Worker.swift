@@ -269,8 +269,10 @@ extension AgentRunController {
                     } else {
                         return .reconcile(invocationID: call.invocationID, failure: failure)
                     }
-                case .failed:
-                    requiresSynthesis = true
+                case .failed(let failure):
+                    if !Self.canContinueAfterToolDiagnostic(failure, plan: history.toolIntents[call.invocationID]?.1.plan) {
+                        requiresSynthesis = true
+                    }
                 case .completed:
                     break
                 }
@@ -346,12 +348,14 @@ extension AgentRunController {
         transitionToWaiting: Bool
     ) async throws -> CompiledContext {
         let frozen = try await frozenInputs(facts)
+        let sessionInput = try await sessionCurrentUser(frozen: frozen, runID: facts.projection.runID, includedOnly: false)
         let attempt = UInt64(history.modelOutcomes.count + 1)
         let stepID = ExecutionStableID.step(runID: facts.projection.runID, attempt: attempt)
         let selected = try frozen.selectedTools(
-            latestUserRequest: frozen.currentUser.frozen.content
+            latestUserRequest: sessionInput.source.frozen.content
         )
-        let descriptors = toolFree ? [] : selected.descriptors
+        let toolCapacity = facts.budgetLedger?.availableCapacity[.toolInvocations] ?? 0
+        let descriptors = toolFree || toolCapacity == 0 ? [] : selected.descriptors
         await logger.record(
             code: "execution.tool-selection",
             metadata: [
@@ -376,18 +380,21 @@ extension AgentRunController {
             "state": .string(facts.projection.state.rawValue),
             "stateVersion": .unsignedInteger(facts.projection.stateVersion),
             "modelAttempt": .unsignedInteger(attempt),
-            "structuredRepair": .bool(history.repairCount > 0),
+            "structuredRepair": .bool(history.pendingRepair != nil),
             "toolFreeSynthesis": .bool(toolFree),
+            "toolInvocationsUsed": .unsignedInteger(facts.budgetLedger?.consumed.quantities[.toolInvocations] ?? 0),
+            "toolInvocationsRemaining": .unsignedInteger(facts.budgetLedger?.availableCapacity[.toolInvocations] ?? 0),
         ]
-        if history.repairCount > 0 {
-            let lastRepair = history.diagnostics.last { $0.1.code == "execution.structured-repair" }
-                ?? history.diagnostics.last { $0.1.code == "execution.repeated-tool-call" }
+        if let lastRepair = history.pendingRepair {
             stateFields["repairInstruction"] = .string(
-                lastRepair?.1.code == "execution.repeated-tool-call"
+                lastRepair.1.code == "execution.tool-budget-repair" ? lastRepair.1.safeMessage : lastRepair.1.code == "execution.repeated-tool-call"
                     ? "Your last tool call already executed in this turn. Do NOT call any tool again — "
-                        + "answer the user's request directly with text only."
+                        + "use the recorded results and follow your assigned role and declared output protocol."
                     : "Return exactly one valid action matching the advertised response contract. "
-                        + "Do not include prose outside that action."
+                        + lastRepair.1.safeMessage + " "
+                        + "Use native function calls for tools, never DSML/XML tool markup in answer text. "
+                        + "If no native tools are advertised, still follow your assigned role and output protocol. "
+                        + "Do not substitute the overall goal's final answer for a required control response."
             )
         }
         let stateJSON = try CanonicalJSON(.object(stateFields))
@@ -446,7 +453,8 @@ extension AgentRunController {
             case .completed:
                 try ExecutionEncoding.encode(pair.1)
             case .failed(let failure):
-                try Self.safeToolFailureContext(failure, status: "failed")
+                try Self.safeToolFailureContext(failure, status: "failed",
+                    diagnostics: OpenSandboxDiagnostics.read(failure, prepared: history.toolIntents[invocationID]?.1))
             case .uncertain(let failure):
                 try Self.safeToolFailureContext(failure, status: "uncertain")
             }
@@ -505,6 +513,11 @@ extension AgentRunController {
             if $0.orderSequence != $1.orderSequence { return $0.orderSequence < $1.orderSequence }
             return $0.invocationID.description < $1.invocationID.description
         }
+        var nativeCalls: [ToolInvocationID: NativeToolCallContext] = [:]
+        for (_, outcome) in history.modelOutcomes {
+            guard case .completed(let completion) = outcome, case .callTools(let calls) = completion.action else { continue }
+            for call in calls { if let native = call.nativeContext { nativeCalls[call.invocationID] = native } }
+        }
         let toolResults = try contextualResults.map { entry in
             guard let descriptor = frozen.toolCatalog.descriptors.first(where: {
                 $0.id.description == entry.descriptorID
@@ -514,7 +527,8 @@ extension AgentRunController {
                 descriptorID: descriptor.id,
                 resultRevision: entry.revisionRecord.recordDigest.rawValue,
                 resultContent: String(decoding: entry.content, as: UTF8.self),
-                resultDigest: StableDigest.sha256(entry.content)
+                resultDigest: StableDigest.sha256(entry.content),
+                nativeToolCall: nativeCalls[entry.invocationID]
             )
         }
         let snapshot = try FrozenContextSnapshot(
@@ -525,7 +539,7 @@ extension AgentRunController {
             skills: frozen.skills,
             memories: frozen.memories,
             conversation: conversation,
-            currentUser: frozen.currentUser,
+            currentUser: sessionInput.source,
             runState: runState,
             artifactExcerpts: frozen.artifactExcerpts,
             untrustedToolResults: toolResults,
@@ -556,7 +570,10 @@ extension AgentRunController {
         )
         _ = try await commitEvents(
             runID: facts.projection.runID,
-            identity: .outcome(eventID)
+            identity: .outcome(eventID),
+            sessionInputInclusions: sessionInput.unclaimed.map {
+                AgentSessionInputInclusion(messageID: $0, runID: facts.projection.runID, stepID: stepID)
+            }
         ) { builder in
             var events = [try builder.append(
                 id: eventID,
@@ -588,16 +605,19 @@ extension AgentRunController {
 
     private static func safeToolFailureContext(
         _ failure: AgentFailure,
-        status: String
+        status: String,
+        diagnostics: JSONValue? = nil
     ) throws -> Data {
-        try CanonicalJSON(.object([
+        var value: [String: JSONValue] = [
             "type": .string("tool-resolution"),
             "status": .string(status),
             "code": .string(failure.code),
             "classification": .string(failure.classification.rawValue),
             "externalEffect": .string(failure.externalEffect.rawValue),
             "safeMessage": .string(failure.safeMessage),
-        ])).data
+        ]
+        if let diagnostics { value["diagnostics"] = diagnostics }
+        return try CanonicalJSON(.object(value)).data
     }
 
     private func compiledContext(
@@ -631,8 +651,9 @@ extension AgentRunController {
     ) async throws {
         let frozen = try await frozenInputs(facts)
         let compiled = try await compiledContext(facts: facts, history: history, toolFree: toolFree)
+        let sessionInput = try await sessionCurrentUser(frozen: frozen, runID: facts.projection.runID, includedOnly: true)
         let selected = try frozen.selectedTools(
-            latestUserRequest: frozen.currentUser.frozen.content
+            latestUserRequest: sessionInput.source.frozen.content
         )
         let includedIDs = Set(compiled.advertisedTools.map(\.id))
         let selectorSnapshot = try AgentToolSelectionSnapshot(
@@ -643,7 +664,7 @@ extension AgentRunController {
         )
         let generation = try generationParameters(
             frozen.generationParameters,
-            repair: history.repairCount > 0
+            repair: history.pendingRepair != nil
         )
         let modelRequest = try AgentModelRequest(
             requestID: facts.projection.requestID,
@@ -667,12 +688,12 @@ extension AgentRunController {
             redaction: try RedactionMetadata(classification: .sensitive, policyVersion: 1)
         )
         let provider = try modelProviders.provider(for: frozen.modelSelection)
-        // Both local and remote attempts allow up to 5 minutes so complex reasoning and long answers can finish safely.
-        let attemptTimeoutCap: UInt64 = 300_000
-        let attemptActiveReservation: UInt64 = min(
-            attemptTimeoutCap + 60_000,
-            facts.submission!.request.payload.budget.limits[.activeMilliseconds]
-        )
+        // Local decodes are bounded tightly (a stuck engine should fail fast); online providers make a
+        // real network round trip that legitimately runs minutes for long answers, so the per-attempt
+        // ceiling is generous and the run budget still bounds the whole run (15 minutes by default).
+        guard let timingLedger = facts.budgetLedger else { throw AgentExecutionError.invalidRecoveryBoundary }
+        let timing = try Self.modelAttemptTimeBudget(remote: provider.descriptor.location == .remote,
+            available: timingLedger.availableCapacity[.activeMilliseconds])
         let prepContext = try ModelPreparationContext(
             conversationID: facts.submission!.request.payload.conversationID,
             modelPolicy: facts.submission!.request.payload.modelPolicy,
@@ -680,10 +701,7 @@ extension AgentRunController {
             authorizationPayload: authPayload,
             maximumRequestBytes: UInt64(max(4, authPayload.data.count)),
             maximumResponseBytes: max(1, facts.submission!.request.payload.budget.limits[.persistedOutputBytes]),
-            timeoutMilliseconds: max(1, min(
-                attemptTimeoutCap,
-                facts.submission!.request.payload.budget.limits[.activeMilliseconds]
-            ))
+            timeoutMilliseconds: timing.timeout
         )
         let prepared = try await AgentModelRequestPreparer().prepare(
             provider: provider,
@@ -800,8 +818,8 @@ extension AgentRunController {
         let reservation = try modelReservation(
             request: modelRequest,
             budget: facts.submission!.request.payload.budget,
-            maximumActiveMilliseconds: attemptActiveReservation,
-            structuredRepair: history.repairCount > 0
+            maximumActiveMilliseconds: timing.reservation,
+            structuredRepair: history.pendingRepair != nil
         )
         guard let durableLedger = facts.budgetLedger else {
             throw AgentExecutionError.invalidRecoveryBoundary
@@ -855,12 +873,15 @@ extension AgentRunController {
             )
         } catch let error as AgentModelRuntimeError {
             _ = await arbiter.cancelDrainAndReleaseDecode(decodeLease)
-            if case .providerContractViolation = error {
+            if case .providerContractViolation(let contractError) = error {
                 try await commitMalformedModelAttempt(
                     runID: facts.projection.runID,
                     stepID: modelRequest.stepID,
                     reservation: reservation,
-                    repairAlreadyAttempted: history.structuredRepairCount > 0
+                    repairAlreadyAttempted: history.pendingRepair?.1.code == "execution.structured-repair",
+                    diagnostic: String(contractError.localizedDescription.unicodeScalars.filter {
+                        !CharacterSet.controlCharacters.contains($0)
+                    }.map(Character.init).prefix(512))
                 )
                 return
             }
@@ -881,7 +902,9 @@ extension AgentRunController {
                 runID: facts.projection.runID,
                 stepID: modelRequest.stepID,
                 reservation: reservation,
-                repairAlreadyAttempted: history.structuredRepairCount > 0
+                repairAlreadyAttempted: history.pendingRepair?.1.code == "execution.structured-repair",
+                diagnostic: failure.code + ": " + failure.safeMessage,
+                reportedUsage: execution.reportedUsage
             )
             return
         }
@@ -898,6 +921,7 @@ extension AgentRunController {
             && failure.requiredUserAction == .none
             && failure.retryAdvice == .never
             && (failure.code == "model.local.malformed-action"
+                || failure.code == "model.online.malformed-action"
                 || failure.code == "model.local.structured-output-invalid"
                 || failure.code == "model.online.structured-output-invalid")
     }
@@ -915,8 +939,21 @@ extension AgentRunController {
             topK: original.topK,
             repetitionPenalty: original.repetitionPenalty,
             thinkingMode: .disabled,
-            seed: original.seed
+            seed: original.seed,
+            reasoningEffort: original.reasoningEffort
         )
+    }
+
+    /// Shrink both the timeout and reservation to the unspent allowance. Reserving a full request
+    /// window after a long successful/failed pass would otherwise strand usable time for repair.
+    static func modelAttemptTimeBudget(remote: Bool, available: UInt64) throws -> (timeout: UInt64, reservation: UInt64) {
+        guard available > 0 else {
+            throw AgentContractError.budgetExceeded(dimension: .activeMilliseconds, limit: 0, requested: 1)
+        }
+        let cap: UInt64 = remote ? 300_000 : 60_000
+        let grace: UInt64 = remote ? 30_000 : 60_000
+        let reservation = min(available, cap + grace)
+        return (min(cap, max(1, reservation - min(grace, reservation / 2))), reservation)
     }
 
     private func modelReservation(
@@ -1210,16 +1247,28 @@ extension AgentRunController {
         runID: AgentRunID,
         stepID: AgentStepID,
         reservation: BudgetReservation,
-        repairAlreadyAttempted: Bool
+        repairAlreadyAttempted: Bool,
+        diagnostic: String,
+        reportedUsage: AgentModelUsage? = nil
     ) async throws {
         let facts = try await repository.loadRunFacts(for: runID)
         guard let facts, let currentLedger = facts.budgetLedger else {
             throw AgentExecutionError.invalidRecoveryBoundary
         }
-        let actual = AgentUsage(quantities: BudgetQuantities([
-            .modelAttempts: 1,
-            .structuredRepairs: reservation.maximumUsage.quantities[.structuredRepairs] > 0 ? 1 : 0,
-        ]))
+        let isRepair = reservation.maximumUsage.quantities[.structuredRepairs] > 0
+        let actual: AgentUsage
+        if let reportedUsage {
+            actual = usage(reportedUsage, structuredRepair: isRepair)
+        } else {
+            // A provider-contract failure may have spent tokens before validation failed. Do not
+            // turn missing metering into a free model pass; retain conservative token consumption.
+            actual = AgentUsage(quantities: BudgetQuantities([
+                .modelAttempts: 1, .structuredRepairs: isRepair ? 1 : 0,
+                .inputTokens: reservation.maximumUsage.quantities[.inputTokens],
+                .outputTokens: reservation.maximumUsage.quantities[.outputTokens],
+                .contextTokensPerAttempt: reservation.maximumUsage.quantities[.contextTokensPerAttempt],
+            ]))
+        }
         let settled = try currentLedger.settling(
             reservationID: reservation.id,
             actualUsage: actual
@@ -1227,7 +1276,7 @@ extension AgentRunController {
         let malformed = try AgentFailure(
             code: "execution.malformed-model-action",
             classification: .permanent,
-            safeMessage: "The model returned an invalid structured action.",
+            safeMessage: "The model returned an invalid action: \(diagnostic)",
             retryAdvice: .never,
             externalEffect: .confirmedNone,
             requiredUserAction: .none,
@@ -1252,7 +1301,7 @@ extension AgentRunController {
                 let exhausted = try ExecutionFailureFactory.make(
                     reason: .internalFailure,
                     code: "execution.structured-repair-exhausted",
-                    message: "The model could not produce a valid structured action after one repair attempt."
+                    message: "The model could not produce a valid action after one repair attempt: \(diagnostic)"
                 )
                 let terminalStatus = try self.status(
                     after: builder,
@@ -1278,7 +1327,7 @@ extension AgentRunController {
                 let repair = try AgentFailure(
                     code: "execution.structured-repair",
                     classification: .transient,
-                    safeMessage: "Retrying once with constrained structured output.",
+                    safeMessage: "Retrying once with constrained structured output. " + String(diagnostic.prefix(512)),
                     retryAdvice: .never,
                     externalEffect: .confirmedNone,
                     requiredUserAction: .none,
@@ -1315,7 +1364,12 @@ extension AgentRunController {
         let action = try await loadPayload(AgentAction.self, reference: reference)
         switch action {
         case .finalAnswer(let answer):
-            try await finalize(runID: facts.projection.runID, answer: answer)
+            do {
+                try await finalize(runID: facts.projection.runID, answer: answer)
+            } catch AgentSessionError.pendingInput {
+                let (current, latest) = try await loadRun(facts.projection.runID)
+                _ = try await compileContext(facts: current, history: latest, toolFree: false, transitionToWaiting: true)
+            }
         case .requestUserInput(let proposed):
             let request = try UserInputRequest(
                 id: proposed.id,

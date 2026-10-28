@@ -18,10 +18,26 @@ public enum SubagentSpawnError: Error, Hashable, Sendable {
 /// parent ceiling, carry independent budgets, return structured results and artifacts, and can never
 /// approve their own external access.
 public protocol SubagentSpawning: Sendable {
+    func deliverGoalAmendment(_ amendment: WorkflowGoalAmendment, goalID: WorkflowRunID,
+                              conversationID: ConversationID, runIDs: [AgentRunID]) async throws
+    func preparationUsage(runID: AgentRunID) async throws -> AgentUsage
+    func pendingSessionInputs(runIDs: [AgentRunID]) async throws -> AgentSessionPendingInputs
+    func withSessionInputBarrier(runIDs: [AgentRunID],
+                                 operation: @Sendable () async throws -> JSONValue) async throws -> JSONValue
+    func webObservations(_ handleID: AgentExecutionHandleID) async throws -> [WorkflowWebObservation]
+    func reviewToolEvidence(_ handleID: AgentExecutionHandleID) async throws -> [WorkflowReviewToolEvidence]
+    /// Read a committed terminal result without starting or resuming a child.
+    func terminalResult(_ handleID: AgentExecutionHandleID) async throws -> SubagentResult?
     /// Submits one child run under a reserved parent identity and returns its execution handle.
     func spawn(_ request: SubagentSpawnRequest) async throws -> AgentExecutionHandleID
+    /// The workflow has already reserved this activation's share of its cumulative budget.
+    func spawn(_ request: SubagentSpawnRequest, continuing seedRunID: AgentRunID,
+               senderRunID: AgentRunID) async throws -> AgentExecutionHandleID
     /// Waits for the child's durable terminal result.
     func collect(_ handleID: AgentExecutionHandleID) async throws -> SubagentResult
+    /// Reports durable and streamed activity while collecting, for a caller's inactivity deadline.
+    func collect(_ handleID: AgentExecutionHandleID,
+                 onProgress: @escaping @Sendable () async -> Void) async throws -> SubagentResult
     /// Idempotently cancels one durable child. Used for explicit workflow stop and un-awaited calls.
     func cancel(_ handleID: AgentExecutionHandleID, runID: AgentRunID) async throws
     /// Resolves the exact uncertain child invocation through its normal durable command path.
@@ -41,6 +57,39 @@ public protocol SubagentSpawning: Sendable {
 }
 
 public extension SubagentSpawning {
+    func deliverGoalAmendment(_ amendment: WorkflowGoalAmendment, goalID: WorkflowRunID,
+                              conversationID: ConversationID, runIDs: [AgentRunID]) async throws {}
+    func preparationUsage(runID: AgentRunID) async throws -> AgentUsage { .zero }
+    func pendingSessionInputs(runIDs: [AgentRunID]) async throws -> AgentSessionPendingInputs { AgentSessionPendingInputs() }
+    func withSessionInputBarrier(runIDs: [AgentRunID],
+                                 operation: @Sendable () async throws -> JSONValue) async throws -> JSONValue { try await operation() }
+    func spawn(_ request: SubagentSpawnRequest, continuing seedRunID: AgentRunID,
+               senderRunID: AgentRunID) async throws -> AgentExecutionHandleID {
+        throw AgentSessionError.unavailable
+    }
+    func webObservations(_: AgentExecutionHandleID) async throws -> [WorkflowWebObservation] { [] }
+    func reviewToolEvidence(_: AgentExecutionHandleID) async throws -> [WorkflowReviewToolEvidence] { [] }
+    func terminalResult(_: AgentExecutionHandleID) async throws -> SubagentResult? { nil }
+    func collect(_ handleID: AgentExecutionHandleID,
+                 onProgress: @escaping @Sendable () async -> Void) async throws -> SubagentResult {
+        try await collect(handleID)
+    }
+
+    /// Zero or nil disables the inactivity deadline. Cancellation still settles the durable child
+    /// through the workflow engine before the workflow can report a terminal failure.
+    func collect(_ handleID: AgentExecutionHandleID, stallMilliseconds: UInt64?) async throws -> SubagentResult {
+        guard let milliseconds = stallMilliseconds, milliseconds > 0 else { return try await collect(handleID) }
+        guard milliseconds <= 1_800_000 else { throw SubagentSpawnError.invalidResult }
+        let deadline = SubagentProgressDeadline(milliseconds: milliseconds)
+        return try await withThrowingTaskGroup(of: SubagentResult.self) { group in
+            group.addTask { try await collect(handleID, onProgress: { await deadline.markProgress() }) }
+            group.addTask { try await deadline.waitForStall() }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else { throw SubagentSpawnError.resultUnavailable }
+            return result
+        }
+    }
+
     func cancel(_: AgentExecutionHandleID, runID _: AgentRunID) async throws {
         throw SubagentSpawnError.resultUnavailable
     }
@@ -76,7 +125,47 @@ public struct DurableSubagentSpawner: SubagentSpawning, Sendable {
         self.repository = repository
     }
 
+    public func pendingSessionInputs(runIDs: [AgentRunID]) async throws -> AgentSessionPendingInputs {
+        guard let executor = executor as? DurableAgentExecutor else { throw AgentSessionError.unavailable }
+        return try await executor.controller.pendingSessionInputs(runIDs: runIDs)
+    }
+
+    public func preparationUsage(runID: AgentRunID) async throws -> AgentUsage {
+        guard let facts = try await repository.loadRunFacts(for: runID), facts.projection.isTerminal else {
+            throw SubagentSpawnError.parentUnavailable
+        }
+        return facts.projection.cumulativeUsage
+    }
+
+    public func deliverGoalAmendment(_ amendment: WorkflowGoalAmendment, goalID: WorkflowRunID,
+                                     conversationID: ConversationID, runIDs: [AgentRunID]) async throws {
+        guard let executor = executor as? DurableAgentExecutor else { throw AgentSessionError.unavailable }
+        for runID in runIDs {
+            // Prepared calls have durable recipients even before their seed is submitted. The
+            // workflow retries this same message immediately after that submission or on resume.
+            guard try await repository.loadRunFacts(for: runID) != nil else { continue }
+            try await executor.controller.sendGoalSessionInput(seedRunID: runID, conversationID: conversationID,
+                goalID: goalID, amendment: amendment)
+        }
+    }
+
+    public func withSessionInputBarrier(runIDs: [AgentRunID],
+                                        operation: @Sendable () async throws -> JSONValue) async throws -> JSONValue {
+        guard let executor = executor as? DurableAgentExecutor else { throw AgentSessionError.unavailable }
+        return try await executor.controller.withSessionInputBarrier(runIDs: runIDs, operation: operation)
+    }
+
     public func spawn(_ request: SubagentSpawnRequest) async throws -> AgentExecutionHandleID {
+        try await spawn(request, continuation: nil)
+    }
+
+    public func spawn(_ request: SubagentSpawnRequest, continuing seedRunID: AgentRunID,
+                      senderRunID: AgentRunID) async throws -> AgentExecutionHandleID {
+        try await spawn(request, continuation: (seedRunID, senderRunID))
+    }
+
+    private func spawn(_ request: SubagentSpawnRequest,
+                       continuation: (AgentRunID, AgentRunID)?) async throws -> AgentExecutionHandleID {
         guard let parentFacts = try await repository.loadRunFacts(for: request.parentRunID) else {
             throw SubagentSpawnError.parentUnavailable
         }
@@ -142,28 +231,121 @@ public struct DurableSubagentSpawner: SubagentSpawning, Sendable {
             ),
             approvalMode: request.approvalMode
         )
-        return try await executor.submit(
-            childRequest,
-            commandID: SubagentStableID.command(
-                parentRunID: request.parentRunID,
-                childRunID: request.childRunID
-            )
-        )
+        let command = SubagentStableID.command(parentRunID: request.parentRunID, childRunID: request.childRunID)
+        if let (seed, sender) = continuation {
+            guard request.source == .workflow, let durable = executor as? DurableAgentExecutor else {
+                throw AgentSessionError.unavailable
+            }
+            return try await durable.controller.submitWorkflowActivation(childRequest, commandID: command,
+                                                                         seedRunID: seed, senderRunID: sender)
+        }
+        return try await executor.submit(childRequest, commandID: command)
     }
 
     public func collect(_ handleID: AgentExecutionHandleID) async throws -> SubagentResult {
         let handle = try await executor.attach(to: handleID)
-        try Self.rejectReconciliationWait(try await handle.status())
-        for try await envelope in handle.events(after: nil) {
-            if case .statusChanged(let status) = envelope.payload.event {
-                try Self.rejectReconciliationWait(status)
-            }
-            guard case .terminal = envelope.payload.event else { continue }
-            guard let result = try await handle.result() else {
-                throw SubagentSpawnError.resultUnavailable
-            }
-            return try Self.normalize(result)
+        return try await collectHandle(handle, onProgress: nil)
+    }
+
+    public func terminalResult(_ handleID: AgentExecutionHandleID) async throws -> SubagentResult? {
+        let handle = try await executor.attach(to: handleID)
+        return try await handle.result().map(Self.normalize)
+    }
+
+    public func reviewToolEvidence(_ handleID: AgentExecutionHandleID) async throws -> [WorkflowReviewToolEvidence] {
+        guard let snapshot = try await repository.loadRunSnapshot(for: handleID), snapshot.facts.projection.isTerminal
+        else { throw SubagentSpawnError.resultUnavailable }
+        let history = try ExecutionHistory(events: snapshot.events, projection: snapshot.facts.projection)
+        return history.toolOutcomes.sorted { $0.value.0.sequence < $1.value.0.sequence }.compactMap { id, recorded in
+            // The typed tool journal also records localPure, MCP and file adapters. Filtering
+            // by external boundary kind would discard real Calculator and other local execution.
+            guard let prepared = history.toolIntents[id]?.1 else { return nil }
+            let execution = WorkflowSandboxEvidence.read(recorded.1, prepared: prepared)
+            let succeeded: Bool = if case .completed = recorded.1 { true } else { false }
+            guard succeeded || execution != nil else { return nil }
+            return WorkflowReviewToolEvidence(toolID: prepared.plan.subjectID, invocationID: id,
+                recordDigest: recorded.0.recordDigest, execution: execution, completedAt: recorded.0.timestamp, succeeded: succeeded)
         }
+    }
+
+    public func webObservations(_ handleID: AgentExecutionHandleID) async throws -> [WorkflowWebObservation] {
+        guard let snapshot = try await repository.loadRunSnapshot(for: handleID) else { throw SubagentSpawnError.resultUnavailable }
+        let history = try ExecutionHistory(events: snapshot.events, projection: snapshot.facts.projection)
+        let ids = try [AgentToolLogicalID(providerID: "builtin", name: "web_search"),
+                       AgentToolLogicalID(providerID: "builtin", name: "fetch_webpage")]
+        return try history.toolOutcomes.sorted { $0.value.0.sequence < $1.value.0.sequence }.flatMap { id, recorded -> [WorkflowWebObservation] in
+            guard let plan = history.toolIntents[id]?.1.plan, plan.kind == .tool,
+                  plan.effects == [.networkRead], plan.idempotency == .pureRead,
+                  let toolID = ids.first(where: { $0.description == plan.subjectID }),
+                  let argumentsPayload = plan.canonicalArguments else { return [] }
+            let arguments = try AgentWireDecoder.decode(JSONValue.self, from: argumentsPayload.value.data, limits: .inlineValue)
+            let url: String?
+            if case .object(let object) = arguments, case .string(let value)? = object["url"] { url = value }
+            else { url = nil }
+            let status: String
+            let text: String
+            switch recorded.1 {
+            case .completed(let values):
+                status = "completed"
+                if toolID.name == "web_search" {
+                    for value in values {
+                        if case .structured(let result) = value,
+                           let sources = try WorkflowSearchEvidence.observations(result, invocationID: id.description, toolID: toolID) {
+                            return sources
+                        }
+                    }
+                }
+                text = values.compactMap { value -> String? in
+                    guard case .text(let result) = value else { return nil }
+                    return result.value
+                }.joined(separator: "\n")
+            case .failed(let failure): status = "failed"; text = failure.safeMessage
+            case .uncertain(let failure): status = "uncertain"; text = failure.safeMessage
+            }
+            return [WorkflowWebObservation(invocationID: id.description, toolID: toolID, requestedURL: url, status: status, text: text)]
+        }
+    }
+
+    public func collect(_ handleID: AgentExecutionHandleID,
+                        onProgress: @escaping @Sendable () async -> Void) async throws -> SubagentResult {
+        let handle = try await executor.attach(to: handleID)
+        let stream = await handle.ephemeralEvents()
+        let observer = Task {
+            do { for try await _ in stream { await onProgress() } } catch { }
+        }
+        defer { observer.cancel() }
+        return try await collectHandle(handle, onProgress: onProgress)
+    }
+
+    private func collectHandle(_ handle: any AgentExecutionHandle,
+                               onProgress: (@Sendable () async -> Void)?) async throws -> SubagentResult {
+        var cursor: AgentEventCursor?
+        // A dropped/out-of-order notification must not turn an accepted cancellation into an
+        // uncertain external effect. Reattach read-only from the last trusted durable cursor.
+        // Every reattachment first validates a fresh snapshot; corrupt journal facts still fail.
+        for attachment in 0 ..< 3 {
+            try Task.checkCancellation()
+            if let result = try await handle.result() { return try Self.normalize(result) }
+            let initialStatus = try await handle.status()
+            try Self.rejectReconciliationWait(initialStatus)
+            do {
+                for try await envelope in handle.events(after: cursor) {
+                    cursor = envelope.payload.cursor
+                    await onProgress?()
+                    if case .statusChanged(let status) = envelope.payload.event,
+                       status.stateVersion >= initialStatus.stateVersion {
+                        try Self.rejectReconciliationWait(status)
+                    }
+                    guard case .terminal = envelope.payload.event else { continue }
+                    guard let result = try await handle.result() else { throw SubagentSpawnError.resultUnavailable }
+                    return try Self.normalize(result)
+                }
+            } catch {
+                if let result = try await handle.result() { return try Self.normalize(result) }
+                guard error as? AgentExecutionError == .invalidRecoveryBoundary, attachment < 2 else { throw error }
+            }
+        }
+        if let result = try await handle.result() { return try Self.normalize(result) }
         throw SubagentSpawnError.resultUnavailable
     }
 
@@ -306,7 +488,8 @@ public struct DurableSubagentSpawner: SubagentSpawning, Sendable {
         return SubagentResult(
             runID: result.runID,
             handleID: result.executionHandleID,
-            outcome: outcome
+            outcome: outcome,
+            terminalUsage: result.status.state == .cancelled ? result.usage : nil
         )
     }
 

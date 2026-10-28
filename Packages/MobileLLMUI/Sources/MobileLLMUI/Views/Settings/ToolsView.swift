@@ -21,6 +21,7 @@ struct ToolsView: View {
     var locationProvider: (any LocationProviding)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var showMCP = false
+    @State private var showExecution = false
     /// Which privacy row's "allowed it off in system Settings" alert is up (nil = none).
     @State private var deniedRow: BuiltInToolRow?
 
@@ -29,7 +30,21 @@ struct ToolsView: View {
             VStack(alignment: .leading, spacing: Theme.Space.xl) {
                 accessSection
                 builtInSection
+                webProviderSection
                 searchEnginesSection
+                section("Execution", icon: "terminal") {
+                    Button { showExecution = true } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Execution environment").font(.subheadline)
+                                Text(settings.sandboxEnabled && settings.sandboxConnection != nil ? "OpenSandbox selected" : "Connect workspace, command and browser tools")
+                                    .font(.caption).foregroundStyle(Theme.textSecondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").font(.caption)
+                        }.frame(minHeight: 44)
+                    }.accessibilityIdentifier("settings.execution.environment")
+                }
                 connectionsSection
             }
             .frame(maxWidth: Theme.Layout.form, alignment: .leading)
@@ -47,6 +62,12 @@ struct ToolsView: View {
             NavigationStack { MCPServersView(settings: settings) }
             #if os(macOS)
             .frame(minWidth: 520, minHeight: 560)
+            #endif
+        }
+        .sheet(isPresented: $showExecution) {
+            NavigationStack { ExecutionEnvironmentView(settings: settings) }
+            #if os(macOS)
+            .frame(minWidth: 520, minHeight: 520)
             #endif
         }
         .alert(deniedRow.map { "\($0.title) access is off" } ?? "",
@@ -72,15 +93,36 @@ struct ToolsView: View {
                 }
             }
             .tint(Theme.accent)
-            Text("The model decides whether to call an allowed tool. Each call adds another model pass; "
-                 + "network tools such as web search, Wikipedia, and remote MCP also wait for the network, "
-                 + "so they can make a reply noticeably slower.")
+            Text("Each call follows the conversation’s approval mode. Network tools contact external services.")
                 .font(.caption).foregroundStyle(Theme.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     // MARK: Search engines
+
+    private var webProviderSection: some View {
+        section("Web service", icon: "network") {
+            Picker("Search and page reading", selection: Binding(
+                get: { settings.deepSeekWebServiceID ?? "" },
+                set: { settings.deepSeekWebServiceID = $0.isEmpty ? nil : $0 }
+            )) {
+                Text("Public search engines").tag("")
+                ForEach(settings.onlineServices.filter(\.supportsDeepSeekWebAPI)) { service in
+                    Text("DeepSeek · \(service.name)").tag(service.id)
+                }
+                if let selected = settings.deepSeekWebServiceID,
+                   !settings.onlineServices.contains(where: { $0.id == selected && $0.supportsDeepSeekWebAPI }) {
+                    Text("Unavailable DeepSeek service").tag(selected)
+                }
+            }
+            .accessibilityIdentifier("tools.web-provider")
+            Text("Search queries and page URLs are sent to DeepSeek using the selected service's API key. Successful requests are billed by DeepSeek. "
+                 + "It works with local and online models. Web search and Webpage reader still require their own tool switches.")
+                .font(.caption).foregroundStyle(Theme.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
 
     private var searchEnginesSection: some View {
         section("Search engines", icon: "magnifyingglass") {
@@ -99,15 +141,18 @@ struct ToolsView: View {
             Text(name).font(.subheadline).foregroundStyle(Theme.textPrimary)
         }
         .tint(Theme.accent)
-        .disabled(!webSearchOn)
-        .opacity(webSearchOn ? 1 : 0.5)
+        .disabled(!webSearchOn || settings.deepSeekWebServiceID != nil)
+        .opacity(webSearchOn && settings.deepSeekWebServiceID == nil ? 1 : 0.5)
     }
 
     /// Web search is enabled iff the `web_search` tool isn't in the disabled set.
     private var webSearchOn: Bool { !settings.disabledBuiltInTools.contains(ToolID.webSearch.rawValue) }
 
     private var searchFootnote: String {
-        webSearchOn
+        if settings.deepSeekWebServiceID != nil {
+            return "DeepSeek is selected above. These public-engine settings apply when you select Public search engines."
+        }
+        return webSearchOn
             ? "Web search reads these engines' public results pages directly (no API key), tries them in "
               + "order, and hands the model the top links. Keep at least one on."
             : "Turn on the Web search tool below to use these engines."

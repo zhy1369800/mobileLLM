@@ -1,0 +1,282 @@
+// SPDX-License-Identifier: MIT
+
+import AgentContracts
+import Foundation
+
+public enum WorkflowWebSourceKind: String, Sendable {
+    case searchSummary = "search-summary"
+    case searchContent = "search-content-excerpt"
+}
+
+/// An observation read from an authorized run's durable tool journal, never from model prose.
+public struct WorkflowWebObservation: Sendable {
+    public let invocationID: String
+    public let toolID: AgentToolLogicalID
+    public let requestedURL: String?
+    public let status: String
+    public let text: String
+    public let sourceURL: String?
+    public let sourceKind: WorkflowWebSourceKind?
+    public let sourceTitle: String?
+    public let sourceTruncated: Bool
+    public let publicationDate: String?
+
+    public init(invocationID: String, toolID: AgentToolLogicalID, requestedURL: String?, status: String, text: String,
+                sourceURL: String? = nil, sourceKind: WorkflowWebSourceKind? = nil, sourceTitle: String? = nil,
+                sourceTruncated: Bool = false, publicationDate: String? = nil) {
+        self.invocationID = invocationID
+        self.toolID = toolID
+        self.requestedURL = requestedURL
+        self.status = status
+        self.text = text
+        self.sourceURL = sourceURL; self.sourceKind = sourceKind; self.sourceTitle = sourceTitle
+        self.sourceTruncated = sourceTruncated; self.publicationDate = publicationDate
+    }
+}
+
+/// A bounded evidence packet. Source content remains untrusted; retrieval type and success come
+/// from the host's records. Failed fetches never become read-page evidence or eligible citations.
+enum WorkflowWebEvidence {
+    static let maximumObservations = 32
+    static let maximumCandidates = 256
+
+    static func packet(_ input: [(label: String, observation: WorkflowWebObservation)], matching query: String? = nil) throws -> JSONValue {
+        guard (query?.utf8.count ?? 0) <= 64 * 1024 else {
+            throw WorkflowScriptRuntimeError.invalidArguments("web evidence query exceeds 64 KiB")
+        }
+        let terms = try query.map(queryTerms) ?? []
+        let eligible = input.filter { $0.observation.toolID.providerID == "builtin"
+            && ["web_search", "fetch_webpage"].contains($0.observation.toolID.name) }
+        let pool = Array(eligible.prefix(maximumCandidates))
+        let enriched = pool.contains { $0.observation.sourceKind != nil }
+        let selected = enriched ? selectSources(pool, query: query, terms: terms) : Array(pool.prefix(maximumObservations))
+        // Enriched search may contain several distinct sources per invocation. Keep a global
+        // text bound so more returned sources cannot inflate a review beyond its context window.
+        let sourceAllowance = enriched ? min(2080, 24 * 1024 / max(1, selected.count)) : 2080
+        var observations: [JSONValue] = []
+        var sources: [String: (host: String, kind: String)] = [:]
+        var clipped = eligible.count > pool.count || selected.count < pool.count
+        for (_, item) in enriched ? pool : selected {
+            guard item.status == "completed" else { continue }
+            guard item.sourceKind != nil || !item.text.isEmpty else { continue }
+            let reading = item.toolID.name == "fetch_webpage"
+            let urls: [String]
+            if item.sourceKind != nil { urls = item.sourceURL.map { [$0] } ?? [] }
+            else if reading { urls = item.requestedURL.map { [$0] } ?? [] }
+            else { urls = try sourceURLs(in: item.text) }
+            let kind = reading ? "page-excerpt" : item.sourceKind?.rawValue ?? "search-summary"
+            for raw in urls {
+                guard let url = normalizedURL(raw), let host = url.host?.lowercased() else { continue }
+                if sources[url.absoluteString].map({ kindRank(kind) > kindRank($0.kind) }) ?? true {
+                    sources[url.absoluteString] = (host, kind)
+                }
+            }
+        }
+        for (label, item) in selected {
+            try Task.checkCancellation()
+            let title = item.sourceTitle.map { clippedText($0, maximumBytes: 128) }
+            let allowance = sourceAllowance - (title?.utf8.count ?? 0)
+            let headBytes = enriched ? (terms.isEmpty ? allowance : allowance / 5) : (terms.isEmpty ? 1200 : 400)
+            let matchBytes = enriched ? min(480, (allowance - headBytes) / 3) : 480
+            let prefix = clippedText(item.text, maximumBytes: headBytes)
+            let shortened = item.sourceTruncated || prefix.utf8.count < item.text.utf8.count
+            var record: [String: JSONValue] = [
+                "child": .string(label), "invocationID": .string(item.invocationID),
+                "tool": .string(item.toolID.name), "status": .string(item.status),
+                "contentDigest": .string(StableDigest.sha256(Data(item.text.utf8)).rawValue),
+                "excerpt": .string(prefix), "excerptTruncated": .bool(shortened),
+                "sourceTrust": .string("untrusted web content")
+            ]
+            if let requestedURL = item.requestedURL { record["requestedURL"] = .string(requestedURL) }
+            if let sourceURL = item.sourceURL { record["sourceURL"] = .string(sourceURL) }
+            if let kind = item.sourceKind { record["kind"] = .string(kind.rawValue) }
+            if let title { record["title"] = .string(title) }
+            if let date = item.publicationDate { record["publicationDate"] = .string(date) }
+            if shortened {
+                let tailBytes = enriched ? max(0, allowance - headBytes - (terms.isEmpty ? 0 : 3 * matchBytes)) : (terms.isEmpty ? 400 : 200)
+                if tailBytes > 0 { record["tail"] = .string(clippedText(item.text, maximumBytes: tailBytes, suffix: true)) }
+                if terms.isEmpty && !enriched { record["yearExcerpts"] = .array(try yearExcerpts(item.text).map(JSONValue.string)) }
+            }
+            if !terms.isEmpty {
+                record["matchingExcerpts"] = .array(try matchingExcerpts(item.text, terms: terms, maximumBytes: matchBytes).map(JSONValue.string))
+            }
+            observations.append(.object(record))
+        }
+        var bytes = 0
+        var sourceRows: [JSONValue] = []
+        // Prefer actual page reads when the packet's bounded source list is full.
+        let ordered = sources.sorted {
+            if $0.value.kind != $1.value.kind { return kindRank($0.value.kind) > kindRank($1.value.kind) }
+            return $0.key < $1.key
+        }
+        for (url, source) in ordered {
+            guard sourceRows.count < 128, bytes + url.utf8.count <= 16 * 1024 else { clipped = true; continue }
+            bytes += url.utf8.count
+            sourceRows.append(.object(["url": .string(url), "host": .string(source.host), "kind": .string(source.kind)]))
+        }
+        return .object(["observations": .array(observations), "sources": .array(sourceRows), "truncated": .bool(clipped)])
+    }
+
+    private static func kindRank(_ kind: String) -> Int {
+        switch kind { case "page-excerpt": 3; case "search-content-excerpt": 2; default: 1 }
+    }
+
+    private static func selectSources(_ input: [(label: String, observation: WorkflowWebObservation)],
+                                      query: String?, terms: [QueryTerm]) -> [(label: String, observation: WorkflowWebObservation)] {
+        let query = (query ?? "").replacingOccurrences(of: "\\/", with: "/")
+            .replacingOccurrences(of: "\\_", with: "_").replacingOccurrences(of: "\\&", with: "&")
+        let mentionedURLs = Set((try? sourceURLs(in: query)) ?? [])
+        var seen: Set<String> = []
+        let scored = input.enumerated().compactMap { index, entry -> (index: Int, score: Int, mentioned: Bool)? in
+            let item = entry.observation
+            let url = item.sourceURL ?? item.requestedURL ?? ""
+            let key = item.toolID.name + "|" + item.status + "|" + url + "|" + (item.sourceKind?.rawValue ?? "")
+                + "|" + StableDigest.sha256(Data(item.text.utf8)).rawValue
+            guard seen.insert(key).inserted else { return nil }
+            let mentioned = !url.isEmpty && mentionedURLs.contains(url)
+            let text = matchingText((item.sourceTitle ?? "") + " " + clippedText(item.text, maximumBytes: 64 * 1024))
+            let score = terms.reduce(0) { $0 + (text.contains($1.text) ? $1.weight : 0) }
+                + (item.status == "completed" ? 1 : 0)
+            return (index, score, mentioned)
+        }
+        let focused = scored.contains(where: \.mentioned) ? scored.filter(\.mentioned) : scored
+        return focused.sorted {
+            $0.score == $1.score ? $0.index < $1.index : $0.score > $1.score
+        }.prefix(maximumObservations).map { input[$0.index] }
+    }
+
+    private static func normalizedURL(_ value: String) -> URL? {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.utf8.count <= 8192, let url = URL(string: value),
+              ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
+              url.host != nil, url.user == nil, url.password == nil else { return nil }
+        return url
+    }
+
+    private static func sourceURLs(in text: String) throws -> [String] {
+        let bounded = clippedText(text, maximumBytes: 64 * 1024)
+        let pattern = try NSRegularExpression(pattern: #"https?://[^\s<>()\\\[\]"']+"#)
+        return pattern.matches(in: bounded, range: NSRange(bounded.startIndex..., in: bounded)).prefix(128).compactMap {
+            guard let range = Range($0.range, in: bounded) else { return nil }
+            return String(bounded[range]).trimmingCharacters(in: CharacterSet(charactersIn: ".,;，。；、"))
+        }
+    }
+
+    private static func yearExcerpts(_ text: String) throws -> [String] {
+        let bounded = clippedText(text, maximumBytes: 64 * 1024)
+        let pattern = try NSRegularExpression(pattern: #"\b20[0-9]{2}\b"#)
+        var byYear: [String: String] = [:]
+        for match in pattern.matches(in: bounded, range: NSRange(bounded.startIndex..., in: bounded)) {
+            guard let range = Range(match.range, in: bounded) else { continue }
+            let year = String(bounded[range])
+            guard byYear[year] == nil else { continue }
+            let start = bounded.index(range.lowerBound, offsetBy: -35, limitedBy: bounded.startIndex) ?? bounded.startIndex
+            let end = bounded.index(range.upperBound, offsetBy: 65, limitedBy: bounded.endIndex) ?? bounded.endIndex
+            byYear[year] = clippedText(String(bounded[start..<end]), maximumBytes: 120)
+        }
+        return byYear.keys.sorted(by: >).prefix(4).compactMap { byYear[$0] }
+    }
+
+    private struct QueryTerm { let text: String; let weight: Int }
+
+    private static func matchingText(_ text: String) -> String {
+        text.lowercased().replacingOccurrences(of: "\\_", with: "_")
+            .replacingOccurrences(of: "\\-", with: "-")
+    }
+
+    /// Literal query terms only. Code/field names receive priority; source data never supplies a
+    /// regex or an instruction. All matching is local to already-authorized recorded observations.
+    private static func queryTerms(_ query: String) throws -> [QueryTerm] {
+        let query = query.replacingOccurrences(of: "\\_", with: "_").replacingOccurrences(of: "\\-", with: "-")
+        let words = try NSRegularExpression(pattern: #"[\p{L}\p{N}_-]{3,64}"#)
+        let code = try NSRegularExpression(pattern: #"`([^`\n]{3,96})`"#)
+        let stop: Set<String> = ["the", "and", "with", "from", "this", "that", "for", "are", "not", "https", "http", "www", "com", "org", "api", "true", "false", "return", "using", "must", "should", "which", "have", "into"]
+        var terms: [QueryTerm] = []
+        var positions: [String: Int] = [:]
+        func add(_ text: String, code: Bool) {
+            for match in words.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+                guard let range = Range(match.range, in: text) else { continue }
+                let original = String(text[range])
+                let term = matchingText(original)
+                guard !stop.contains(term) else { continue }
+                let capitalized = original.rangeOfCharacter(from: .uppercaseLetters) != nil
+                let identityWeight = original.contains("_") ? 24
+                    : capitalized ? (original == original.uppercased() ? 24 : 16) : 1
+                let weight = (code ? 32 : identityWeight) + min(term.count, 16)
+                if let position = positions[term] {
+                    if weight > terms[position].weight { terms[position] = QueryTerm(text: term, weight: weight) }
+                } else if terms.count < 2048 {
+                    positions[term] = terms.count
+                    terms.append(QueryTerm(text: term, weight: weight))
+                }
+            }
+        }
+        for match in code.matches(in: query, range: NSRange(query.startIndex..., in: query)).prefix(64) {
+            if let range = Range(match.range(at: 1), in: query) { add(String(query[range]), code: true) }
+        }
+        add(query, code: false)
+        return terms.enumerated().sorted {
+            $0.element.weight == $1.element.weight ? $0.offset < $1.offset : $0.element.weight > $1.element.weight
+        }.prefix(48).map(\.element)
+    }
+
+    /// Greedy coverage of distinct query terms selects at most three verbatim line windows.
+    /// The 400-byte head + 200-byte tail + 3×480-byte matches fit within the legacy excerpt budget.
+    private static func matchingExcerpts(_ text: String, terms: [QueryTerm], maximumBytes: Int = 480) throws -> [String] {
+        let bounded = clippedText(text, maximumBytes: 64 * 1024)
+        var candidates: [(line: String, range: Range<String.Index>, hits: Set<Int>)] = []
+        for slice in bounded.split(whereSeparator: \.isNewline) {
+            try Task.checkCancellation()
+            let line = String(slice)
+            let lower = matchingText(line)
+            let hits = Set(terms.indices.filter { lower.contains(terms[$0].text) })
+            if !hits.isEmpty { candidates.append((line, slice.startIndex..<slice.endIndex, hits)) }
+        }
+        var covered: Set<Int> = []
+        var result: [String] = []
+        for _ in 0..<3 {
+            try Task.checkCancellation()
+            var best: Int?
+            var bestScore = 0
+            for (index, candidate) in candidates.enumerated() {
+                let score = candidate.hits.subtracting(covered).reduce(0) { $0 + terms[$1].weight }
+                if score > bestScore { best = index; bestScore = score }
+            }
+            guard let best else { break }
+            let candidate = candidates.remove(at: best)
+            let newHits = candidate.hits.subtracting(covered)
+            guard let term = newHits.sorted(by: {
+                terms[$0].weight == terms[$1].weight ? $0 < $1 : terms[$0].weight > terms[$1].weight
+            }).first else { break }
+            // Markdown can escape identifiers such as need\_content. Match those escapes while
+            // keeping the returned range in the ORIGINAL text, never a normalized reconstruction.
+            let pattern = terms[term].text.map { character in
+                (character == "_" || character == "-" ? #"(?:\\)?"# : "")
+                    + NSRegularExpression.escapedPattern(for: String(character))
+            }.joined()
+            let matcher = try NSRegularExpression(pattern: pattern, options: .caseInsensitive)
+            guard let match = matcher.firstMatch(in: candidate.line, range: NSRange(candidate.line.startIndex..., in: candidate.line)),
+                  let range = Range(match.range, in: candidate.line) else { continue }
+            let offset = candidate.line.distance(from: candidate.line.startIndex, to: range.lowerBound)
+            let matchStart = bounded.index(candidate.range.lowerBound, offsetBy: offset)
+            let before = clippedText(String(bounded[..<matchStart]), maximumBytes: maximumBytes / 4, suffix: true)
+            let excerpt = clippedText(before + String(bounded[matchStart...]), maximumBytes: maximumBytes)
+            result.append(excerpt)
+            // Only terms visible in the actual bounded excerpt count as covered.
+            let visible = matchingText(excerpt)
+            covered.formUnion(terms.indices.filter { visible.contains(terms[$0].text) })
+        }
+        return result
+    }
+
+    private static func clippedText(_ text: String, maximumBytes: Int, suffix: Bool = false) -> String {
+        var bytes = suffix ? Array(text.utf8.suffix(maximumBytes)) : Array(text.utf8.prefix(maximumBytes))
+        // UTF-8 slicing may split one scalar. Drop only its incomplete boundary bytes.
+        for _ in 0..<4 {
+            if let result = String(bytes: bytes, encoding: .utf8) { return result }
+            guard !bytes.isEmpty else { break }
+            if suffix { bytes.removeFirst() } else { bytes.removeLast() }
+        }
+        return ""
+    }
+}

@@ -7,7 +7,7 @@ import Foundation
 /// one place prevents a candidate from passing inspection and failing only after execution starts.
 enum WorkflowAgentOptionContract {
     static let allowedKeys: Set<String> = [
-        "label", "phase", "schema", "model", "agentType", "isolation", "stallMs",
+        "label", "phase", "schema", "model", "agentType", "isolation", "stallMs", "maxToolCalls", "task", "session", "profile",
     ]
     static let supportedIsolationValues: Set<String> = ["worktree", "sandbox"]
 }
@@ -24,11 +24,13 @@ public struct WorkflowAgentInvocation: Hashable, Sendable {
     public let sequence: UInt32
     public let prompt: String
     public let options: WorkflowAgentOptionsV1
+    public let deliversOnWait: Bool
 
-    public init(sequence: UInt32, prompt: String, options: WorkflowAgentOptionsV1) {
+    public init(sequence: UInt32, prompt: String, options: WorkflowAgentOptionsV1, deliversOnWait: Bool = false) {
         self.sequence = sequence
         self.prompt = prompt
         self.options = options
+        self.deliversOnWait = deliversOnWait
     }
 }
 
@@ -53,6 +55,14 @@ public struct WorkflowScriptHost: Sendable {
     public let phase: @Sendable (String) -> Void
     public let log: @Sendable (String) -> Void
     public let budget: @Sendable () -> WorkflowBudgetSnapshot
+    /// Actual usage of settled calls already reached by this execution prefix, with frozen limits.
+    /// Unlike the live output counter, this is safe to include in replayed coordinator prompts.
+    public let settledBudget: @Sendable () async throws -> JSONValue
+    /// Bounded, recorded web observations from this workflow's settled children. No new I/O to sites.
+    public let webEvidence: @Sendable () async throws -> JSONValue
+    public let queryWebEvidence: @Sendable (String) async throws -> JSONValue
+    public let waitAny: @Sendable (UInt32, [UInt32]) async throws -> JSONValue
+    public let collaborate: @Sendable (UInt32, CanonicalJSON) async throws -> JSONValue
 
     public init(
         agent: @escaping @Sendable (WorkflowAgentInvocation) async throws -> WorkflowAgentBridgeResult,
@@ -61,6 +71,19 @@ public struct WorkflowScriptHost: Sendable {
         log: @escaping @Sendable (String) -> Void = { _ in },
         budget: @escaping @Sendable () -> WorkflowBudgetSnapshot = {
             WorkflowBudgetSnapshot(totalOutputTokens: nil, spentOutputTokens: 0)
+        },
+        settledBudget: @escaping @Sendable () async throws -> JSONValue = {
+            throw WorkflowScriptRuntimeError.unsupportedRequirement
+        },
+        webEvidence: @escaping @Sendable () async throws -> JSONValue = {
+            .object(["observations": .array([]), "sources": .array([]), "truncated": .bool(false)])
+        },
+        queryWebEvidence: (@Sendable (String) async throws -> JSONValue)? = nil,
+        waitAny: @escaping @Sendable (UInt32, [UInt32]) async throws -> JSONValue = { _, _ in
+            throw WorkflowScriptRuntimeError.unsupportedRequirement
+        },
+        collaborate: @escaping @Sendable (UInt32, CanonicalJSON) async throws -> JSONValue = { _, _ in
+            throw WorkflowScriptRuntimeError.unsupportedRequirement
         }
     ) {
         self.agent = agent
@@ -68,6 +91,11 @@ public struct WorkflowScriptHost: Sendable {
         self.phase = phase
         self.log = log
         self.budget = budget
+        self.settledBudget = settledBudget
+        self.webEvidence = webEvidence
+        self.queryWebEvidence = queryWebEvidence ?? { _ in try await webEvidence() }
+        self.waitAny = waitAny
+        self.collaborate = collaborate
     }
 }
 

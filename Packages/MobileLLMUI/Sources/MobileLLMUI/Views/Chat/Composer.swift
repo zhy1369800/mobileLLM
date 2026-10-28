@@ -3,6 +3,7 @@
 import SwiftUI
 import PhotosUI
 import AppUI
+import AgentContracts
 import LLMCore
 
 /// The chat composer (DESIGN §4): multiline auto-grow field, one morphing Send↔Stop button (no
@@ -54,6 +55,19 @@ struct Composer: View {
 
     var body: some View {
         VStack(spacing: Theme.Space.xs) {
+            if chat.isWorkflowDraft {
+                HStack {
+                    Image(systemName: "person.3").accessibilityHidden(true)
+                    Text("Work with agents").font(.callout.weight(.medium))
+                        .accessibilityIdentifier("composer.workflow.mode")
+                    Spacer()
+                    Button("Use regular chat", systemImage: "xmark.circle.fill") { chat.useRegularChatDraft() }
+                        .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                        .accessibilityIdentifier("composer.workflow.cancel")
+                }
+                .foregroundStyle(Theme.accent).padding(.horizontal, Theme.Space.md)
+                .background(Theme.accentSoft, in: RoundedRectangle(cornerRadius: Theme.Radius.field))
+            }
             contextMeter
             if let skill = chat.activeSkill { activeSkillChip(skill) }
             if !chat.pendingImages.isEmpty { pendingImageChips }
@@ -351,6 +365,12 @@ struct Composer: View {
     /// see and change the exact capabilities exposed to the model without leaving the conversation.
     private var plusMenu: some View {
         Menu {
+            Button("Work with agents", systemImage: "person.3") {
+                chat.prepareWorkflowDraft()
+                focused = true
+            }
+            .accessibilityIdentifier("composer.workflow.start")
+            Divider()
             if thinkingCapable {
                 Toggle(isOn: Binding(get: { chat.composerThinkingEnabled },
                                      set: { chat.composerThinkingEnabled = $0 })) {
@@ -396,7 +416,7 @@ struct Composer: View {
         }
         .menuIndicator(.hidden)
         .accessibilityLabel("Chat options")
-        .accessibilityHint("Thinking, tools and image attachments")
+        .accessibilityHint("Agent tasks, thinking, tools and image attachments")
     }
 
     // MARK: Tool selection
@@ -437,6 +457,18 @@ struct Composer: View {
                 }
             }
 
+            if let policy = chat.activeConversation?.toolPolicy, !policy.allowedToolIDs.isEmpty {
+                Menu {
+                    Text("Pinned tools get priority each turn.")
+                    ForEach(policy.allowedToolIDs, id: \.self) { tool in
+                        Toggle(pinTitle(tool), isOn: Binding(
+                            get: { chat.activeConversation?.toolPolicy?.pinnedToolIDs.contains(tool) == true },
+                            set: { chat.setToolPinned(tool, pinned: $0) }
+                        ))
+                    }
+                } label: { Label("Pinned tools", systemImage: "pin") }
+            }
+
             Divider()
             Button {
                 focused = false
@@ -447,6 +479,16 @@ struct Composer: View {
         } label: {
             Label("Tools", systemImage: "wrench.and.screwdriver")
         }
+    }
+
+    private func pinTitle(_ tool: AgentToolLogicalID) -> String {
+        if tool.providerID == "builtin" {
+            if tool.name == "remember" { return "Save memory" }
+            if tool.name == "recall" { return "Recall memory" }
+            return BuiltInToolRow.all.first { $0.toolIDs.contains { $0.rawValue == tool.name } }?.title ?? tool.name
+        }
+        let server = settings.mcpServers.first { "mcp." + $0.id.lowercased() == tool.providerID }
+        return server.map { tool.name + " · " + $0.name } ?? tool.name
     }
 
     private static let networkToolRows =

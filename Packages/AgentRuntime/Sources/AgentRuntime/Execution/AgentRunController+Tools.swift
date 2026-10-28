@@ -140,6 +140,26 @@ private actor ExecutionToolBoundaryUsageAccumulator: ToolBoundaryUsageObserving 
 }
 
 extension AgentRunController {
+    /// A failed test or compiler command is usable feedback for the next edit. Only attested,
+    /// completed sandbox execution with source evidence can continue; uncertain effects still stop.
+    static func canContinueAfterToolDiagnostic(_ failure: AgentFailure, plan: ExternalOperationPlan?) -> Bool {
+        if let plan, plan.kind == .sandbox, plan.effects == [.codeExecution], plan.executionConstraintDigest != nil,
+           failure.code == "sandbox.opensandbox.execution", failure.classification == .permanent,
+           failure.requiredUserAction == .none, failure.retryAdvice == .never,
+           [.confirmedNone, .confirmedApplied].contains(failure.externalEffect),
+           let workspace = failure.details["sandbox.workspace"], UUID(uuidString: workspace) != nil,
+           let operation = failure.details["sandbox.operation"], UUID(uuidString: operation) != nil,
+           OpenSandboxToolOperation.allCases.contains(where: {
+               (try? AgentToolLogicalID(providerID: "sandbox", name: $0.rawValue).description) == plan.subjectID
+           }) { return true }
+        guard let plan, let pageID = try? AgentToolLogicalID(providerID: "builtin", name: "fetch_webpage") else { return false }
+        return plan.kind == .tool && plan.subjectID == pageID.description
+            && plan.effects == [.networkRead] && plan.idempotency == .pureRead
+            && failure.code == "tool.web.safe-read-miss" && failure.classification == .availabilityRelated
+            && failure.externalEffect == .confirmedNone && failure.requiredUserAction == .none
+            && failure.retryAdvice == .never
+    }
+
     func admitToolBatch(
         facts: RuntimeRunFacts,
         history: ExecutionHistory,
@@ -147,7 +167,29 @@ extension AgentRunController {
     ) async throws {
         let frozen = try await frozenInputsForTools(facts)
         let selected = try frozen.selectedTools(latestUserRequest: frozen.currentUser.frozen.content)
-        let previous: Set<StableDigest> = Set(history.toolIntents.values.compactMap { intent in
+        let latestIntent = history.toolIntents.values.map { $0.0.sequence }.max()
+        var sourceVersions: [SandboxWorkspaceHandleID: StableDigest] = [:]
+        for (id, outcome) in history.toolOutcomes.sorted(by: { $0.value.0.sequence < $1.value.0.sequence }) {
+            if let prepared = history.toolIntents[id]?.1,
+               let source = SandboxSourceObservation.read(outcome.1, prepared: prepared) {
+                sourceVersions[source.workspace] = source.digest
+            }
+        }
+        let previous: Set<StableDigest> = Set(history.toolIntents.compactMap { id, intent in
+            if intent.1.plan.kind == .sandbox, intent.1.plan.executionConstraintDigest != nil,
+               intent.1.capabilityGrant.authority.workspaceIDs.count == 1, intent.0.sequence != latestIntent {
+                // An intervening operation can change service state, dependencies or runtime data
+                // without changing source bytes. Reject immediate identical loops, not legitimate
+                // stateful calls after other work. Invocation identities still prevent replay.
+                return nil
+            }
+            if let outcome = history.toolOutcomes[id]?.1,
+               let source = SandboxSourceObservation.read(outcome, prepared: intent.1),
+               let latest = sourceVersions[source.workspace], latest != source.digest {
+                // Retesting after an observed source change is new work. Unchanged repetitions,
+                // uncertain effects, and every non-sandbox tool retain their existing guard.
+                return nil
+            }
             guard let descriptorText = intent.1.plan.descriptorID,
                   let arguments = intent.1.plan.canonicalArguments
             else { return nil }
@@ -172,6 +214,48 @@ extension AgentRunController {
                 maximumCalls: UInt16(clamping: remaining),
                 previouslyExecutedFingerprints: previous
             )
+        } catch ToolBatchValidationError.callBudgetExceeded where remaining > 0 && proposedCalls.count > remaining {
+            // Reject the entire batch, then allow one budgeted planning correction. Do not execute
+            // a prefix or relax authorization/argument checks because the model overestimated capacity.
+            do {
+                _ = try ToolBatchValidator().validate(
+                    proposedCalls: proposedCalls,
+                    advertisedDescriptors: selected.descriptors,
+                    maximumCalls: .max,
+                    // Prior-call repetition is itself repairable. Structural duplicates within
+                    // this batch, unadvertised tools and invalid arguments must still fail closed.
+                    previouslyExecutedFingerprints: []
+                )
+            } catch {
+                try await failRun(runID: facts.projection.runID, reason: .internalFailure,
+                    code: "execution.invalid-tool-batch",
+                    message: "The proposed tool batch also violates a non-budget constraint: \(error)")
+                return
+            }
+            guard !history.diagnostics.contains(where: { $0.1.code == "execution.tool-budget-repair" }) else {
+                try await failRun(runID: facts.projection.runID, reason: .budgetExceeded,
+                    code: "execution.tool-budget-repair-exhausted",
+                    message: "The model again proposed more tool calls than the remaining allowance.")
+                return
+            }
+            let repair = try AgentFailure(
+                code: "execution.tool-budget-repair", classification: .transient,
+                safeMessage: "The whole proposed batch of \(proposedCalls.count) calls was rejected and NONE executed. "
+                    + "Only \(remaining) tool calls remain. Submit at most \(remaining) NEW calls, never repeat an executed call, "
+                    + "or answer from existing evidence.",
+                retryAdvice: .never, externalEffect: .confirmedNone, requiredUserAction: .none,
+                redaction: Self.publicRedaction
+            )
+            let id = ExecutionStableID.event(runID: facts.projection.runID,
+                key: "tool-budget-repair-\(facts.projection.eventCount + 1)")
+            _ = try await commitEvents(runID: facts.projection.runID, identity: .outcome(id)) { builder in
+                var events = [try builder.append(id: id, event: .diagnostic(repair), redaction: Self.publicRedaction)]
+                let waiting = try self.status(after: builder, state: .waitingForModel, blockingReason: .modelResource)
+                events.append(try builder.append(id: self.nextEventID(builder, key: "tool-budget-repair-waiting"),
+                    event: .statusChanged(waiting), transitionTo: .waitingForModel, redaction: Self.publicRedaction))
+                return events
+            }
+            return
         } catch ToolBatchValidationError.previouslyExecutedCall {
             // Small local models routinely repeat the tool call that just succeeded instead of
             // answering. Suppress the duplicate with one explicit repair instruction; only a second
@@ -262,7 +346,8 @@ extension AgentRunController {
             var needsSynthesis = false
             for call in calls {
                 guard let outcome = history.toolOutcomes[call.invocationID]?.1 else { continue }
-                if case .failed = outcome {
+                if case .failed(let failure) = outcome,
+                   !Self.canContinueAfterToolDiagnostic(failure, plan: history.toolIntents[call.invocationID]?.1.plan) {
                     needsSynthesis = true
                     break
                 }
@@ -348,6 +433,13 @@ extension AgentRunController {
         guard let request = facts.submission?.request.payload else {
             throw AgentExecutionError.invalidRecoveryBoundary
         }
+        let durablePreparation = history.toolIntents[proposed.invocationID]?.1
+            ?? history.approvals.values.lazy
+                .map(\.request.prepared)
+                .first(where: { $0.invocationID == proposed.invocationID })
+        // A pre-upgrade prepared call must retain its exact approved payload. New calls bind the
+        // source alias; old preparations without that binding execute without adding new data.
+        let canBindSource = durablePreparation == nil || durablePreparation?.plan.executionConstraintDigest != nil
         let sanitized = try sanitizer.sanitize(
             proposed.arguments,
             referencedSecretIDs: [],
@@ -356,7 +448,10 @@ extension AgentRunController {
         let executionRequest = try ToolExecutionRequest(
             proposedCall: proposed,
             descriptor: descriptor,
-            sanitizedArguments: sanitized
+            sanitizedArguments: sanitized,
+            userSourceText: canBindSource && request.provenance.source.projectsConversation
+                && descriptor.id.logicalID.providerID == "builtin" && descriptor.id.logicalID.name == "remember"
+                ? ToolExecutionRequest.sourceTextPrefix(request.instruction) : nil
         )
         let grant = try StepCapabilityGrant(
             runCeiling: request.capabilityCeiling,
@@ -371,10 +466,6 @@ extension AgentRunController {
             capabilityGrant: grant
         )
         let prepared: PreparedToolInvocation
-        let durablePreparation = history.toolIntents[proposed.invocationID]?.1
-            ?? history.approvals.values.lazy
-                .map(\.request.prepared)
-                .first(where: { $0.invocationID == proposed.invocationID })
         if let durable = durablePreparation {
             // Preparation is deliberately not rerun after approval, pause, or process recovery.
             // Reconstruct the closure-free value from the exact durable plan and current frozen
@@ -822,7 +913,8 @@ extension AgentRunController {
             let boundaryStarted = await usageObserver.hasStartedBoundary()
             if boundaryStarted,
                hasRiskyExternalEffects(prepared.plan),
-               case .failed = outcome
+               case .failed = outcome,
+               WorkflowSandboxEvidence.read(outcome, prepared: prepared) == nil
             {
                 outcome = .uncertain(try ExecutionFailureFactory.uncertain(
                     code: "execution.tool-returned-failure-uncertain",
@@ -895,12 +987,8 @@ extension AgentRunController {
             }
 
             let finalHistory = try await loadRun(prepared.runID).1
-            let precedingNoProgress = finalHistory.toolOutcomes.values
-                .sorted { $0.0.sequence < $1.0.sequence }
-                .reversed()
-                .prefix { isSemanticNoProgress($0.1) }
-                .count
-            let consecutiveNoProgress = isSemanticNoProgress(outcome)
+            let precedingNoProgress = consecutiveNoProgress(in: finalHistory)
+            let consecutiveNoProgress = isSemanticNoProgress(outcome, plan: prepared.plan)
                 ? UInt64(clamping: precedingNoProgress + 1) : 0
             var finalUsage = try attemptUsage.adding(AgentUsage(quantities: BudgetQuantities([
                 .consecutiveNoProgressActions: consecutiveNoProgress,
@@ -1266,7 +1354,7 @@ extension AgentRunController {
 
     func requiresExternalByteAccounting(_ plan: ExternalOperationPlan) -> Bool {
         let networkDestinations: Set<ExternalDestination.Kind> = [
-            .networkEndpoint, .mcpServer, .modelProvider,
+            .networkEndpoint, .mcpServer, .modelProvider, .sandboxProvider,
         ]
         let destinations = [plan.destination].compactMap { $0 }
             + plan.allowedRedirects
@@ -1493,12 +1581,8 @@ extension AgentRunController {
                 }
                 return events
             }
-            let noProgress = self.isSemanticNoProgress(outcome)
-            let precedingNoProgress = history.toolOutcomes.values
-                .sorted { $0.0.sequence < $1.0.sequence }
-                .reversed()
-                .prefix { self.isSemanticNoProgress($0.1) }
-                .count
+            let noProgress = self.isSemanticNoProgress(outcome, plan: prepared.plan)
+            let precedingNoProgress = self.consecutiveNoProgress(in: history)
             if noProgress, precedingNoProgress >= 1,
                case .uncertain = outcome
             {
@@ -1539,10 +1623,11 @@ extension AgentRunController {
                 next = hasMore ? .executingTools : .waitingForModel
                 failure = nil
                 blocking = hasMore ? nil : .modelResource
-            case .failed:
-                next = .synthesizing
+            case .failed(let value):
+                let mayContinue = Self.canContinueAfterToolDiagnostic(value, plan: prepared.plan)
+                next = mayContinue ? (hasMore ? .executingTools : .waitingForModel) : .synthesizing
                 failure = nil
-                blocking = nil
+                blocking = mayContinue && !hasMore ? .modelResource : nil
             case .uncertain(let value):
                 next = .waitingForReconciliation
                 failure = value
@@ -1566,7 +1651,24 @@ extension AgentRunController {
         }
     }
 
-    func isSemanticNoProgress(_ outcome: AgentToolInvocationOutcome) -> Bool {
+    func consecutiveNoProgress(in history: ExecutionHistory) -> Int {
+        history.toolOutcomes.sorted { $0.value.0.sequence < $1.value.0.sequence }.reversed()
+            .prefix { isSemanticNoProgress($0.value.1, plan: history.toolIntents[$0.key]?.1.plan) }.count
+    }
+
+    func isSemanticNoProgress(_ outcome: AgentToolInvocationOutcome, plan: ExternalOperationPlan? = nil) -> Bool {
+        if case .failed(let failure) = outcome, plan?.kind == .sandbox, plan?.effects == [.codeExecution],
+           failure.externalEffect == .confirmedApplied, let source = failure.details["sandbox.source"],
+           (try? StableDigest(rawValue: source)) != nil {
+            // A real compiler/test diagnostic is actionable evidence. Exact repeats are still
+            // rejected unless the source changes, and the cumulative budget is unchanged.
+            return false
+        }
+        if case .failed(let failure) = outcome, Self.canContinueAfterToolDiagnostic(failure, plan: plan) {
+            // A distinct unavailable URL is useful negative evidence. Repeated identical calls
+            // remain subject to the fingerprint guard and every miss consumes its tool budget.
+            return false
+        }
         switch outcome {
         case .failed, .uncertain:
             return true

@@ -9,6 +9,98 @@ import XCTest
 // TEST-ID: AHT-SECURITY-002
 // TEST-ID: AHT-TEST-002
 final class AgentExecutorToolIntegrationTests: XCTestCase {
+    // TEST-ID: AHT-BUDGET-001
+    func testModelContinuationUsesRemainingActiveTimeWithoutIncreasingTheRunBudget() async throws {
+        let timing = try AgentRunController.modelAttemptTimeBudget(remote: true, available: 287_813)
+        XCTAssertEqual(timing.reservation, 287_813)
+        XCTAssertEqual(timing.timeout, 257_813)
+        XCTAssertThrowsError(try AgentRunController.modelAttemptTimeBudget(remote: true, available: 0))
+        let offset = 683
+        let model = try ExecutorTestModelDefinition(offset: offset)
+        let definition = try ExecutorTestToolDefinition(name: "time-budget-lookup")
+        let provider = SequencedModelOutcomeProvider(model: model, outcomes: [
+            .completed(try AgentModelCompletion(action: .callTools([definition.call(offset: offset)]),
+                usage: modelUsage(input: 8, output: 3, milliseconds: 40_000, memory: 48))),
+            .completed(try AgentModelCompletion(action: .finalAnswer(AgentAnswer(text: "Continued within remaining time")),
+                usage: modelUsage(input: 9, output: 4, milliseconds: 4, memory: 48)))
+        ])
+        let defaults = try AgentBudget.firstReleaseDefaults(contextTokensPerAttempt: 4096, outputTokens: 1024, peakMemoryBytes: 1_073_741_824)
+        var capacity = Dictionary(uniqueKeysWithValues: defaults.limits.entries.map { ($0.dimension, $0.value) })
+        capacity[.activeMilliseconds] = 150_000
+        let budget = try AgentBudget(limits: BudgetQuantities(capacity), maximumThermalState: defaults.maximumThermalState, memoryPressureResponse: defaults.memoryPressureResponse)
+        let tool = ExecutorTestTool(definition: definition, behavior: .complete("observation"))
+        let harness = try ExecutorTestHarness(offset: offset, provider: provider, model: model,
+            toolDescriptors: [definition.descriptor], tools: SingleExecutorTestToolCatalog(tool: tool),
+            explicitlyRequestedToolIDs: [definition.descriptor.id.logicalID], budget: budget)
+        let id = try await harness.executor.submit(harness.request, commandID: ExecutorTestID.command(offset))
+        let handle = try await harness.executor.attach(to: id)
+        _ = try await collectTerminalEvents(from: handle)
+        let result = try await handle.result()
+        XCTAssertEqual(result?.status.state, .completed)
+        XCTAssertEqual(result?.usage.quantities[.modelAttempts], 2)
+        XCTAssertEqual(result?.usage.quantities[.toolInvocations], 1)
+        XCTAssertGreaterThanOrEqual(result?.usage.quantities[.activeMilliseconds] ?? 0, 40_004)
+        XCTAssertLessThanOrEqual(result?.usage.quantities[.activeMilliseconds] ?? .max, 150_000)
+    }
+
+    // TEST-ID: AHT-BUDGET-001
+    func testOversizedToolBatchCanReplanOnceWithoutExecutingRejectedCallsOrIncreasingCapacity() async throws {
+        for (repeats, hasPriorCall) in [(false, false), (true, false), (false, true)] {
+            let offset = hasPriorCall ? 682 : repeats ? 681 : 680
+            let model = try ExecutorTestModelDefinition(offset: offset, additionalCapabilities: [.multipleToolCalls])
+            let definition = try ExecutorTestToolDefinition(name: "budgeted-lookup")
+            let rejected = try [definition.call(offset: offset, query: "first"),
+                                definition.call(offset: offset + 10, query: "second")]
+            let accepted = try definition.call(offset: offset + 20, query: "chosen")
+            func completion(_ action: AgentAction) throws -> AgentModelAttemptOutcome {
+                .completed(try AgentModelCompletion(action: action, usage: modelUsage(input: 8, output: 3, milliseconds: 4, memory: 48)))
+            }
+            var outcomes: [AgentModelAttemptOutcome] = []
+            if hasPriorCall {
+                outcomes.append(try completion(.callTools([definition.call(offset: offset + 30, query: "first")])))
+            }
+            outcomes += try [
+                completion(.callTools(rejected)),
+                completion(.callTools(repeats ? rejected : [accepted])),
+                completion(.finalAnswer(AgentAnswer(text: "Answer from the chosen observation")))
+            ]
+            let provider = SequencedModelOutcomeProvider(model: model, outcomes: outcomes)
+            let counter = ExecutorTestToolCounter()
+            let tool = ExecutorTestTool(definition: definition, behavior: .complete("chosen observation"), counter: counter)
+            let defaults = try AgentBudget.firstReleaseDefaults(contextTokensPerAttempt: 4096, outputTokens: 1024, peakMemoryBytes: 1_073_741_824)
+            var capacity = Dictionary(uniqueKeysWithValues: defaults.limits.entries.map { ($0.dimension, $0.value) })
+            capacity[.toolInvocations] = hasPriorCall ? 2 : 1
+            let budget = try AgentBudget(limits: BudgetQuantities(capacity), maximumThermalState: defaults.maximumThermalState, memoryPressureResponse: defaults.memoryPressureResponse)
+            let harness = try ExecutorTestHarness(offset: offset, provider: provider, model: model,
+                toolDescriptors: [definition.descriptor], tools: SingleExecutorTestToolCatalog(tool: tool),
+                explicitlyRequestedToolIDs: [definition.descriptor.id.logicalID], budget: budget)
+            let id = try await harness.executor.submit(harness.request, commandID: ExecutorTestID.command(offset))
+            let handle = try await harness.executor.attach(to: id)
+            let events = try await collectTerminalEvents(from: handle)
+            let result = try await handle.result()
+            let requests = await provider.script.capturedRequests()
+            let counts = await counter.snapshot()
+            let expectedCalls = hasPriorCall ? 2 : repeats ? 0 : 1
+            let repairIndex = hasPriorCall ? 2 : 1
+            XCTAssertEqual(counts.executions, expectedCalls)
+            XCTAssertEqual(result?.usage.quantities[.toolInvocations], UInt64(expectedCalls))
+            XCTAssertEqual(result?.usage.quantities[.structuredRepairs], 1)
+            XCTAssertEqual(requests.count, hasPriorCall ? 4 : repeats ? 2 : 3)
+            XCTAssertTrue(requests[repairIndex].messages.map(\.content).joined().contains("Only 1 tool calls remain"))
+            XCTAssertFalse(requests[repairIndex].advertisedTools.isEmpty)
+            XCTAssertFalse(events.contains {
+                guard case .toolOutcomeRecorded(let callID, _) = $0.payload.event else { return false }
+                return rejected.contains { $0.invocationID == callID }
+            })
+            if repeats {
+                XCTAssertEqual(result?.status.failure?.code, "execution.tool-budget-repair-exhausted")
+            } else {
+                XCTAssertEqual(result?.status.state, .completed)
+                XCTAssertTrue(requests.last!.advertisedTools.isEmpty)
+            }
+        }
+    }
+
     func testRetryablePureReadUsesBoundedDelayAndFreshAuthorizedAttempt() async throws {
         let model = try ExecutorTestModelDefinition(offset: 299)
         let retry = try ExternalRetryPolicy(
@@ -60,6 +152,15 @@ final class AgentExecutorToolIntegrationTests: XCTestCase {
         XCTAssertEqual(counts.preparations, 1)
         XCTAssertEqual(counts.executions, 2)
         XCTAssertEqual(counts.boundaries, 0, "localPure work must not enter a protected boundary")
+        let evidence = try await DurableSubagentSpawner(executor: harness.executor, repository: harness.repository)
+            .reviewToolEvidence(handleID)
+        XCTAssertEqual(evidence.map(\.toolID), [definition.descriptor.id.logicalID.description])
+        XCTAssertEqual(evidence.map(\.invocationID), [call.invocationID], "Retried execution produces one settled tool receipt")
+        let recorded = events.first { event in
+            if case .toolOutcomeRecorded(let id, .completed) = event.payload.event { return id == call.invocationID }
+            return false
+        }
+        XCTAssertEqual(evidence.first?.recordDigest, recorded?.payload.recordDigest)
         let delays = await clock.recordedDelays()
         XCTAssertEqual(delays, [10])
         let attemptNumbers = events.compactMap { event -> Int? in
@@ -87,7 +188,13 @@ final class AgentExecutorToolIntegrationTests: XCTestCase {
     func testLocalPureToolRunsAfterDurableIntentThenFeedsOneFollowupModelPass() async throws {
         let model = try ExecutorTestModelDefinition(offset: 300)
         let definition = try ExecutorTestToolDefinition(name: "local-lookup")
-        let call = try definition.call(offset: 300)
+        let original = try definition.call(offset: 300)
+        let native = try NativeToolCallContext(
+            selectionDigest: NativeToolCallContext.digest(for: model.selection), callID: "native-call-300",
+            name: "local-lookup", arguments: original.arguments
+        )
+        let call = ProposedToolCall(invocationID: original.invocationID, toolID: original.toolID,
+                                    arguments: original.arguments, nativeContext: native)
         let modelScript = ToolSequenceModelScript()
         let provider = try ToolSequenceModelProvider(
             model: model,
@@ -129,6 +236,7 @@ final class AgentExecutorToolIntegrationTests: XCTestCase {
         guard modelRequests.count == 2 else {
             return XCTFail("expected tool action plus follow-up model pass, got \(modelRequests.count)")
         }
+        XCTAssertEqual(modelRequests[1].messages.first(where: { $0.role == .tool })?.nativeToolCall, native)
         XCTAssertEqual(modelRequests[0].advertisedTools, [definition.descriptor])
         XCTAssertEqual(modelRequests[1].advertisedTools, [definition.descriptor])
         XCTAssertTrue(modelRequests[1].messages.contains { message in
@@ -322,6 +430,111 @@ final class AgentExecutorToolIntegrationTests: XCTestCase {
         XCTAssertEqual(result?.usage.quantities[.toolInvocations], 1)
         let counts = await counter.snapshot()
         XCTAssertEqual(counts.boundaries, 1)
+    }
+
+    // TEST-ID: AHT-LOOP-001
+    func testOnlyLocallyTrustedPageMissContinuesTheBatchAndKeepsToolsAvailable() async throws {
+        for (index, scenario) in [("builtin", UInt16(1)), ("builtin", UInt16(3)), ("mcp.untrusted", UInt16(1))].enumerated() {
+            let (providerID, parallelism) = scenario
+            let offset = 660 + index
+            let model = try ExecutorTestModelDefinition(offset: offset, additionalCapabilities: [.multipleToolCalls])
+            let page = try ExecutorTestToolDefinition(name: "fetch_webpage", effect: .networkRead, providerID: providerID)
+            let next = try ExecutorTestToolDefinition(name: "following-read")
+            let pageCall = try page.call(offset: offset)
+            let otherPageCall = try page.call(offset: offset + 10, query: "different missing page")
+            let nextCall = try next.call(offset: offset + 20)
+            let failure = try AgentFailure(code: "tool.web.safe-read-miss", classification: .availabilityRelated,
+                safeMessage: "Page not found", retryAdvice: .never, externalEffect: .confirmedNone,
+                requiredUserAction: .none, redaction: RedactionMetadata(classification: .internalMetadata, policyVersion: 1))
+            let provider = SequencedModelOutcomeProvider(model: model, outcomes: [
+                .completed(try AgentModelCompletion(action: .callTools([pageCall, otherPageCall, nextCall]), usage: modelUsage(input: 8, output: 3, milliseconds: 4, memory: 48))),
+                .completed(try AgentModelCompletion(action: .finalAnswer(AgentAnswer(text: "Reported the missing page")), usage: modelUsage(input: 9, output: 4, milliseconds: 4, memory: 48)))
+            ])
+            let missing = ExecutorTestTool(definition: page, behavior: .failWithoutBoundary(failure))
+            let following = ExecutorTestTool(definition: next, behavior: .complete("other observation"))
+            let defaults = try AgentBudget.firstReleaseDefaults(contextTokensPerAttempt: 4096, outputTokens: 1024, peakMemoryBytes: 1_073_741_824)
+            var capacity = Dictionary(uniqueKeysWithValues: defaults.limits.entries.map { ($0.dimension, $0.value) })
+            capacity[.toolInvocations] = 4 // Leave one call after the three-call batch to test continuation.
+            let budget = try AgentBudget(limits: BudgetQuantities(capacity), maximumThermalState: defaults.maximumThermalState, memoryPressureResponse: defaults.memoryPressureResponse)
+            let harness = try ExecutorTestHarness(offset: offset, provider: provider, model: model,
+                toolDescriptors: [page.descriptor, next.descriptor],
+                tools: ExecutorTestToolCatalog(tools: [missing, following]), capabilityCeiling: page.ceiling(),
+                availableToolCapabilities: page.descriptor.requiredCapabilities,
+                explicitlyRequestedToolIDs: [page.descriptor.id.logicalID, next.descriptor.id.logicalID],
+                budget: budget, parallelToolBatchLimit: parallelism, approvalMode: .safePreset)
+            let id = try await harness.executor.submit(harness.request, commandID: ExecutorTestID.command(offset))
+            let handle = try await harness.executor.attach(to: id)
+            let events = try await collectTerminalEvents(from: handle)
+            let result = try await handle.result()
+            XCTAssertEqual(result?.status.terminalReason, .completedWithFailures, "The failed fetch stays a failure")
+            XCTAssertEqual(result?.usage.quantities[.toolInvocations], providerID == "builtin" ? 3 : 1)
+            let requests = await provider.script.capturedRequests()
+            XCTAssertEqual(requests.count, 2)
+            XCTAssertEqual(requests.last?.advertisedTools.isEmpty, providerID != "builtin")
+            let recorded = try await DurableSubagentSpawner(executor: harness.executor, repository: harness.repository).webObservations(id)
+            XCTAssertEqual(recorded.count, providerID == "builtin" ? 2 : 0, "Remote tools cannot create built-in web provenance")
+            XCTAssertTrue(recorded.allSatisfy { $0.status == "failed" })
+            XCTAssertTrue(events.contains {
+                if case .toolOutcomeRecorded(let id, .failed) = $0.payload.event { return id == pageCall.invocationID }
+                return false
+            })
+        }
+    }
+
+    // TEST-ID: AHT-BUDGET-001
+    func testZeroToolCapacitySuppressesAdvertisementsWithoutErasingTheFrozenCatalog() async throws {
+        let offset = 670
+        let model = try ExecutorTestModelDefinition(offset: offset)
+        let definition = try ExecutorTestToolDefinition(name: "unneeded-tool")
+        let defaults = try AgentBudget.firstReleaseDefaults(contextTokensPerAttempt: 4096, outputTokens: 1024, peakMemoryBytes: 1_073_741_824)
+        var values = Dictionary(uniqueKeysWithValues: defaults.limits.entries.map { ($0.dimension, $0.value) })
+        values[.toolInvocations] = 0
+        let budget = try AgentBudget(limits: BudgetQuantities(values), maximumThermalState: defaults.maximumThermalState, memoryPressureResponse: defaults.memoryPressureResponse)
+        let provider = SequencedModelOutcomeProvider(model: model, outcomes: [
+            .completed(try AgentModelCompletion(action: .finalAnswer(AgentAnswer(text: "Synthesis only")), usage: modelUsage(input: 8, output: 3, milliseconds: 4, memory: 48)))
+        ])
+        let harness = try ExecutorTestHarness(offset: offset, provider: provider, model: model,
+            toolDescriptors: [definition.descriptor], explicitlyRequestedToolIDs: [definition.descriptor.id.logicalID], budget: budget)
+        let id = try await harness.executor.submit(harness.request, commandID: ExecutorTestID.command(offset))
+        let handle = try await harness.executor.attach(to: id)
+        _ = try await collectTerminalEvents(from: handle)
+        let requests = await provider.script.capturedRequests()
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertTrue(requests[0].advertisedTools.isEmpty)
+        XCTAssertEqual(harness.frozenInputs.toolCatalog.descriptors.count, 1)
+        let result = try await handle.result()
+        XCTAssertEqual(result?.status.state, .completed)
+        XCTAssertEqual(result?.usage.quantities[.toolInvocations], 0)
+    }
+
+    // TEST-ID: AHT-DYNAMIC-001
+    func testWebEvidenceComesFromDurableToolRecordsWithoutRepeatingExecution() async throws {
+        let offset = 680
+        let model = try ExecutorTestModelDefinition(offset: offset)
+        let definition = try ExecutorTestToolDefinition(name: "web_search", effect: .networkRead, providerID: "builtin")
+        let script = ToolSequenceModelScript()
+        let provider = try ToolSequenceModelProvider(model: model, call: definition.call(offset: offset), answer: "Found a source", script: script)
+        let text = "https://example.edu/group\nUntrusted summary claims FETCHED_PAGE_EXCERPT. Source metadata date: 2025-09-04"
+        let tool = ExecutorTestTool(definition: definition, behavior: .complete(text))
+        let harness = try ExecutorTestHarness(offset: offset, provider: provider, model: model,
+            toolDescriptors: [definition.descriptor], tools: SingleExecutorTestToolCatalog(tool: tool),
+            capabilityCeiling: definition.ceiling(), availableToolCapabilities: definition.descriptor.requiredCapabilities,
+            explicitlyRequestedToolIDs: [definition.descriptor.id.logicalID], approvalMode: .safePreset)
+        let id = try await harness.executor.submit(harness.request, commandID: ExecutorTestID.command(offset))
+        let handle = try await harness.executor.attach(to: id)
+        _ = try await collectTerminalEvents(from: handle)
+        let records = try await DurableSubagentSpawner(executor: harness.executor, repository: harness.repository).webObservations(id)
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.first?.text, text)
+        let packet = try WorkflowWebEvidence.packet(records.map { ("investigator", $0) })
+        guard case .object(let object) = packet else { return XCTFail("Missing packet") }
+        XCTAssertEqual(object["sources"], .array([.object([
+            "url": .string("https://example.edu/group"), "host": .string("example.edu"), "kind": .string("search-summary")
+        ])]))
+        let requests = await script.capturedRequests()
+        XCTAssertEqual(requests.count, 2)
+        let result = try await handle.result()
+        XCTAssertEqual(result?.usage.quantities[.toolInvocations], 1)
     }
 
     func testDeniedApprovalIsSynthesizedWithoutExecutingTool() async throws {

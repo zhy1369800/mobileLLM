@@ -139,6 +139,9 @@ private final class JSCWorkflowExecution: @unchecked Sendable {
             source,
             withSourceURL: URL(string: "mobilellm-workflow-runtime://driver.js")
         )
+        // An exception can synchronously finish and clear this realm during evaluateScript.
+        // Accessing a property on its undefined return value would notify that cleared handler.
+        guard !isCompleted else { return }
         settleFunction = value?.forProperty("settle")
         if value == nil, !isCompleted {
             let message = context.exception?.toString() ?? "script evaluation returned no value"
@@ -186,18 +189,31 @@ private final class JSCWorkflowExecution: @unchecked Sendable {
         let budgetSpent: @convention(block) () -> Double = { [host] in
             Double(host.budget().spentOutputTokens)
         }
-        let startAgent: @convention(block) (Int32, Int32, String, String) -> Void = {
-            [weak self] requestID, sequence, prompt, optionsJSON in
+        let startAgent: @convention(block) (Int32, Int32, String, String, Bool) -> Void = {
+            [weak self] requestID, sequence, prompt, optionsJSON, detached in
             self?.startAgent(
                 requestID: requestID,
                 sequence: sequence,
                 prompt: prompt,
-                optionsJSON: optionsJSON
+                optionsJSON: optionsJSON,
+                detached: detached
             )
         }
         let startWorkflow: @convention(block) (Int32, String, String) -> Void = {
             [weak self] requestID, name, argsJSON in
             self?.startSavedWorkflow(requestID: requestID, name: name, argsJSON: argsJSON)
+        }
+        let startEvidence: @convention(block) (Int32, String) -> Void = { [weak self] requestID, query in
+            self?.startEvidence(requestID: requestID, query: query)
+        }
+        let startBudgetSnapshot: @convention(block) (Int32) -> Void = { [weak self] requestID in
+            self?.startBudgetSnapshot(requestID: requestID)
+        }
+        let startWait: @convention(block) (Int32, Int32, String) -> Void = { [weak self] requestID, index, ordinals in
+            self?.startWait(requestID: requestID, index: index, ordinals: ordinals)
+        }
+        let startCollaboration: @convention(block) (Int32, Int32, String) -> Void = { [weak self] requestID, index, command in
+            self?.startCollaboration(requestID: requestID, index: index, command: command)
         }
         let finished: @convention(block) (Bool, String) -> Void = { [weak self] succeeded, payload in
             self?.scriptFinished(succeeded: succeeded, payload: payload)
@@ -216,12 +232,16 @@ private final class JSCWorkflowExecution: @unchecked Sendable {
         context.setObject(budgetSpent, forKeyedSubscript: "__mllmBudgetSpent" as NSString)
         context.setObject(startAgent, forKeyedSubscript: "__mllmStartAgent" as NSString)
         context.setObject(startWorkflow, forKeyedSubscript: "__mllmStartWorkflow" as NSString)
+        context.setObject(startEvidence, forKeyedSubscript: "__mllmStartEvidence" as NSString)
+        context.setObject(startBudgetSnapshot, forKeyedSubscript: "__mllmStartBudgetSnapshot" as NSString)
+        context.setObject(startWait, forKeyedSubscript: "__mllmStartWait" as NSString)
+        context.setObject(startCollaboration, forKeyedSubscript: "__mllmStartCollaboration" as NSString)
         context.setObject(finished, forKeyedSubscript: "__mllmFinished" as NSString)
     }
 
     private func userFunctionSource() -> String {
         """
-        (async function(agent, parallel, pipeline, workflow, phase, log, serialize, args, budget, console,
+        (async function(agent, parallel, pipeline, workflow, phase, log, serialize, unique, webEvidence, args, budget, console, spawn, waitAny, collaborate,
                         __workflowCheckpoint) {
         'use strict';
         \(script.instrumentedSource)
@@ -245,12 +265,16 @@ private final class JSCWorkflowExecution: @unchecked Sendable {
           const __budgetSpentNative = globalThis.__mllmBudgetSpent;
           const __startAgentNative = globalThis.__mllmStartAgent;
           const __startWorkflowNative = globalThis.__mllmStartWorkflow;
+          const __startEvidenceNative = globalThis.__mllmStartEvidence;
+          const __startBudgetSnapshotNative = globalThis.__mllmStartBudgetSnapshot;
+          const __startWaitNative = globalThis.__mllmStartWait;
+          const __startCollaborationNative = globalThis.__mllmStartCollaboration;
           const __finishedNative = globalThis.__mllmFinished;
           const __userFunction = globalThis.__mllmUserFunction;
           for (const __name of ['__mllmCheckpoint','__mllmStopCode','__mllmPhase','__mllmLog',
-            '__mllmCollectionAllowed','__mllmSerializedEstimateAllowed','__mllmBudgetTotal',
+            '__mllmCollectionAllowed','__mllmSerializedEstimateAllowed','__mllmBudgetTotal','__mllmStartEvidence',
             '__mllmBudgetSpent','__mllmStartAgent','__mllmStartWorkflow','__mllmFinished',
-            '__mllmUserFunction']) { try { delete globalThis[__name]; } catch (_) {} }
+            '__mllmUserFunction','__mllmStartBudgetSnapshot','__mllmStartWait','__mllmStartCollaboration']) { try { delete globalThis[__name]; } catch (_) {} }
 
           const __RealJSON = JSON;
           const __RealJSONParse = __RealJSON.parse.bind(__RealJSON);
@@ -374,8 +398,32 @@ private final class JSCWorkflowExecution: @unchecked Sendable {
             }
             const effective = { ...options };
             if (effective.phase === undefined && __currentPhase !== undefined) effective.phase = __currentPhase;
-            return __request(__startAgentNative, [__agentSequence++, prompt, __stringify(effective)]);
+            return __request(__startAgentNative, [__agentSequence++, prompt, __stringify(effective), false]);
           };
+          const __spawned = new __RealMap();
+          let __waitSequence = 1;
+          let __waiting = false;
+          const spawn = (prompt, options = {}) => {
+            if (typeof prompt !== 'string' || prompt.trim().length === 0) throw new Error('spawn requires a prompt');
+            const sequence = __agentSequence++;
+            const effective = { ...options };
+            if (effective.phase === undefined && __currentPhase !== undefined) effective.phase = __currentPhase;
+            __spawned.set(sequence, true);
+            __request(__startAgentNative, [sequence, prompt, __stringify(effective), true]).catch(() => null);
+            return sequence;
+          };
+          const waitAny = handles => {
+            if (__waiting || !Array.isArray(handles) || handles.length === 0 || !__collectionAllowedNative(handles.length)
+                || handles.some(h => !__spawned.has(h))) throw new Error('waitAny requires outstanding handles and one active wait');
+            __waiting = true;
+            return __request(__startWaitNative, [__waitSequence++, __stringify(handles)]).then(result => {
+              __waiting = false;
+              __spawned.delete(result.handle);
+              return result;
+            }, error => { __waiting = false; throw error; });
+          };
+          let __collaborationSequence = 1;
+          const collaborate = command => __request(__startCollaborationNative, [__collaborationSequence++, __stringify(command)]);
           const parallel = thunks => {
             if (!Array.isArray(thunks) || !__collectionAllowedNative(thunks.length)) {
               const error = new Error('__MOBILELLM_WORKFLOW_ERROR__|collectionLimitExceeded|parallel input exceeds the collection limit');
@@ -411,6 +459,30 @@ private final class JSCWorkflowExecution: @unchecked Sendable {
           // Public bounded structured handoff. Unlike JSON.stringify/Array.join, this route runs
           // the checkpointed node/depth/collection/size validator before the native serializer.
           const serialize = value => __stringify(value);
+          // String sets are bounded and checkpointed. Do not use a user-provided iterator/getter,
+          // or a model-written character-by-character comparison of multi-character identifiers.
+          const unique = values => {
+            __checkpoint();
+            if (!Array.isArray(values) || !__collectionAllowedNative(values.length)) {
+              throw __validationError('unique requires a bounded array of strings');
+            }
+            const seen = new __RealMap();
+            const result = [];
+            let bytes = 2;
+            for (let i = 0; i < values.length; i++) {
+              __checkpoint();
+              const entry = Object.getOwnPropertyDescriptor(values, i);
+              if (!entry || typeof entry.value !== 'string') throw __validationError('unique accepts string values only');
+              bytes += 3 + entry.value.length * 6;
+              if (!__serializedEstimateAllowedNative(bytes)) throw __validationError('unique input exceeds size limit');
+              if (!seen.has(entry.value)) { seen.set(entry.value, true); result.push(entry.value); }
+            }
+            return result;
+          };
+          const webEvidence = (query = '') => {
+            if (typeof query !== 'string' || query.length > 24000) throw new Error('webEvidence query must be bounded text');
+            return __request(__startEvidenceNative, [query]);
+          };
           const workflow = (name, value) => {
             if (typeof name !== 'string' || name.trim().length === 0) {
               return __RealPromise.reject(new Error('workflow name is required'));
@@ -418,6 +490,7 @@ private final class JSCWorkflowExecution: @unchecked Sendable {
             return __request(__startWorkflowNative, [name, __stringify(value === undefined ? null : value)]);
           };
           const budget = Object.freeze({
+            snapshot: () => __request(__startBudgetSnapshotNative, []),
             get total() { const value = __budgetTotalNative(); return value < 0 ? null : value; },
             spent: () => __budgetSpentNative(),
             remaining: () => { const total = __budgetTotalNative(); return total < 0 ? Infinity : Math.max(0, total - __budgetSpentNative()); },
@@ -487,7 +560,7 @@ private final class JSCWorkflowExecution: @unchecked Sendable {
             try { __finishedNative(true, __stringify(value === undefined ? null : value)); }
             catch (error) { __finishedNative(false, __safeMessage(error)); }
           };
-          __userFunction(agent, parallel, pipeline, workflow, phase, log, serialize, args, budget, console,
+          __userFunction(agent, parallel, pipeline, workflow, phase, log, serialize, unique, webEvidence, args, budget, console, spawn, waitAny, collaborate,
                          __checkpoint).then(
             __finishSuccess,
             error => __finishedNative(false, __safeMessage(error))
@@ -497,19 +570,27 @@ private final class JSCWorkflowExecution: @unchecked Sendable {
         """
     }
 
-    private func startAgent(requestID: Int32, sequence: Int32, prompt: String, optionsJSON: String) {
+    private func startAgent(requestID: Int32, sequence: Int32, prompt: String, optionsJSON: String, detached: Bool) {
         guard pendingTasks[requestID] == nil, !isCompleted else { return }
         let task = Task { [weak self, host] in
             guard let self else { return }
             do {
                 let options = try Self.decodeOptions(optionsJSON)
+                // Chat instructions are canonical at the contract boundary. A generated prompt
+                // often ends with a newline after its data delimiter; normalize before hashing,
+                // journaling or building the child, while preserving all interior whitespace.
+                let canonicalPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !canonicalPrompt.isEmpty else {
+                    throw WorkflowScriptRuntimeError.invalidResult("agent prompt must be non-empty")
+                }
                 guard sequence > 0 else {
                     throw WorkflowScriptRuntimeError.internalInvariant("invalid agent sequence")
                 }
                 let result = try await host.agent(WorkflowAgentInvocation(
                     sequence: UInt32(sequence),
-                    prompt: prompt,
-                    options: options
+                    prompt: canonicalPrompt,
+                    options: options,
+                    deliversOnWait: detached
                 ))
                 guard !Task.isCancelled else { throw CancellationError() }
                 switch result {
@@ -526,14 +607,89 @@ private final class JSCWorkflowExecution: @unchecked Sendable {
             } catch let error as WorkflowScriptRuntimeError {
                 reject(requestID: requestID, error: error, fatal: true)
             } catch {
+                let safeMessage = Self.sanitize(String(describing: error))
+                // A script may intentionally catch a failed child. Keep the safe cause observable
+                // even if its catch returns a generic message before a child handle was created.
+                host.log("agent \(sequence) failed: \(safeMessage)")
                 reject(
                     requestID: requestID,
-                    error: .hostFailure(Self.sanitize(String(describing: error))),
+                    error: .hostFailure(safeMessage),
                     fatal: true
                 )
             }
         }
         pendingTasks[requestID] = task
+    }
+
+    private func startWait(requestID: Int32, index: Int32, ordinals: String) {
+        guard pendingTasks[requestID] == nil, !isCompleted else { return }
+        pendingTasks[requestID] = Task { [weak self, host] in
+            guard let self else { return }
+            do {
+                guard index > 0 else { throw WorkflowScriptRuntimeError.invalidArguments("wait index") }
+                let handles = try JSONDecoder().decode([UInt32].self, from: Data(ordinals.utf8))
+                let result = try await host.waitAny(UInt32(index), handles)
+                try Task.checkCancellation()
+                try resolve(requestID: requestID, value: result)
+            } catch is CancellationError {
+                reject(requestID: requestID, error: .cancelled, fatal: true)
+            } catch {
+                reject(requestID: requestID, error: .hostFailure(Self.sanitize(String(describing: error))), fatal: true)
+            }
+        }
+    }
+
+    private func startCollaboration(requestID: Int32, index: Int32, command: String) {
+        guard pendingTasks[requestID] == nil, !isCompleted else { return }
+        pendingTasks[requestID] = Task { [weak self, host] in
+            guard let self else { return }
+            do {
+                guard index > 0 else { throw WorkflowScriptRuntimeError.invalidArguments("collaboration index") }
+                let value = try CanonicalJSON(JSONDecoder().decode(JSONValue.self, from: Data(command.utf8)))
+                let result = try await host.collaborate(UInt32(index), value)
+                try Task.checkCancellation()
+                try resolve(requestID: requestID, value: result)
+            } catch is CancellationError {
+                reject(requestID: requestID, error: .cancelled, fatal: true)
+            } catch {
+                reject(requestID: requestID, error: .hostFailure(Self.sanitize(String(describing: error))), fatal: true)
+            }
+        }
+    }
+
+    private func startBudgetSnapshot(requestID: Int32) {
+        guard pendingTasks[requestID] == nil, !isCompleted else { return }
+        pendingTasks[requestID] = Task { [weak self, host] in
+            guard let self else { return }
+            do {
+                let value = try await host.settledBudget()
+                try Task.checkCancellation()
+                try resolve(requestID: requestID, value: value)
+            } catch is CancellationError {
+                reject(requestID: requestID, error: .cancelled, fatal: true)
+            } catch {
+                reject(requestID: requestID, error: .hostFailure(Self.sanitize(String(describing: error))), fatal: true)
+            }
+        }
+    }
+
+    private func startEvidence(requestID: Int32, query: String) {
+        guard pendingTasks[requestID] == nil, !isCompleted else { return }
+        pendingTasks[requestID] = Task { [weak self, host] in
+            guard let self else { return }
+            do {
+                guard query.utf8.count <= 64 * 1024 else {
+                    throw WorkflowScriptRuntimeError.invalidArguments("web evidence query exceeds 64 KiB")
+                }
+                let value = query.isEmpty ? try await host.webEvidence() : try await host.queryWebEvidence(query)
+                try Task.checkCancellation()
+                try resolve(requestID: requestID, value: value)
+            } catch is CancellationError {
+                reject(requestID: requestID, error: .cancelled, fatal: true)
+            } catch {
+                reject(requestID: requestID, error: .hostFailure(Self.sanitize(String(describing: error))), fatal: true)
+            }
+        }
     }
 
     private func startSavedWorkflow(requestID: Int32, name: String, argsJSON: String) {
@@ -728,7 +884,7 @@ private final class JSCWorkflowExecution: @unchecked Sendable {
             )
         }
         let schema: JSONSchemaDocument?
-        if let root = object["schema"] {
+        if let root = object["schema"], root != .null {
             do { schema = try JSONSchemaDocument(root: root) }
             catch { throw WorkflowScriptRuntimeError.invalidAgentOptions("schema is not fully supported") }
         } else { schema = nil }
@@ -745,7 +901,24 @@ private final class JSCWorkflowExecution: @unchecked Sendable {
         case .unsignedInteger(let value): stall = value
         default: throw WorkflowScriptRuntimeError.invalidAgentOptions("stallMs must be a nonnegative integer")
         }
+        let maximumToolCalls: UInt64?
+        switch object["maxToolCalls"] {
+        case nil: maximumToolCalls = nil
+        case .integer(let value) where value >= 0: maximumToolCalls = UInt64(value)
+        case .unsignedInteger(let value): maximumToolCalls = value
+        default: throw WorkflowScriptRuntimeError.invalidAgentOptions("maxToolCalls must be a nonnegative integer")
+        }
         do {
+            let task = try object["task"].map {
+                try JSONDecoder().decode(WorkflowTaskDescriptorV1.self, from: CanonicalJSON($0).data)
+            }
+            let profile = try object["profile"].flatMap { value -> WorkflowAgentProfileV1? in
+                if case .null = value { return nil }
+                guard case .object(let fields) = value, Set(fields.keys).isSubset(of: ["toolNames", "skillIDs", "reasoningEffort"]) else {
+                    throw WorkflowScriptRuntimeError.invalidAgentOptions("unsupported agent profile fields")
+                }
+                return try JSONDecoder().decode(WorkflowAgentProfileV1.self, from: CanonicalJSON(value).data)
+            }
             return try WorkflowAgentOptionsV1(
                 label: try optionalString(object["label"], field: "label"),
                 phase: try optionalString(object["phase"], field: "phase"),
@@ -753,7 +926,11 @@ private final class JSCWorkflowExecution: @unchecked Sendable {
                 requestedModel: try optionalString(object["model"], field: "model"),
                 requestedAgentType: try optionalString(object["agentType"], field: "agentType"),
                 requiresIsolatedWorkspace: isolation != nil,
-                stallMilliseconds: stall
+                stallMilliseconds: stall,
+                maximumToolCalls: maximumToolCalls,
+                task: task,
+                sessionKey: try optionalString(object["session"], field: "session"),
+                profile: profile
             )
         } catch {
             throw WorkflowScriptRuntimeError.invalidAgentOptions(Self.sanitize(String(describing: error)))
@@ -762,7 +939,7 @@ private final class JSCWorkflowExecution: @unchecked Sendable {
 
     private static func optionalString(_ value: JSONValue?, field: String) throws -> String? {
         switch value {
-        case nil: nil
+        case nil, .null: nil
         case .string(let value): value
         default: throw WorkflowScriptRuntimeError.invalidAgentOptions("\(field) must be a string")
         }

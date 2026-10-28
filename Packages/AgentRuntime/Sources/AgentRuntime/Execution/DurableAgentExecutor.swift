@@ -131,6 +131,9 @@ public actor AgentRunController {
     /// Per-run serialization for budget-settling tool commits only. Commands and other plain
     /// commits stay ungated so pause/cancel can always interrupt a parallel batch.
     var toolCommitGates: [AgentRunID: ToolCommitGate] = [:]
+    var sessionGates: [AgentSessionID: ToolCommitGate] = [:]
+    var sessionContinuationPermission: Set<AgentSessionID> = []
+    var sessionActivationOwners: [AgentRunID: AgentSessionID] = [:]
 
     public init(
         repository: any RuntimeRepository,
@@ -165,6 +168,11 @@ public actor AgentRunController {
         _ request: AgentRequest,
         commandID: AgentCommandID
     ) async throws -> AgentExecutionHandleID {
+        try await submit(request, commandID: commandID, frozenInputs: nil)
+    }
+
+    func submit(_ request: AgentRequest, commandID: AgentCommandID,
+                frozenInputs suppliedInputs: FrozenAgentRunInputs?) async throws -> AgentExecutionHandleID {
         try beginPublicMutation()
         defer { endPublicMutation() }
         if let existing = try await repository.loadRunFacts(for: request.runID),
@@ -181,7 +189,9 @@ public actor AgentRunController {
             return submission.executionHandleID
         }
 
-        let frozen = try await inputFreezer.freeze(request)
+        let frozen: FrozenAgentRunInputs
+        if let suppliedInputs { frozen = suppliedInputs }
+        else { frozen = try await inputFreezer.freeze(request) }
         let frozenData = try ExecutionEncoding.encode(frozen)
         let inputArtifact = try await payloadStore.commit(
             data: frozenData,
@@ -203,11 +213,13 @@ public actor AgentRunController {
             ? (request.provenance.sourceMessageID
                 ?? ExecutionStableID.message(runID: request.runID, role: .user))
             : ExecutionStableID.message(runID: request.runID, role: .user)
-        let userBody = Data(frozen.currentUser.frozen.content.utf8)
+        let userBody = try AcceptedUserMessagePayload(
+            text: frozen.currentUser.frozen.content, attachments: frozen.currentUser.attachments
+        ).encoded()
         let userArtifact = try await payloadStore.commit(
             data: userBody,
-            mimeType: "text/plain",
-            semanticType: "agent-user-message.v1",
+            mimeType: "application/octet-stream",
+            semanticType: "agent-user-message.v2",
             runID: request.runID,
             stepID: nil,
             invocationID: nil,
@@ -490,6 +502,7 @@ public actor AgentRunController {
 
     func schedule(runID: AgentRunID) {
         guard !dataEraseSuspended, workers[runID] == nil else { return }
+        if let sessionID = sessionActivationOwners[runID], !sessionContinuationPermission.contains(sessionID) { return }
         workers[runID] = Task { [weak self] in
             guard let self else { return }
             await self.drive(runID: runID)
@@ -497,8 +510,9 @@ public actor AgentRunController {
         }
     }
 
-    private func workerFinished(runID: AgentRunID) {
+    private func workerFinished(runID: AgentRunID) async {
         workers[runID] = nil
+        await advanceSessionAfterCompletion(runID)
     }
 
     func registerToolCancellation(

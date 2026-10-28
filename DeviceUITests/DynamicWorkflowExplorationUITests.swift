@@ -2,6 +2,9 @@
 
 import Foundation
 import XCTest
+#if canImport(UIKit)
+import UIKit
+#endif
 
 private struct DynamicWorkflowExplorationScenario {
     enum MarkerPlacement {
@@ -18,6 +21,9 @@ private struct DynamicWorkflowExplorationScenario {
     let requireParallelSource: Bool
     let requiredConceptGroups: [[String]]
     var markerPlacement: MarkerPlacement = .suffix
+    var exactCheck: ExactCheck? = nil
+
+    enum ExactCheck { case coverage, procurement, schedule, europeanGroups }
 
     var command: String {
         switch markerPlacement {
@@ -28,10 +34,97 @@ private struct DynamicWorkflowExplorationScenario {
 }
 
 private extension DynamicWorkflowExplorationScenario {
+    // Closed-data tasks measure exact correctness. A supervisor may solve them without delegation.
+    // Complex research below still requires collaboration; controlled runtime tests verify its mechanics.
+    static let closedCorpusCoverage = Self(
+        id: "closed-corpus-coverage",
+        goal: """
+        Audit this supplied fictional research directory. Select ALL distinct European teams with a
+        dated 2024–2026 result that improves computational efficiency, including efficient training,
+        inference, compression and accelerator work. Resolve aliases and distinguish technical
+        efficiency from accuracy or policy work. Use only these records. Return ONLY JSON with
+        marker="EVAL_CORPUS", selectedIDs (canonical IDs), and excluded (ID and reason).
+        Directory A: G01, Austria, 2025, 4-bit quantization reduces memory; G02, UK, 2024, sparse
+        inference reduces FLOPs; G03, USA, 2026, faster kernels; G04, France, 2023, model compression;
+        G05, Italy, 2026, distillation reduces deployment cost; G06, Spain, 2026, higher accuracy only.
+        Directory B: Alpine Lab is an alias of G01, same team and result; G07, Germany, 2024, kernel
+        optimization reduces runtime; G08, Norway, 2025, AI sustainability policy with no computation
+        result; G09, Switzerland, 2025, low-power inference accelerator; G10, Poland, 2026, pruning
+        reduces model storage; G11, Sweden, 2026, training method reduces FLOPs at fixed accuracy;
+        G12, Portugal, 2025, edge compression reduces memory. No other records are available.
+        """,
+        marker: "EVAL_CORPUS", enabledTools: [], minimumAgentCalls: 0,
+        minimumAnswerCharacters: 80, requireParallelSource: true, requiredConceptGroups: [],
+        exactCheck: .coverage
+    )
+
+    static let constrainedProcurement = Self(
+        id: "constrained-procurement",
+        goal: """
+        Choose exactly two DIFFERENT devices from this supplied catalog to maximize combined throughput.
+        The total price must be at most EUR 950 and combined power at most 100 W. No discounts,
+        fractional devices or extra facts. Catalog (ID, EUR, throughput units/s, W): A,320,70,40;
+        B,470,110,65; C,550,150,90; D,620,130,55; E,390,75,35. Establish optimality by comparing all
+        feasible pairs and checking both constraints. Return ONLY JSON with marker="EVAL_PURCHASE",
+        selectedIDs, totalPrice, totalThroughput, totalPower and feasiblePairs (each an array of IDs).
+        """,
+        marker: "EVAL_PURCHASE", enabledTools: [], minimumAgentCalls: 0,
+        minimumAnswerCharacters: 80, requireParallelSource: true, requiredConceptGroups: [],
+        exactCheck: .procurement
+    )
+
+    static let dependencySchedule = Self(
+        id: "dependency-scheduling",
+        goal: """
+        Produce a minimum-duration execution schedule from the supplied facts. Two identical workers
+        are available at time zero. Each task uses one worker, cannot be interrupted, and starts only
+        after its dependencies finish. A takes 3 hours with no dependencies; B takes 2 with none;
+        C takes 4 after A; D takes 2 after BOTH A and B; E takes 1 after BOTH C and D. Give a lower
+        bound proving optimality. Return ONLY JSON with marker="EVAL_SCHEDULE", makespan,
+        lowerBound, and schedule (one record per task with id, start, end, worker where worker is 1 or 2).
+        """,
+        marker: "EVAL_SCHEDULE", enabledTools: [], minimumAgentCalls: 0,
+        minimumAnswerCharacters: 160, requireParallelSource: true, requiredConceptGroups: [],
+        exactCheck: .schedule
+    )
+
+    static let searchServiceComparison = Self(
+        id: "search-service-comparison",
+        goal: """
+        Compare the official DeepSeek Search/Fetch APIs with Brave's Web Search API for an agent
+        application, using documentation current as of 2026-10-22. Identify exact HTTPS endpoints,
+        authentication, whether search results include page contents, and when a separate page read
+        is necessary. Give a minimal request example for each service and an implementation choice
+        with limitations. Use primary documentation, cite the sources, and separate verified details
+        from anything unavailable. Return a readable comparison containing EVAL_WEB_APIS.
+        """,
+        marker: "EVAL_WEB_APIS", enabledTools: ["Web search", "Webpage reader"], minimumAgentCalls: 3,
+        minimumAnswerCharacters: 350, requireParallelSource: true,
+        requiredConceptGroups: [["DeepSeek"], ["Brave"], ["https://"], ["authentication", "Authorization", "认证", "鉴权"]]
+    )
+
+    static let europeanEfficientAI = Self(
+        id: "europe-efficient-ai-coverage",
+        goal: """
+        系统梳理欧洲范围内从事 efficient AI 的研究组，兼顾高效训练、推理、模型压缩、稀疏性、
+        低秩方法、端侧机器学习和软硬件系统。不要只找名称含 efficient AI 的实验室。
+        给出至少12个不同研究组，覆盖至少6个国家，说明机构、负责人、主要方向和代表工作，
+        用官方或一手来源链接支持事实。清楚区分已核实、未知、研究组与跨机构项目。
+        返回JSON，包含 marker="EVAL_EUROPE_COVERAGE"、groups数组和coverageGaps。
+        每个group包含name、institution、countryCode（国家二字母代码）、lead（未知可为null）、
+        topics字符串数组、representativeWork（未知可为null）、sourceURLs数组。
+        groups只计研究组，不把跨机构项目直接当成研究组。说明仍有哪些覆盖空白，
+        不要把达到数量门槛称作完整。除JSON外不要返回其他文字。
+        """,
+        marker: "EVAL_EUROPE_COVERAGE", enabledTools: ["Web search", "Webpage reader"],
+        minimumAgentCalls: 3, minimumAnswerCharacters: 700, requireParallelSource: true,
+        requiredConceptGroups: [["https://"]], exactCheck: .europeanGroups
+    )
+
     static let kimiLocal = Self(
         id: "kimi-local-feasibility",
         goal: """
-        Assess whether the COMPLETE Kimi K3 open-weight model can be installed as local weights and run fully offline on an iPhone 16 Pro. Do not substitute the official app or a cloud API for local inference. Use independent research tracks for model scale, iPhone memory/storage limits, and deployment alternatives, then synthesize a direct verdict with an order-of-magnitude calculation, important uncertainty, and realistic alternatives. Use current sources where available. The final answer must include the exact token EVAL_KIMI_LOCAL.
+        Assess whether the COMPLETE Kimi K3 open-weight model can run fully offline on an iPhone 16 Pro. Distinguish fully resident weights, local external-storage streaming, and remote/server inference. Do not substitute an official app or cloud API for local execution, and do not infer impossibility solely because weights exceed RAM. Investigate current implementations, storage/memory requirements, I/O and latency tradeoffs, then give a conditional verdict with defensible calculations, uncertainties and primary sources. Cite at least two independent HTTPS source hosts. The final answer must include the exact token EVAL_KIMI_LOCAL.
         """,
         marker: "EVAL_KIMI_LOCAL",
         enabledTools: ["Web search", "Webpage reader", "Wikipedia", "Calculator"],
@@ -42,7 +135,8 @@ private extension DynamicWorkflowExplorationScenario {
             ["iPhone 16 Pro"],
             ["RAM", "memory"],
             ["weights", "storage", "quantization"],
-            ["not feasible", "cannot", "impractical", "unrealistic"],
+            ["stream", "out-of-core", "external storage", "SSD"],
+            ["latency", "bandwidth", "tokens/s", "I/O"],
             ["cloud", "remote", "API", "smaller model"],
         ]
     )
@@ -50,7 +144,7 @@ private extension DynamicWorkflowExplorationScenario {
     static let accessibleTrip = Self(
         id: "accessible-trip-planning",
         goal: """
-        Build a realistic seven-day wheelchair-accessible Austria itinerary for two adults starting and ending in Vienna with a total ground budget of EUR 1,800. Independently investigate accessible transport, lodging/attraction constraints, and budget/risk tradeoffs before synthesis. Give daily routing, a budget table, reservation dependencies, and fallbacks when an elevator or train is unavailable. Clearly separate verified facts from assumptions. The final answer must include the exact token EVAL_TRIP_7D.
+        Build a realistic seven-day wheelchair-accessible Austria itinerary for two adults starting and ending in Vienna with a total ground budget of EUR 1,800. Independently investigate accessible transport, lodging/attraction constraints, and budget/risk tradeoffs before synthesis. Give daily routing, a budget table, reservation dependencies, and fallbacks when an elevator or train is unavailable. Clearly separate verified facts from assumptions and cite at least two independent HTTPS source hosts. The final answer must include the exact token EVAL_TRIP_7D.
         """,
         marker: "EVAL_TRIP_7D",
         enabledTools: ["Web search", "Webpage reader", "Wikipedia", "Calculator"],
@@ -120,12 +214,12 @@ private extension DynamicWorkflowExplorationScenario {
         minimumAnswerCharacters: 350,
         requireParallelSource: true,
         requiredConceptGroups: [
-            ["untrusted", "prompt injection"],
-            ["authority", "capability"],
-            ["approval", "consent"],
-            ["static analysis", "parser", "analyzer"],
-            ["fail", "reject", "deny"],
-            ["inspect", "audit", "evidence"],
+            ["untrusted", "prompt injection", "不可信", "提示注入"],
+            ["authority", "capability", "权限", "能力"],
+            ["approval", "consent", "审批", "批准", "同意"],
+            ["static analysis", "parser", "analyzer", "静态分析", "解析器", "分析器"],
+            ["fail", "reject", "deny", "失败", "拒绝"],
+            ["inspect", "audit", "evidence", "检查", "审计", "证据"],
         ]
     )
 }
@@ -136,6 +230,7 @@ private extension DynamicWorkflowExplorationScenario {
 /// generator decomposes diverse complex goals and whether the final answer is actually useful.
 /// Every run retains the exact source, child-call evidence, final answer, and screenshot in xcresult.
 final class DynamicWorkflowExplorationUITests: DeviceE2ETestCase {
+    override var usesIsolatedStorage: Bool { true }
     @MainActor
     func test01KimiLocalWeightsFeasibility() throws {
         try run(.kimiLocal)
@@ -160,6 +255,12 @@ final class DynamicWorkflowExplorationUITests: DeviceE2ETestCase {
     func test05UntrustedGoalCannotWidenAuthority() throws {
         try run(.untrustedGoal)
     }
+
+    @MainActor func test06ClosedCorpusCoverageAndAliases() throws { try run(.closedCorpusCoverage) }
+    @MainActor func test07ConstrainedProcurementOptimality() throws { try run(.constrainedProcurement) }
+    @MainActor func test08DependencyScheduleFeasibilityAndLowerBound() throws { try run(.dependencySchedule) }
+    @MainActor func test09SearchServiceComparisonFromPrimarySources() throws { try run(.searchServiceComparison) }
+    @MainActor func test10EuropeanResearchIncludesHeldOutKnownGroup() throws { try run(.europeanEfficientAI) }
 
     /// Ad-hoc probe for future reports without editing the suite. Expected concepts use
     /// `groupAAlternative1|groupAAlternative2;groupB` and tools use comma-separated display names.
@@ -196,6 +297,7 @@ final class DynamicWorkflowExplorationUITests: DeviceE2ETestCase {
         try configureTools(
             master: !scenario.enabledTools.isEmpty,
             enabled: scenario.enabledTools,
+            deepSeekWebService: ProcessInfo.processInfo.environment["MOBILELLM_WORKFLOW_EVAL_DEEPSEEK_WEB"] == "1",
             in: app
         )
         try openNewChat(in: app)
@@ -203,12 +305,12 @@ final class DynamicWorkflowExplorationUITests: DeviceE2ETestCase {
 
         let answers = app.descendants(matching: .any).matching(identifier: "assistant.answer")
         let answerCount = answers.count
-        let field = app.textFields["composer.field"]
+        let field = app.descendants(matching: .any).matching(identifier: "composer.field").firstMatch
         guard field.waitForExistence(timeout: 20) else {
             throw DeviceE2EHarnessError.precondition("Composer missing for \(scenario.id)")
         }
         field.tap()
-        field.typeText(scenario.command)
+        try enterGoal(scenario.command, into: field, in: app)
         let send = app.buttons["Send"]
         guard waitForEnabled(send, timeout: 20) else {
             throw DeviceE2EHarnessError.precondition("Send disabled for \(scenario.id)")
@@ -224,9 +326,8 @@ final class DynamicWorkflowExplorationUITests: DeviceE2ETestCase {
         }
 
         var rowState = workflowValue(row)
-        // The app allows one full generator pass plus one analyzer-guided repair. Each live-model
-        // request has a ten-minute terminal bound, so the probe must observe that complete contract
-        // instead of reporting a false candidate failure while a valid repair is still in flight.
+        // Initial planning is a schema-constrained durable model call. Observe its terminal bound
+        // without submitting a corrective prompt or silently retrying the user's task.
         let candidateDeadline = Date().addingTimeInterval(1_200)
         while Date() < candidateDeadline,
               !rowState.contains("Running"),
@@ -272,13 +373,24 @@ final class DynamicWorkflowExplorationUITests: DeviceE2ETestCase {
 
         let workflowBar = app.navigationBars["Workflow"]
         for _ in 0 ..< 5 where !workflowBar.exists {
+            // A long user message can leave a newly attached workflow row behind the composer.
+            // Scroll through the real UI before tapping; accessibility existence alone is not visibility.
+            let latest = app.buttons["Scroll to latest"]
+            if latest.exists, latest.isHittable { latest.tap() }
             if row.exists, row.isHittable { row.tap() }
             if workflowBar.waitForExistence(timeout: 3) { break }
         }
         guard workflowBar.exists else {
             throw DeviceE2EHarnessError.precondition("Workflow page missing for \(scenario.id)")
         }
-        let sourceDisclosure = app.buttons["JavaScript source"]
+        let executionDetails = app.buttons["Execution details"]
+        for _ in 0..<8 where !executionDetails.isHittable { app.swipeUp() }
+        guard executionDetails.waitForExistence(timeout: 10) else {
+            throw DeviceE2EHarnessError.precondition("Workflow execution details are missing")
+        }
+        executionDetails.tap()
+        let sourceDisclosure = app.buttons["Workflow source"]
+        for _ in 0..<4 where !sourceDisclosure.isHittable { app.swipeUp() }
         guard sourceDisclosure.waitForExistence(timeout: 15) else {
             throw DeviceE2EHarnessError.precondition("Source disclosure missing for \(scenario.id)")
         }
@@ -295,7 +407,7 @@ final class DynamicWorkflowExplorationUITests: DeviceE2ETestCase {
             approvePendingAgentApprovalIfNeeded(in: app)
             finalState = state.label
             if finalState == "Completed" || finalState == "Failed"
-                || finalState == "Denied or stopped" || finalState == "Needs reconciliation"
+                || finalState == "Denied or stopped" || finalState == "Needs your review"
             {
                 break
             }
@@ -308,29 +420,21 @@ final class DynamicWorkflowExplorationUITests: DeviceE2ETestCase {
         }
 
         var childCalls: [String] = []
-        let callsDisclosure = app.buttons["Agent calls"]
-        if callsDisclosure.waitForExistence(timeout: 10) {
+        let callsDisclosure = app.buttons["workflow.call.history"]
+        if callsDisclosure.exists || (scenario.minimumAgentCalls > 0 && callsDisclosure.waitForExistence(timeout: 10)) {
             let callEvidence = (callsDisclosure.value as? String) ?? ""
             let callCount = Int(callEvidence.split(separator: " ").first ?? "0") ?? 0
+            for _ in 0..<5 where !callsDisclosure.isHittable { app.swipeUp() }
             callsDisclosure.tap()
-            let callElements = app.descendants(matching: .any)
-                .matching(identifier: "workflow.agent.call")
+            let callElements = app.staticTexts.matching(identifier: "workflow.agent.call")
             let callDeadline = Date().addingTimeInterval(10)
             while Date() < callDeadline, callElements.count < scenario.minimumAgentCalls {
                 app.swipeUp()
                 Thread.sleep(forTimeInterval: 0.25)
             }
-            childCalls = callElements.allElementsBoundByIndex.map(elementText)
-            if childCalls.count < callCount {
-                let projected = callEvidence.split(separator: "\n").dropFirst().map(String.init)
-                childCalls.append(contentsOf: projected.dropFirst(childCalls.count))
-            }
-            if childCalls.count < callCount {
-                childCalls.append(contentsOf: repeatElement(
-                    "projected child call (detail unavailable)",
-                    count: callCount - childCalls.count
-                ))
-            }
+            childCalls = callElements.allElementsBoundByIndex.map(\.label)
+            XCTAssertEqual(childCalls.count, callCount, "the UI must expose every recorded call")
+
         }
 
         if workflowBar.buttons.firstMatch.exists {
@@ -358,17 +462,51 @@ final class DynamicWorkflowExplorationUITests: DeviceE2ETestCase {
                 "only \(childCalls.count) child calls; expected at least \(scenario.minimumAgentCalls)"
             )
         }
+        if childCalls.contains(where: { $0.localizedCaseInsensitiveContains("detail unavailable") }) {
+            failures.append("A child's execution evidence is missing")
+        }
+        if scenario.enabledTools.contains("Web search") {
+            let detector = try NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+            let links = detector.matches(in: answer, range: NSRange(answer.startIndex..., in: answer)).compactMap(\.url)
+            let hosts = Set(links.filter { $0.scheme == "https" }.compactMap(\.host))
+            let environment = ProcessInfo.processInfo.environment
+            let minimumHosts = scenario.id == "ad-hoc"
+                ? max(2, Int(environment["MOBILELLM_WORKFLOW_EVAL_MIN_CITATION_HOSTS"] ?? "2") ?? 2) : 2
+            if hosts.count < minimumHosts {
+                failures.append("Research answer has \(hosts.count) HTTPS citation hosts; expected at least \(minimumHosts)")
+            }
+            if scenario.id == "ad-hoc", let minimumRows = Int(environment["MOBILELLM_WORKFLOW_EVAL_MIN_CITED_ROWS"] ?? "") {
+                let citedRows = answer.components(separatedBy: .newlines).filter {
+                    let line = $0.trimmingCharacters(in: .whitespaces)
+                    return line.hasPrefix("|") && line.contains("https://")
+                }.count
+                if citedRows < minimumRows {
+                    failures.append("Research answer has \(citedRows) cited table rows; expected at least \(minimumRows)")
+                }
+            }
+            if answer.contains("<｜｜DSML｜｜tool_calls>") {
+                failures.append("Research answer contains raw tool protocol markup")
+            }
+        }
         if answer.count < scenario.minimumAnswerCharacters {
             failures.append(
                 "answer had \(answer.count) characters; expected at least "
                     + "\(scenario.minimumAnswerCharacters)"
             )
         }
+        if scenario.id != "ad-hoc", scenario.exactCheck == nil,
+           let decoded = try? JSONSerialization.jsonObject(with: Data(answer.utf8)),
+           decoded is [String: Any] || decoded is [Any] {
+            failures.append("The final chat answer exposes a raw internal JSON result instead of readable analysis")
+        }
         if !answer.contains(scenario.marker) {
             failures.append("answer lost acceptance marker \(scenario.marker)")
         }
         for group in scenario.requiredConceptGroups where !containsAny(group, in: answer) {
             failures.append("answer missed concept group: \(group.joined(separator: " | "))")
+        }
+        if let check = scenario.exactCheck {
+            failures += exactFailures(check, answer: answer)
         }
         if app.buttons["Once"].exists || app.buttons["Always"].exists || app.buttons["Deny"].exists {
             failures.append("obsolete workflow launch authorization UI reappeared")
@@ -389,6 +527,38 @@ final class DynamicWorkflowExplorationUITests: DeviceE2ETestCase {
             "Complex workflow \(scenario.id) failed quality checks:\n- "
                 + failures.joined(separator: "\n- ")
         )
+    }
+
+    /// Long evidence packets should enter through the same native composer in one paste event,
+    /// instead of spending minutes synthesizing thousands of individual keyboard events.
+    @MainActor
+    private func enterGoal(_ text: String, into field: XCUIElement, in app: XCUIApplication) throws {
+        #if canImport(UIKit)
+        if text.utf8.count > 2_048 {
+            let board = UIPasteboard.general
+            board.setItems([["public.utf8-plain-text": text]], options: [
+                .localOnly: true,
+                .expirationDate: Date().addingTimeInterval(120)
+            ])
+            let ownChange = board.changeCount
+            defer { if board.changeCount == ownChange { board.items = [] } }
+            field.press(forDuration: 1)
+            let paste = app.descendants(matching: .any)
+                .matching(NSPredicate(format: "label == %@", "Paste")).firstMatch
+            guard paste.waitForExistence(timeout: 8) else {
+                throw DeviceE2EHarnessError.precondition("Native Paste action unavailable for long workflow goal")
+            }
+            paste.tap()
+            let inserted = NSPredicate { element, _ in
+                (element as? XCUIElement)?.value as? String == text
+            }
+            guard XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: inserted, object: field)], timeout: 15) == .completed else {
+                throw DeviceE2EHarnessError.precondition("Composer did not receive the complete pasted workflow goal")
+            }
+            return
+        }
+        #endif
+        field.typeText(text)
     }
 
     @MainActor
@@ -424,6 +594,7 @@ final class DynamicWorkflowExplorationUITests: DeviceE2ETestCase {
         screenshot.name = "dynamic-workflow-\(scenario.id)-screen"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+        if !failures.isEmpty { attachDiagnostics(app, name: "dynamic-workflow-\(scenario.id)-failure") }
     }
 
     @MainActor
@@ -443,5 +614,90 @@ final class DynamicWorkflowExplorationUITests: DeviceE2ETestCase {
 
     private func containsAny(_ alternatives: [String], in text: String) -> Bool {
         alternatives.contains { text.localizedCaseInsensitiveContains($0) }
+    }
+
+    /// Ground truth stays in the evaluator. Prompts contain the problem data, never these answers.
+    /// These checks reject omissions, invalid constraints and suboptimal results even if every
+    /// application agent (including its reviewer) declares success.
+    private func exactFailures(_ check: DynamicWorkflowExplorationScenario.ExactCheck, answer: String) -> [String] {
+        guard let value = try? JSONSerialization.jsonObject(with: Data(answer.utf8)) as? [String: Any] else {
+            return ["The requested JSON deliverable is invalid"]
+        }
+        switch check {
+        case .europeanGroups:
+            guard let groups = value["groups"] as? [[String: Any]], groups.count >= 12 else {
+                return ["European research returned fewer than 12 structured groups"]
+            }
+            var countries: Set<String> = []
+            var names: Set<String> = []
+            var foundKnownGroup = false
+            for group in groups {
+                guard let name = group["name"] as? String, !name.trimmingCharacters(in: .whitespaces).isEmpty,
+                      let institution = group["institution"] as? String, !institution.isEmpty,
+                      let country = group["countryCode"] as? String, country.count == 2,
+                      let topics = group["topics"] as? [String], !topics.isEmpty,
+                      let sources = group["sourceURLs"] as? [String], !sources.isEmpty,
+                      group["lead"] is String || group["lead"] is NSNull,
+                      group["representativeWork"] is String || group["representativeWork"] is NSNull,
+                      sources.allSatisfy({ ["https", "http"].contains(URL(string: $0)?.scheme ?? "") && URL(string: $0)?.host != nil }) else {
+                    return ["A group is missing identity, country, research direction, required nullable fields, or web source evidence"]
+                }
+                names.insert(name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+                countries.insert(country.uppercased() == "UK" ? "GB" : country.uppercased())
+                // The expected group is held out of the prompt and must appear as a supported
+                // group record, not merely a mention in a disclaimer or coverage-gap list.
+                if containsAny(["ELSS", "Embedded Learning and Sensing Systems"], in: name),
+                   containsAny(["Graz", "格拉茨"], in: institution), country.uppercased() == "AT",
+                   (group["lead"] is NSNull || (group["lead"] as? String)?.localizedCaseInsensitiveContains("Saukh") == true),
+                   sources.contains(where: { source in
+                       let host = URL(string: source)?.host?.lowercased() ?? ""
+                       return host == "tugraz.at" || host.hasSuffix(".tugraz.at")
+                           || host == "olgasaukh.com" || host.hasSuffix(".olgasaukh.com")
+                   }) { foundKnownGroup = true }
+            }
+            guard names.count == groups.count, countries.count >= 6 else { return ["Duplicate groups or fewer than six distinct countries"] }
+            return foundKnownGroup ? [] : ["Coverage missed the independently confirmed TU Graz ELSS group led by Olga Saukh"]
+        case .coverage:
+            let expected: Set<String> = ["G01", "G02", "G05", "G07", "G09", "G10", "G11", "G12"]
+            guard let ids = value["selectedIDs"] as? [String], ids.count == expected.count, Set(ids) == expected else {
+                return ["Coverage omitted an eligible group, included an ineligible group, or counted an alias twice"]
+            }
+            return []
+        case .procurement:
+            guard let selected = value["selectedIDs"] as? [String], selected.count == 2, Set(selected) == ["A", "D"],
+                  value["totalPrice"] as? Int == 940, value["totalThroughput"] as? Int == 200,
+                  value["totalPower"] as? Int == 95,
+                  let pairs = value["feasiblePairs"] as? [[String]], pairs.count == 3,
+                  Set(pairs.map { $0.sorted().joined(separator: ",") }) == ["A,D", "A,E", "B,E"] else {
+                return ["Procurement violated constraints, optimality, arithmetic, or feasible-pair completeness"]
+            }
+            return []
+        case .schedule:
+            guard value["makespan"] as? Int == 8, value["lowerBound"] as? Int == 8,
+                  let rows = value["schedule"] as? [[String: Any]], rows.count == 5 else {
+                return ["Schedule did not establish the 8-hour optimum"]
+            }
+            let durations = ["A": 3, "B": 2, "C": 4, "D": 2, "E": 1]
+            let dependencies = ["A": [String](), "B": [], "C": ["A"], "D": ["A", "B"], "E": ["C", "D"]]
+            var tasks: [String: (start: Int, end: Int, worker: Int)] = [:]
+            for row in rows {
+                guard let id = row["id"] as? String, tasks[id] == nil,
+                      let duration = durations[id], let start = row["start"] as? Int,
+                      let end = row["end"] as? Int, let worker = row["worker"] as? Int,
+                      start >= 0, end <= 8, end - start == duration, [1, 2].contains(worker) else {
+                    return ["Schedule contains an invalid or duplicate task"]
+                }
+                tasks[id] = (start, end, worker)
+            }
+            for (id, task) in tasks {
+                for dependency in dependencies[id, default: []] where (tasks[dependency]?.end ?? Int.max) > task.start {
+                    return ["Schedule starts \(id) before \(dependency) finishes"]
+                }
+                for (otherID, other) in tasks where otherID != id && other.worker == task.worker {
+                    if task.start < other.end && other.start < task.end { return ["One worker has overlapping tasks"] }
+                }
+            }
+            return []
+        }
     }
 }

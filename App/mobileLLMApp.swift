@@ -8,130 +8,8 @@ import LLMEngineMLX
 import LLMEngineLlama
 import LLMEngineApple
 import AgentRuntime
+import AgentContracts
 
-#if DEBUG
-/// Deterministic Responses API transport used only by the opt-in simulator UI test. It exercises
-/// the production provider parser, durable executor, analyzer, automatic one-run approval, and engine
-/// without making release-gating UI behavior depend on a live model's latency or output quality.
-private final class DynamicWorkflowUITestResponsesProtocol: URLProtocol, @unchecked Sendable {
-    private static let environmentKey = "MOBILELLM_DYNAMIC_WORKFLOW_RESPONSES_FIXTURE"
-
-    override class func canInit(with request: URLRequest) -> Bool {
-        ProcessInfo.processInfo.environment[environmentKey] == "1"
-            && request.url?.path.hasSuffix("/responses") == true
-    }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        guard let url = request.url else {
-            client?.urlProtocol(self, didFailWithError: URLError(.badURL))
-            return
-        }
-        let body = Self.requestBodyString(request)
-        let text: String
-        if body.contains("KIMI_SYNTHESIS_TRACK") {
-            text = """
-            EVAL_KIMI_LOCAL: Running the complete Kimi K3 weights entirely offline on an iPhone 16 Pro is not feasible. The phone's RAM and storage are far below the order of magnitude required even after aggressive quantization. Use a much smaller on-device model, or keep Kimi K3 on a remote server/API and make the iPhone a private client.
-            """
-        } else if body.contains("KIMI_MODEL_TRACK") {
-            text = "The full model has an enormous parameter footprint; quantization reduces bytes per weight but does not make phone-class deployment realistic."
-        } else if body.contains("IPHONE_LIMIT_TRACK") {
-            text = "An iPhone 16 Pro has phone-class unified memory and storage, both orders of magnitude below the complete model's practical runtime requirements."
-        } else if body.contains("DEPLOYMENT_PATH_TRACK") {
-            text = "Realistic paths are a smaller local model for offline work or a remote Kimi deployment/API with explicit network and privacy controls."
-        } else if body.contains("mobileLLM Dynamic Workflow V1")
-            || body.contains("Repair one mobileLLM Dynamic Workflow V1")
-        {
-            text = """
-            export const meta = {
-              name: "kimi-local-feasibility",
-              description: "Researches model scale, device limits, and deployment alternatives before producing a concrete verdict.",
-              whenToUse: "A user asks whether a very large model can run fully locally on an iPhone.",
-              phases: [
-                { title: "Research", detail: "Run three independent constraint tracks in parallel." },
-                { title: "Synthesize", detail: "Turn the evidence into a direct deployment verdict." }
-              ]
-            };
-            phase("Research");
-            const findings = await parallel([
-              () => agent("KIMI_MODEL_TRACK: Estimate the complete Kimi K3 weight and runtime footprint.", { label: "Model scale", phase: "Research" }),
-              () => agent("IPHONE_LIMIT_TRACK: Assess iPhone 16 Pro RAM and storage constraints.", { label: "Device limits", phase: "Research" }),
-              () => agent("DEPLOYMENT_PATH_TRACK: Identify honest local and remote deployment alternatives.", { label: "Alternatives", phase: "Research" })
-            ]);
-            phase("Synthesize");
-            return await agent(`KIMI_SYNTHESIS_TRACK: Give a direct verdict using all three findings. Preserve the token EVAL_KIMI_LOCAL. Model: ${findings[0]} Device: ${findings[1]} Alternatives: ${findings[2]}`, { label: "Final verdict", phase: "Synthesize" });
-            """
-        } else {
-            text = "unexpected simulator workflow request"
-        }
-        do {
-            let delta = try JSONSerialization.data(
-                withJSONObject: ["type": "response.output_text.delta", "delta": text],
-                options: [.sortedKeys]
-            )
-            let completed = try JSONSerialization.data(
-                withJSONObject: [
-                    "type": "response.completed",
-                    "status": "completed",
-                    "usage": ["input_tokens": 16, "output_tokens": 32],
-                ],
-                options: [.sortedKeys]
-            )
-            var bytes = Data("data: ".utf8)
-            bytes.append(delta)
-            bytes.append(Data("\n\ndata: ".utf8))
-            bytes.append(completed)
-            bytes.append(Data("\n\n".utf8))
-            let response = HTTPURLResponse(
-                url: url,
-                statusCode: 200,
-                httpVersion: "HTTP/1.1",
-                headerFields: ["Content-Type": "text/event-stream"]
-            )!
-            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-            client?.urlProtocol(self, didLoad: bytes)
-            client?.urlProtocolDidFinishLoading(self)
-        } catch {
-            client?.urlProtocol(self, didFailWithError: error)
-        }
-    }
-
-    override func stopLoading() {}
-
-    private static func requestBodyString(_ request: URLRequest) -> String {
-        if let data = request.httpBody { return String(data: data, encoding: .utf8) ?? "" }
-        guard let stream = request.httpBodyStream else { return "" }
-        stream.open()
-        defer { stream.close() }
-        var data = Data()
-        let capacity = 4_096
-        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: capacity)
-        defer { buffer.deallocate() }
-        while stream.hasBytesAvailable {
-            let count = stream.read(buffer, maxLength: capacity)
-            guard count > 0 else { break }
-            data.append(buffer, count: count)
-        }
-        return String(data: data, encoding: .utf8) ?? ""
-    }
-
-    static func session() -> URLSession {
-        guard ProcessInfo.processInfo.environment[environmentKey] == "1" else { return .shared }
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [DynamicWorkflowUITestResponsesProtocol.self]
-        return URLSession(configuration: configuration)
-    }
-}
-#endif
-
-private func agentRuntimeURLSession() -> URLSession {
-    #if DEBUG
-    DynamicWorkflowUITestResponsesProtocol.session()
-    #else
-    .shared
-    #endif
-}
 
 #if DEBUG && os(macOS)
 import AppKit
@@ -298,7 +176,11 @@ struct MobileLLMApp: App {
         }
         // Multi-GB weights live under Documents/models (visible in iOS Files app & USB sharing,
         // excluded from iCloud backup, and migrated from legacy Application Support if present).
-        let base = Self.setupModelStorageBase()
+        // UI test sessions use an isolated storage root when opted-in.
+        let defaultBase = URL.applicationSupportDirectory.appending(path: "mobileLLM", directoryHint: .isDirectory)
+        let testStorage = UITestStorageScope.current(relativeTo: defaultBase)
+        let base = testStorage?.root ?? Self.setupModelStorageBase()
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         let downloader = ModelDownloader(downloadBase: base)
         // App.init runs on the main thread; adopt that isolation to build the @MainActor container.
         // The Apple engine is registered unconditionally, even on an OS with no FoundationModels: it owns
@@ -337,13 +219,18 @@ struct MobileLLMApp: App {
                     _ = try await downloader.download(repoId: repoId, revision: revision,
                                                       matching: globs, progress: progress)
                 },
+                settings: testStorage.map { AppSettings(defaults: $0.defaults,
+                    keychain: KeychainBox(service: $0.defaultsDomain + ".settings")) },
+                conversationStore: testStorage.map { ConversationStore(directory: $0.root.appending(path: "conversations")) },
                 // The model layer is engine-free, so only this layer can ask the OS about its own model.
                 // This IS the system model's install state: available ⇒ ready to use, nothing downloaded.
                 systemModelProbe: { AppleSystemModel.status() },
                 eventStore: eventStore,
                 locationProvider: locationProvider,
+                openAICredentials: testStorage.map { KeychainOpenAICredentialStore(service: $0.credentialService) },
                 lifecycle: lifecycle,
-                continuedProcessing: continuedProcessing
+                continuedProcessing: continuedProcessing,
+                mcpDiscovery: testStorage.map { MCPDiscoveryCache(defaults: $0.defaults) } ?? .shared
             )
         }
         container.mcpDiscovery.setCredentialResolver { server in
@@ -363,6 +250,30 @@ struct MobileLLMApp: App {
             maximumOutputTokens: container.settings.onlineActiveService?.maximumOutputTokens,
             credentials: container.openAICredentials
         )
+        let sandboxConfigBox = OpenSandboxConfigurationBox()
+        container.settings.onSandboxConfigurationChanged = { [weak container] in
+            guard let container else { return }
+            sandboxConfigBox.update(connection: container.settings.sandboxConnection,
+                key: try? container.settings.sandboxAPIKey())
+        }
+        container.settings.onSandboxConfigurationChanged?()
+        #if DEBUG
+        if ProcessInfo.processInfo.environment["MOBILELLM_DEVICE_E2E"] == "1",
+           let path = ProcessInfo.processInfo.environment["MOBILELLM_SANDBOX_CONFIG_PATH"] {
+            // Explicit real-service integration only. It performs the same authenticated capability
+            // check as Settings; normal launches never probe or configure an execution environment.
+            Task { @MainActor [weak container] in
+                do {
+                    struct Configuration: Decodable { let endpoint: String; let apiKey: String }
+                    let config = try JSONDecoder().decode(Configuration.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+                    let connection = try await OpenSandboxHTTPClient.connect(endpoint: config.endpoint, apiKey: config.apiKey)
+                    try container?.settings.configureSandbox(connection, apiKey: config.apiKey)
+                } catch {
+                    container?.recordAgentRuntimeFailure(error)
+                }
+            }
+        }
+        #endif
         #if DEBUG
         // Local OpenAI-compatible service config: the developer stores it once at
         // ~/.mobilellm/openai.json (outside the repo); the macOS DEBUG app reads it directly, and the
@@ -475,7 +386,17 @@ struct MobileLLMApp: App {
                     locationProvider: container.toolLocationProvider,
                     mcpDiscovery: container.mcpDiscovery,
                     session: agentRuntimeURLSession(),
-                    onlineConfiguration: { onlineConfigBox.configuration(for: $0) }
+                    onlineConfiguration: { onlineConfigBox.configuration(for: $0) },
+                    deepSeekAPIKey: { [weak container] serviceID in
+                        try await MainActor.run {
+                            guard let container,
+                                  container.settings.onlineServices.contains(where: {
+                                      $0.id == serviceID && $0.supportsDeepSeekWebAPI
+                                  }) else { return nil }
+                            return try container.openAICredentials.loadAPIKey(serviceID: serviceID)
+                        }
+                    },
+                    sandboxCredentials: { sandboxConfigBox.credentials(for: $0) }
                 )
                 container.attachAgentRuns(assembly.runStore)
                 // Production outbox projector (spec §9.1/§33 gap 2): claims journal outbox rows and
@@ -533,7 +454,7 @@ struct MobileLLMApp: App {
                     await assembly.executor.controller.resumeAfterDataErase()
                     await assembly.dynamicWorkflows.resumeAfterDataErase()
                 }
-                container.quiesceWorkflows = { try await launcher.quiesceForBackground() }
+                container.quiesceWorkflows = { excluded in try await launcher.quiesceForBackground(excluding: excluded) }
                 container.chat.workflowLaunch = { [launcher] goal, conversationID,
                     userMessageID, workflowID in
                     try await launcher.launch(
@@ -579,13 +500,37 @@ struct MobileLLMApp: App {
                         callID: callID
                     )
                 }
+                container.workflowStore.dynamicResultHandler = { [launcher] workflowID, callID in
+                    try await launcher.result(workflowID: workflowID, callID: callID)
+                }
+                container.workflowStore.savedFilesHandler = { [launcher] workflowID, callID in
+                    try await launcher.savedFiles(workflowID: workflowID, callID: callID)
+                }
+                container.workflowStore.dynamicObserverHandler = { [launcher] workflowID, callID in
+                    try await launcher.observeTask(workflowID: workflowID, callID: callID)
+                }
+                container.workflowStore.taskSessionHandler = { [launcher] workflowID, callID in
+                    try await launcher.taskSession(workflowID: workflowID, callID: callID)
+                }
+                container.workflowStore.taskMessageHandler = { [launcher] workflowID, callID, id, text in
+                    try await launcher.sendTaskMessage(workflowID: workflowID, callID: callID, id: id, text: text)
+                }
+                container.workflowStore.taskSessionResumeHandler = { [launcher] workflowID, callID in
+                    try await launcher.resumeTaskSession(workflowID: workflowID, callID: callID)
+                }
+                container.workflowStore.goalUpdateHandler = { [launcher] workflowID, id, text in
+                    try await launcher.updateGoal(workflowID: workflowID, id: id, text: text)
+                }
+                container.workflowStore.planningObserverHandler = { [launcher] workflowID in
+                    try await launcher.observePlanning(workflowID: workflowID)
+                }
                 // Journal reconciliation is projection-only. Opening the app never starts or
                 // resumes a workflow and never loads a model.
                 Task { await launcher.reconcileDynamicWorkflows() }
             } catch {
                 container.recordAgentRuntimeFailure(error)
                 AgentRuntimeAssembly.logger(
-                    "Agent runtime unavailable; sending disabled: \(error.localizedDescription)"
+                    "Agent runtime unavailable; sending disabled: \(String(describing: error))"
                 )
             }
         }
@@ -797,6 +742,17 @@ func makeAgentSnapshot(
     } else {
         localToolNames = container.settings.builtInToolConfig.enabled.map(\.rawValue).sorted()
     }
+    let deepSeekWebServiceID = container.settings.deepSeekWebServiceID
+    let webSearchDestinations: [ExternalDestination]
+    if !toolsEnabled {
+        webSearchDestinations = []
+    } else if deepSeekWebServiceID != nil {
+        webSearchDestinations = (try? [AppDeepSeekWebToolAdapter.destination()]) ?? []
+    } else {
+        webSearchDestinations = (try? container.settings.builtInToolConfig.searchEngines.map {
+            try AppWebSearchToolAdapter.destination(engine: $0)
+        }) ?? []
+    }
     return AgentRunRequestSnapshot(
         conversationID: conversationID,
         userTurnID: userTurnID,
@@ -804,7 +760,11 @@ func makeAgentSnapshot(
         imageRefs: imageRefs,
         messages: conversation.messages,
         systemPrompt: container.settings.systemPrompt,
-        memoryFacts: container.chat.memoryBook?.facts ?? [],
+        memoryFacts: container.settings.memoryEnabled
+            ? ChatStore.selectedMemoryFacts(
+                container.chat.memoryBook?.snapshotFacts ?? [],
+                query: ChatStore.memoryQuery(draft: text, history: conversation.messages.filter { $0.id != userTurnID })
+            ) : [],
         activeSkill: conversation.skillID.flatMap { container.chat.skillStore?.skill(id: $0) },
         model: identity.model,
         variant: identity.variant,
@@ -818,17 +778,13 @@ func makeAgentSnapshot(
         repetitionPenalty: container.settings.repetitionPenalty,
         toolsEnabled: toolsEnabled,
         localToolNames: localToolNames,
-        memorySeamAvailable: container.chat.memoryBook != nil,
+        memorySeamAvailable: container.settings.memoryEnabled && container.chat.memoryBook != nil,
         eventSeamAvailable: container.toolEventStore != nil,
         locationSeamAvailable: container.toolLocationProvider != nil,
         mcpToolDescriptors: toolsEnabled
             ? container.mcpDiscovery.descriptors(for: container.settings.mcpServers)
             : [],
-        webSearchDestinations: toolsEnabled
-            ? (try? container.settings.builtInToolConfig.searchEngines.map {
-                try AppWebSearchToolAdapter.destination(engine: $0)
-            }) ?? []
-            : [],
+        webSearchDestinations: webSearchDestinations,
         toolPolicy: conversation.toolPolicy,
         onlineModelEnabled: onlineParts != nil,
         onlineModelID: onlineModelID,
@@ -840,7 +796,10 @@ func makeAgentSnapshot(
         onlineOutputBudgetAuto: onlineOutputBudgetAuto,
         onlineMaximumOutputTokens: onlineService?.maximumOutputTokens,
         approvalMode: conversation.approvalMode ?? .safePreset,
-        onlineReasoningEffort: conversation.reasoningEffort ?? .medium
+        onlineReasoningEffort: conversation.reasoningEffort ?? .medium,
+        deepSeekWebServiceID: deepSeekWebServiceID,
+        availableSkills: container.skills.skills.filter { $0.isBuiltIn || $0.id == conversation.skillID },
+        executionEnvironment: container.settings.sandboxEnabled ? container.settings.sandboxConnection : nil
     )
 }
 

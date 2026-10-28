@@ -571,6 +571,12 @@ public struct WorkflowAgentOptionsV1: Hashable, Codable, Sendable {
     public let requestedAgentType: String?
     public let requiresIsolatedWorkspace: Bool
     public let stallMilliseconds: UInt64?
+    /// Optional per-child tool-call ceiling. It can only narrow the host's available budget.
+    public let maximumToolCalls: UInt64?
+    public let task: WorkflowTaskDescriptorV1?
+    /// Stable agent identity inside this workflow, independent of its current task or activation.
+    public let sessionKey: String?
+    public let profile: WorkflowAgentProfileV1?
 
     public init(
         label: String? = nil,
@@ -579,7 +585,11 @@ public struct WorkflowAgentOptionsV1: Hashable, Codable, Sendable {
         requestedModel: String? = nil,
         requestedAgentType: String? = nil,
         requiresIsolatedWorkspace: Bool = false,
-        stallMilliseconds: UInt64? = nil
+        stallMilliseconds: UInt64? = nil,
+        maximumToolCalls: UInt64? = nil,
+        task: WorkflowTaskDescriptorV1? = nil,
+        sessionKey: String? = nil,
+        profile: WorkflowAgentProfileV1? = nil
     ) throws {
         guard label.map({
                   AgentWireValidation.isNonblankControlFree($0, maximumLength: 256)
@@ -594,7 +604,9 @@ public struct WorkflowAgentOptionsV1: Hashable, Codable, Sendable {
                   AgentWireValidation.isNonblankControlFree($0, maximumLength: 128)
               }) ?? true,
               schema.map({ $0.enforcement == .fullyEnforced }) ?? true,
-              stallMilliseconds.map({ $0 <= 30 * 60 * 1_000 }) ?? true
+              stallMilliseconds.map({ $0 <= 30 * 60 * 1_000 }) ?? true,
+              maximumToolCalls.map({ $0 <= 1_000 }) ?? true,
+              sessionKey.map({ AgentWireValidation.isNonblankControlFree($0, maximumLength: 128) }) ?? true
         else { throw AgentContractError.invalidName("workflow agent options") }
         self.label = label
         self.phase = phase
@@ -603,6 +615,10 @@ public struct WorkflowAgentOptionsV1: Hashable, Codable, Sendable {
         self.requestedAgentType = requestedAgentType
         self.requiresIsolatedWorkspace = requiresIsolatedWorkspace
         self.stallMilliseconds = stallMilliseconds
+        self.maximumToolCalls = maximumToolCalls
+        self.task = task
+        self.sessionKey = sessionKey
+        self.profile = profile
     }
 
     public init(from decoder: Decoder) throws {
@@ -615,7 +631,11 @@ public struct WorkflowAgentOptionsV1: Hashable, Codable, Sendable {
                 requestedModel: values.decodeIfPresent(String.self, forKey: .requestedModel),
                 requestedAgentType: values.decodeIfPresent(String.self, forKey: .requestedAgentType),
                 requiresIsolatedWorkspace: values.decode(Bool.self, forKey: .requiresIsolatedWorkspace),
-                stallMilliseconds: values.decodeIfPresent(UInt64.self, forKey: .stallMilliseconds)
+                stallMilliseconds: values.decodeIfPresent(UInt64.self, forKey: .stallMilliseconds),
+                maximumToolCalls: values.decodeIfPresent(UInt64.self, forKey: .maximumToolCalls),
+                task: values.decodeIfPresent(WorkflowTaskDescriptorV1.self, forKey: .task),
+                sessionKey: values.decodeIfPresent(String.self, forKey: .sessionKey),
+                profile: values.decodeIfPresent(WorkflowAgentProfileV1.self, forKey: .profile)
             )
         } catch {
             throw DecodingError.dataCorrupted(.init(
@@ -633,6 +653,14 @@ public struct WorkflowAgentOptionsV1: Hashable, Codable, Sendable {
         if let schema { object["schemaDigest"] = .string(schema.digest.rawValue) }
         if let requestedModel { object["requestedModel"] = .string(requestedModel) }
         if let requestedAgentType { object["requestedAgentType"] = .string(requestedAgentType) }
+        if let maximumToolCalls { object["maximumToolCalls"] = .unsignedInteger(maximumToolCalls) }
+        if let sessionKey { object["sessionKey"] = .string(sessionKey) }
+        if let profile { object["profileDigest"] = .string(profile.digest.rawValue) }
+        if let task, let revision = task.expectedRevision {
+            object["taskClaim"] = .object(["id": .string(task.taskID), "revision": .unsignedInteger(revision),
+                "inputs": .array(task.inputArtifactIDs.map(JSONValue.string)), "output": .string(task.outputArtifactID)])
+            if let count = task.goalAmendmentCount { object["goalAmendmentCount"] = .integer(Int64(count)) }
+        }
         return try CanonicalJSON(.object(object)).fingerprint
     }
 }
@@ -711,14 +739,20 @@ public enum WorkflowRunControlV1: Hashable, Codable, Sendable {
 
 public enum WorkflowRunEventKindV1: Hashable, Codable, Sendable {
     case created(WorkflowLaunchSnapshotV1)
+    case preparationUsageCommitted(AgentUsage)
     case launchApproved(ApprovalID)
     case stateChanged(from: WorkflowRunStateV1, to: WorkflowRunStateV1, reason: String?)
     case phaseStarted(String)
     case logAppended(String)
     case savedWorkflowPinned(name: String, reference: WorkflowScriptReferenceV1)
     case agentCallPrepared(WorkflowAgentCallV1)
+    case agentCallRejected(call: WorkflowAgentCallV1, failure: AgentFailure)
     case agentChildSubmitted(callID: WorkflowAgentCallID, handleID: AgentExecutionHandleID)
     case agentCallSettled(callID: WorkflowAgentCallID, outcome: WorkflowAgentOutcomeV1)
+    case waitSelected(WorkflowWaitSelection)
+    case collaborationRecorded(WorkflowCollaborationReceipt)
+    case goalAmended(WorkflowGoalAmendment)
+    case goalResumed(pauseIndex: UInt32, graph: WorkflowTaskGraph)
     case agentRestartRequested(callID: WorkflowAgentCallID)
     case usageCommitted(AgentUsage)
     case reconciliationRequired(callID: WorkflowAgentCallID?, reason: String)

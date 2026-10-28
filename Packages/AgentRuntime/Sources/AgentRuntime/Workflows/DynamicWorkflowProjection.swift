@@ -33,11 +33,22 @@ public struct WorkflowRunProjectionV1: Hashable, Sendable {
     public private(set) var calls: [WorkflowAgentCallV1]
     public private(set) var submittedHandles: [WorkflowAgentCallID: AgentExecutionHandleID]
     public private(set) var outcomes: [WorkflowAgentCallID: WorkflowAgentOutcomeV1]
+    public private(set) var waits: [WorkflowWaitSelection]
+    public private(set) var taskGraph: WorkflowTaskGraph?
+    public private(set) var collaborationReceipts: [WorkflowCollaborationReceipt]
+    public private(set) var goalResumptions: [UInt32: WorkflowTaskGraph]
+    public private(set) var preparedAt: [WorkflowAgentCallID: AgentTimestamp]
+    public private(set) var submittedAt: [WorkflowAgentCallID: AgentTimestamp]
+    public private(set) var settledAt: [WorkflowAgentCallID: AgentTimestamp]
+    public private(set) var preparedSequences: [WorkflowAgentCallID: UInt64]
+    public private(set) var settledSequences: [WorkflowAgentCallID: UInt64]
     public private(set) var restartRequests: [WorkflowAgentCallID]
     public private(set) var reconciliationCallID: WorkflowAgentCallID?
     public private(set) var reconciliationDecision: AgentReconciliationDecision?
     public private(set) var reconciliationGeneration: UInt32
     public private(set) var usage: AgentUsage
+    /// Nil identifies older workflows whose presentation added preparation separately.
+    public private(set) var preparationUsage: AgentUsage?
     public private(set) var output: WorkflowValueReferenceV1?
     public private(set) var failure: String?
     public private(set) var lastSequence: UInt64
@@ -64,11 +75,21 @@ public struct WorkflowRunProjectionV1: Hashable, Sendable {
             calls: [],
             submittedHandles: [:],
             outcomes: [:],
+            waits: [],
+            taskGraph: nil,
+            collaborationReceipts: [],
+            goalResumptions: [:],
+            preparedAt: [:],
+            submittedAt: [:],
+            settledAt: [:],
+            preparedSequences: [:],
+            settledSequences: [:],
             restartRequests: [],
             reconciliationCallID: nil,
             reconciliationDecision: nil,
             reconciliationGeneration: 0,
             usage: .zero,
+            preparationUsage: nil,
             output: nil,
             failure: nil,
             lastSequence: first.sequence,
@@ -96,6 +117,13 @@ public struct WorkflowRunProjectionV1: Hashable, Sendable {
         switch event.kind {
         case .created:
             throw WorkflowProjectionError.duplicateCreatedEvent
+        case .preparationUsageCommitted(let value):
+            guard state == .waitingForLaunchApproval, preparationUsage == nil, calls.isEmpty, usage == .zero else {
+                throw WorkflowProjectionError.invalidEventForState
+            }
+            _ = try BudgetLedgerSnapshot(budget: launch.budget, consumed: value)
+            preparationUsage = value
+            usage = value
         case .launchApproved(let approvalID):
             guard state == .waitingForLaunchApproval, launchApprovalID == nil else {
                 throw WorkflowProjectionError.invalidEventForState
@@ -135,36 +163,71 @@ public struct WorkflowRunProjectionV1: Hashable, Sendable {
             else { throw WorkflowProjectionError.invalidEventForState }
             savedWorkflowPins[name] = reference
         case .agentCallPrepared(let call):
-            guard Self.acceptsRuntimeActivity(state) else {
+            try recordPreparedCall(call, event: event, claimTask: true)
+        case .agentCallRejected(let call, let failure):
+            guard failure.code == "workflow.task-admission", failure.externalEffect == .confirmedNone else {
                 throw WorkflowProjectionError.invalidEventForState
             }
-            guard !calls.contains(where: { $0.callID == call.callID }) else {
-                throw WorkflowProjectionError.duplicateAgentCall
-            }
-            let maximumOrdinal = calls.map(\.ordinal).max() ?? 0
-            let priorAttempts = calls.filter { $0.ordinal == call.ordinal }
-            guard call.ordinal <= maximumOrdinal + 1,
-                  call.ordinal > 0,
-                  call.attempt == (priorAttempts.map(\.attempt).max() ?? 0) + 1,
-                  call.ordinal <= maximumOrdinal || call.attempt == 1
-            else { throw WorkflowProjectionError.noncontiguousAgentOrdinal }
-            calls.append(call)
+            try recordPreparedCall(call, event: event, claimTask: false)
+            outcomes[call.callID] = .failed(failure: failure, usage: .zero)
+            settledAt[call.callID] = event.timestamp
+            settledSequences[call.callID] = event.sequence
         case .agentChildSubmitted(let callID, let handleID):
             guard Self.acceptsRuntimeActivity(state), calls.contains(where: { $0.callID == callID }),
                   submittedHandles[callID] == nil, outcomes[callID] == nil
             else { throw WorkflowProjectionError.unknownAgentCall }
             submittedHandles[callID] = handleID
+            submittedAt[callID] = event.timestamp
         case .agentCallSettled(let callID, let outcome):
             guard Self.acceptsRuntimeActivity(state), calls.contains(where: { $0.callID == callID }) else {
                 throw WorkflowProjectionError.unknownAgentCall
             }
             guard outcomes[callID] == nil else { throw WorkflowProjectionError.duplicateAgentSettlement }
             outcomes[callID] = outcome
+            settledAt[callID] = event.timestamp
+            settledSequences[callID] = event.sequence
         case .agentRestartRequested(let callID):
             guard !state.isTerminal, calls.contains(where: { $0.callID == callID }) else {
                 throw WorkflowProjectionError.unknownAgentCall
             }
             restartRequests.append(callID)
+        case .waitSelected(let receipt):
+            guard Self.acceptsRuntimeActivity(state), receipt.index == waits.count + 1,
+                  !receipt.candidates.isEmpty, receipt.candidates.count <= 1_000,
+                  Set(receipt.candidates).count == receipt.candidates.count,
+                  receipt.candidates.contains(receipt.selected), outcomes[receipt.selected] != nil,
+                  receipt.candidates.allSatisfy({ id in calls.contains { $0.callID == id } })
+            else { throw WorkflowProjectionError.invalidEventForState }
+            waits.append(receipt)
+        case .collaborationRecorded(let receipt):
+            guard Self.acceptsRuntimeActivity(state), receipt.index == collaborationReceipts.count + 1,
+                  receipt.senderRunID == launch.initiatingRunID || calls.contains(where: { $0.childRunID == receipt.senderRunID })
+            else { throw WorkflowProjectionError.invalidEventForState }
+            try receipt.graph.validate()
+            if let old = taskGraph {
+                guard receipt.graph.objective == old.objective, receipt.graph.amendments == old.amendments,
+                      receipt.graph.revision >= old.revision, receipt.graph.artifacts.starts(with: old.artifacts),
+                      receipt.graph.revision != old.revision || receipt.graph == old
+                else { throw WorkflowProjectionError.invalidEventForState }
+            }
+            taskGraph = receipt.graph
+            collaborationReceipts.append(receipt)
+        case .goalAmended(let amendment):
+            guard var graph = taskGraph else { throw WorkflowProjectionError.invalidEventForState }
+            guard amendment.targetRunIDs?.allSatisfy({ id in id == launch.initiatingRunID || calls.contains { $0.childRunID == id } }) ?? true else {
+                throw WorkflowProjectionError.invalidEventForState
+            }
+            try graph.amend(amendment)
+            taskGraph = graph
+        case .goalResumed(let index, let graph):
+            guard let old = taskGraph, state == .paused, goalResumptions[index] == nil,
+                  collaborationReceipts.last?.index == index,
+                  graph.objective == old.objective, graph.amendments == old.amendments,
+                  graph.tasks == old.tasks, graph.artifacts == old.artifacts,
+                  graph.revision == old.revision + 1, graph.state == .active
+            else { throw WorkflowProjectionError.invalidEventForState }
+            taskGraph = graph
+            goalResumptions[index] = graph
         case .usageCommitted(let nextUsage):
             guard usage.quantities.isComponentwiseAtMost(nextUsage.quantities) else {
                 throw WorkflowProjectionError.usageRegression
@@ -201,7 +264,8 @@ public struct WorkflowRunProjectionV1: Hashable, Sendable {
         case .outputCommitted(let value):
             guard Self.acceptsRuntimeActivity(state), output == nil, failure == nil,
                   reconciliationCallID == nil,
-                  Self.allSubmittedChildrenAreSettled(self)
+                  Self.allSubmittedChildrenAreSettled(self),
+                  taskGraph == nil || taskGraph?.state == .completed
             else {
                 throw WorkflowProjectionError.invalidEventForState
             }
@@ -215,6 +279,30 @@ public struct WorkflowRunProjectionV1: Hashable, Sendable {
         lastSequence = event.sequence
         lastDigest = event.recordDigest
         lastTimestamp = event.timestamp
+    }
+
+    private mutating func recordPreparedCall(_ call: WorkflowAgentCallV1, event: WorkflowRunEventV1, claimTask: Bool) throws {
+        guard Self.acceptsRuntimeActivity(state) else {
+            throw WorkflowProjectionError.invalidEventForState
+        }
+        guard !calls.contains(where: { $0.callID == call.callID }) else {
+            throw WorkflowProjectionError.duplicateAgentCall
+        }
+        let maximumOrdinal = calls.map(\.ordinal).max() ?? 0
+        let priorAttempts = calls.filter { $0.ordinal == call.ordinal }
+        guard call.ordinal <= maximumOrdinal + 1,
+              call.ordinal > 0,
+              call.attempt == (priorAttempts.map(\.attempt).max() ?? 0) + 1,
+              call.ordinal <= maximumOrdinal || call.attempt == 1
+        else { throw WorkflowProjectionError.noncontiguousAgentOrdinal }
+        calls.append(call)
+        if claimTask, let descriptor = call.options.task, let revision = descriptor.expectedRevision {
+            guard var graph = taskGraph else { throw WorkflowTaskGraphError.invalid }
+            try graph.claim(taskID: descriptor.taskID, expectedRevision: revision, call: call)
+            taskGraph = graph
+        }
+        preparedAt[call.callID] = event.timestamp
+        preparedSequences[call.callID] = event.sequence
     }
 
     private static func allows(from: WorkflowRunStateV1, to: WorkflowRunStateV1) -> Bool {

@@ -82,6 +82,10 @@ final class MultiAgentWorkflowIntegrationTests: XCTestCase {
         }
         XCTAssertEqual(answer.text, "parent answer")
         XCTAssertEqual(childResult.runID, childRunID)
+        let durableResult = try await spawner.terminalResult(childHandleID)
+        XCTAssertEqual(durableResult, childResult)
+        let recollected = try await spawner.collect(childHandleID)
+        XCTAssertEqual(recollected, childResult, "Collection must work after the original stream has finished")
 
         _ = try await collectTerminalEvents(
             from: try await harness.executor.attach(to: parentHandleID)
@@ -249,6 +253,40 @@ final class MultiAgentWorkflowIntegrationTests: XCTestCase {
         XCTAssertEqual(Set(commands.map(\.payload.commandID)).count, 2)
         let finalStatus = try await handle.status()
         XCTAssertEqual(finalStatus.state, .cancelled)
+    }
+
+    func testSubagentCollectionReattachesAfterNotificationGapButRejectsCorruptSnapshots() async throws {
+        for (index, corrupt) in [false, true].enumerated() {
+            let offset = 7500 + index
+            let model = try ExecutorTestModelDefinition(offset: offset)
+            let gate = BlockingModelGate()
+            let provider = try BlockingCompletionModelProvider(model: model, answer: "One durable answer", gate: gate)
+            let harness = try ExecutorTestHarness(offset: offset, provider: provider, model: model)
+            let id = try await harness.executor.submit(harness.request, commandID: ExecutorTestID.command(offset))
+            let underlying = try await harness.executor.attach(to: id)
+            try await waitForGateEntry(gate)
+            let handle = GapOnceHandle(underlying: underlying, corruptAfterGap: corrupt)
+            let spawner = DurableSubagentSpawner(executor: CancellationTestExecutor(handle: handle), repository: harness.repository)
+            let collecting = Task { try await spawner.collect(id) }
+            if corrupt {
+                do { _ = try await collecting.value; XCTFail("Corrupt snapshots must remain fatal") }
+                catch { XCTAssertEqual(error as? AgentExecutionError, .invalidRecoveryBoundary) }
+                await gate.release()
+            } else {
+                try await waitForExecutorCondition { await handle.subscriptionCount() == 2 }
+                await gate.release()
+                let result = try await collecting.value
+                guard case .completed(let answer, _) = result.outcome else { return XCTFail("Missing committed answer") }
+                XCTAssertEqual(answer.text, "One durable answer")
+                let cursors = await handle.requestedCursors()
+                XCTAssertEqual(cursors.count, 2)
+                XCTAssertNil(cursors[0])
+                XCTAssertNotNil(cursors[1], "Resume after the last delivered durable event")
+            }
+            _ = try await collectTerminalEvents(from: underlying)
+            let result = try await underlying.result()
+            XCTAssertEqual(result?.usage.quantities[.modelAttempts], 1, "Reattaching observers must never restart inference")
+        }
     }
 
     // MARK: - Parallel tool batches (real executor)
@@ -1244,83 +1282,6 @@ final class MultiAgentWorkflowIntegrationTests: XCTestCase {
         XCTAssertTrue(try WorkflowPlanSchema.document.validates(instance: instance))
     }
 
-    func testFallbackQualityLoopAuditFeedsReviseAndDeliverFinalPlan() async throws {
-        let parent = makeWorkflowParent()
-        let plan = try WorkflowPlan.fallback(goal: "Deploy Kimi K3 on iPhone 16 Pro")
-        XCTAssertEqual(plan.phases.count, 6)
-        XCTAssertEqual(
-            plan.phases.map(\.title),
-            ["Explore", "Plan", "Audit", "Revise", "Verify", "Deliver"]
-        )
-
-        let spawner = FakeSubagentSpawner(results: [
-            .completed(answer: try AgentAnswer(text: "facts gathered"),
-                       usage: usage(input: 1, output: 1, tools: 1, active: 1)),
-            .completed(answer: try AgentAnswer(text: "plan draft"),
-                       usage: usage(input: 1, output: 1, tools: 0, active: 1)),
-            .completed(answer: try AgentAnswer(text: "finding: memory risk"),
-                       usage: usage(input: 1, output: 1, tools: 1, active: 1)),
-            .completed(answer: try AgentAnswer(text: "finding: approval risk"),
-                       usage: usage(input: 1, output: 1, tools: 1, active: 1)),
-            .completed(answer: try AgentAnswer(text: "revised plan addressing findings"),
-                       usage: usage(input: 1, output: 1, tools: 0, active: 1)),
-            .completed(answer: try AgentAnswer(text: "verification passed"),
-                       usage: usage(input: 1, output: 1, tools: 0, active: 1)),
-            .completed(answer: try AgentAnswer(text: "FINAL DELIVERED PLAN"),
-                       usage: usage(input: 1, output: 1, tools: 1, active: 1)),
-        ])
-        let recording = InMemoryWorkflowRecording()
-        let orchestrator = WorkflowOrchestrator(spawner: spawner, recording: recording)
-
-        let summary = try await orchestrator.start(
-            workflowID: UUID(),
-            title: "Kimi K3 study",
-            plan: plan,
-            conversationID: UUID(),
-            parent: parent,
-            ceilingAttenuator: { ceiling, _, _ in
-                try ceiling.attenuating(
-                    to: AgentAuthorityScope(
-                        capabilities: AgentCapabilitySet([.networkRead])
-                    ),
-                    requireStrict: true
-                )
-            },
-            budgetAttenuator: { budget, _, _ in
-                try budget.attenuating(
-                    to: try AgentBudget(
-                        limits: BudgetQuantities(
-                            Dictionary(uniqueKeysWithValues: BudgetDimension.allCases.map {
-                                ($0, $0 == .toolInvocations ? 2 : budget.limits[$0])
-                            })
-                        ),
-                        maximumThermalState: budget.maximumThermalState,
-                        memoryPressureResponse: budget.memoryPressureResponse
-                    ),
-                    requireStrict: true
-                )
-            }
-        )
-
-        XCTAssertEqual(summary.status, .completed)
-        XCTAssertEqual(summary.phases.count, 6)
-        XCTAssertTrue(summary.phases.allSatisfy { $0.status == .completed })
-        XCTAssertEqual(summary.aggregated.subagentCount, 7)
-        XCTAssertEqual(summary.aggregated.toolInvocationCount, 4)
-        // The final answer is the DELIVER phase output, not the audit's findings.
-        XCTAssertEqual(summary.finalAnswer, "FINAL DELIVERED PLAN")
-        XCTAssertEqual(summary.completedPhaseCount, 6)
-        XCTAssertEqual(summary.completedSubagentCount, 7)
-        XCTAssertEqual(summary.totalSubagentCount, 7)
-
-        // The Revise child (index 4 of spawned requests) received BOTH audit findings via the
-        // upstream handoff — the harness actually fixes the plan after auditing it.
-        XCTAssertEqual(spawner.spawnedRequests.count, 7)
-        let reviseRequest = spawner.spawnedRequests[4]
-        XCTAssertTrue(reviseRequest.instruction.contains("finding: memory risk"))
-        XCTAssertTrue(reviseRequest.instruction.contains("finding: approval risk"))
-    }
-
     // MARK: - Fixtures
 
     private func makeWorkflowParent() -> WorkflowParentContext {
@@ -1437,7 +1398,7 @@ final class MultiAgentWorkflowIntegrationTests: XCTestCase {
 }
 
 private struct CancellationTestExecutor: AgentExecutor {
-    let handle: StaleThenAcceptedCancellationHandle
+    let handle: any AgentExecutionHandle
 
     func submit(
         _: AgentRequest,
@@ -1450,6 +1411,52 @@ private struct CancellationTestExecutor: AgentExecutor {
         guard id == handle.id else { throw AgentExecutionError.executionNotFound(id) }
         return handle
     }
+}
+
+private actor GapOnceHandle: AgentExecutionHandle {
+    nonisolated let id: AgentExecutionHandleID
+    nonisolated let underlying: any AgentExecutionHandle
+    let corruptAfterGap: Bool
+    private var cursors: [AgentEventCursor?] = []
+
+    init(underlying: any AgentExecutionHandle, corruptAfterGap: Bool) {
+        self.id = underlying.id
+        self.underlying = underlying
+        self.corruptAfterGap = corruptAfterGap
+    }
+
+    nonisolated func events(after cursor: AgentEventCursor?) -> AsyncThrowingStream<AgentEventEnvelope, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                let interrupt = await self.begin(cursor)
+                do {
+                    for try await event in underlying.events(after: cursor) {
+                        continuation.yield(event)
+                        if interrupt {
+                            continuation.finish(throwing: AgentExecutionError.invalidRecoveryBoundary)
+                            return
+                        }
+                    }
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func begin(_ cursor: AgentEventCursor?) -> Bool { cursors.append(cursor); return cursors.count == 1 }
+    func subscriptionCount() -> Int { cursors.count }
+    func requestedCursors() -> [AgentEventCursor?] { cursors }
+    func status() async throws -> AgentRunStatus {
+        if corruptAfterGap, !cursors.isEmpty { throw AgentExecutionError.invalidRecoveryBoundary }
+        return try await underlying.status()
+    }
+    func result() async throws -> AgentResult? {
+        if corruptAfterGap, !cursors.isEmpty { throw AgentExecutionError.invalidRecoveryBoundary }
+        return try await underlying.result()
+    }
+    func send(_ command: AgentCommandEnvelope) async throws -> AgentCommandReceipt { try await underlying.send(command) }
+    func ephemeralEvents() async -> AsyncThrowingStream<AgentEphemeralEventEnvelope, Error> { await underlying.ephemeralEvents() }
 }
 
 private actor StaleThenAcceptedCancellationHandle: AgentExecutionHandle {

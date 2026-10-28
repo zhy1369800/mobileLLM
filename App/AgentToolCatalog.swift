@@ -19,6 +19,9 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
     let snapshot: ToolCatalogSnapshot
     let adapters: [AgentToolDescriptorID: any ToolV2]
     private let mcpCache: MCPDiscoveryCache
+    private let session: URLSession
+    private let deepSeekAPIKey: DeepSeekAPIKeyResolver
+    private let sandboxTools: OpenSandboxToolService?
 
     static func catalog(
         enabledToolNames: [String],
@@ -26,7 +29,9 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         eventSeamAvailable: Bool,
         locationSeamAvailable: Bool,
         mcpDescriptors: [AgentToolDescriptor] = [],
-        trustRevision: String = "builtin.v1"
+        trustRevision: String = "builtin.v1",
+        deepSeekWebServiceID: String? = nil,
+        sandboxConnection: OpenSandboxConnection? = nil
     ) throws -> ToolCatalogSnapshot {
         let builtIns = ToolRegistry.standard.tools
         var descriptors: [AgentToolDescriptor] = []
@@ -38,6 +43,11 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
                 && !memoryAvailable
             if Self.adaptedToolNames.contains(tool.schema.name), enabled, !seamMissing
             {
+                if let serviceID = deepSeekWebServiceID,
+                   let operation = [DeepSeekWebOperation.search, .fetch].first(where: { $0.toolName == tool.schema.name }) {
+                    descriptors.append(try AppDeepSeekWebToolAdapter.makeDescriptor(operation: operation, serviceID: serviceID))
+                    continue
+                }
                 let inputSchema = try AppToolV2Support.inputSchema(for: tool.schema)
                 descriptors.append(try AgentToolDescriptor(
                     id: AgentToolDescriptorID(
@@ -149,6 +159,7 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
             }
         }
         descriptors.append(contentsOf: mcpDescriptors.sorted { $0.id.description < $1.id.description })
+        if let sandboxConnection { descriptors += try OpenSandboxTool.descriptors(connection: sandboxConnection) }
         return try ToolCatalogSnapshot(
             revision: 1,
             descriptors: descriptors,
@@ -162,8 +173,14 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         eventStore: (any EventStoring)?,
         locationProvider: (any LocationProviding)?,
         mcpCache: MCPDiscoveryCache,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        deepSeekAPIKey: @escaping DeepSeekAPIKeyResolver = { _ in nil },
+        workflowAgents: WorkflowAgentToolService? = nil,
+        sandboxTools: OpenSandboxToolService? = nil
     ) throws {
+        self.session = session
+        self.deepSeekAPIKey = deepSeekAPIKey
+        self.sandboxTools = sandboxTools
         let enabled = Set(enabledToolNames)
         var adapters: [AgentToolDescriptorID: any ToolV2] = [:]
         func register(_ adapter: any ToolV2) {
@@ -259,12 +276,25 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
                 trustRevision: "builtin.v1"
             ))
         }
-        self.snapshot = try Self.catalog(
+        var teamDescriptors: [AgentToolDescriptor] = []
+        if let workflowAgents {
+            for operation in WorkflowAgentToolOperation.allCases {
+                let tool = try WorkflowAgentTool(operation: operation, service: workflowAgents)
+                register(tool); teamDescriptors.append(tool.descriptor)
+            }
+            // Exact old frozen descriptors remain executable, but only the current schema is
+            // advertised on fresh admission. Both versions use the same execution implementation.
+            try register(WorkflowAgentTool(operation: .sendMessage, service: workflowAgents, legacyMessageSchema: true))
+        }
+        let builtins = try Self.catalog(
             enabledToolNames: enabledToolNames,
             memoryAvailable: memoryStore != nil,
             eventSeamAvailable: eventStore != nil,
             locationSeamAvailable: locationProvider != nil
         )
+        self.snapshot = try ToolCatalogSnapshot(revision: builtins.revision,
+            descriptors: builtins.descriptors + teamDescriptors,
+            unavailable: builtins.unavailable)
         self.adapters = adapters
         self.mcpCache = mcpCache
     }
@@ -303,6 +333,15 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
 
     func tool(for descriptorID: AgentToolDescriptorID) async throws -> (any ToolV2)? {
         if let adapter = adapters[descriptorID] { return adapter }
+        if descriptorID.logicalID.providerID == "sandbox" { return try await sandboxTools?.adapter(for: descriptorID) }
+        if let serviceID = AppDeepSeekWebToolAdapter.serviceID(from: descriptorID),
+           let operation = [DeepSeekWebOperation.search, .fetch].first(where: { $0.toolName == descriptorID.logicalID.name }) {
+            let adapter = try AppDeepSeekWebToolAdapter(operation: operation, serviceID: serviceID,
+                                                      session: session,
+                                                      enrichedSearch: AppDeepSeekWebToolAdapter.usesSearchContent(descriptorID),
+                                                      resolveKey: deepSeekAPIKey)
+            return adapter.descriptor.id == descriptorID ? adapter : nil
+        }
         // MCP adapters are built lazily from the explicit discovery cache; a descriptor can only
         // appear in a frozen run if the user's setup/refresh flow discovered that server.
         let providerPrefix = "mcp."

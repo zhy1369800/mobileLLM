@@ -40,6 +40,28 @@ public protocol WorkflowChildRequestBuilding: Sendable {
         call: WorkflowAgentCallV1,
         prompt: String
     ) throws -> SubagentSpawnRequest
+
+    /// Called inside atomic admission. Implementations may shrink their usual child share to
+    /// fit remaining capacity, and must freeze/cache that exact request before returning it.
+    func makeRequest(
+        launch: WorkflowLaunchSnapshotV1,
+        call: WorkflowAgentCallV1,
+        prompt: String,
+        budgetLimit: AgentBudget
+    ) throws -> SubagentSpawnRequest
+}
+
+public extension WorkflowChildRequestBuilding {
+    func makeRequest(
+        launch: WorkflowLaunchSnapshotV1,
+        call: WorkflowAgentCallV1,
+        prompt: String,
+        budgetLimit: AgentBudget
+    ) throws -> SubagentSpawnRequest {
+        // Existing host policies retain their exact request. The ledger still rejects any
+        // reservation that does not fit; it never silently changes an already frozen request.
+        try makeRequest(launch: launch, call: call, prompt: prompt)
+    }
 }
 
 public struct ClosureWorkflowChildRequestBuilder: WorkflowChildRequestBuilding, Sendable {
@@ -167,11 +189,14 @@ public actor DynamicWorkflowEngine {
             previousDigest: nil,
             kind: .created(preparedSnapshot)
         )
+        let preparation = try await spawner.preparationUsage(runID: snapshot.initiatingRunID)
+        let preparationEvent = try WorkflowRunEventV1(eventID: WorkflowEventID(), runID: snapshot.runID,
+            sequence: 2, timestamp: timestamp, previousDigest: created.recordDigest, kind: .preparationUsageCommitted(preparation))
         var projection = try await journal.append(try WorkflowEventAppendRequestV1(
             runID: snapshot.runID,
             expectedSequence: 0,
             expectedDigest: nil,
-            events: [created]
+            events: [created, preparationEvent]
         )).projection
         if !dependencyPins.isEmpty {
             projection = try await append(
@@ -300,7 +325,36 @@ public actor DynamicWorkflowEngine {
             _ = await current.task.result
             active[runID] = nil
         }
+        let saved = try await requiredProjection(runID)
+        if saved.state == .paused, var graph = saved.taskGraph,
+           graph.state != .active, graph.state != .completed, graph.state != .cancelled,
+           let index = saved.collaborationReceipts.last?.index {
+            try graph.setGoalState(.active, reason: "Explicitly resumed")
+            _ = try await append([.goalResumed(pauseIndex: index, graph: graph)], to: saved)
+        }
         try await start(runID: runID)
+    }
+
+    /// User amendments are separate immutable facts. Reading a goal never invokes this method.
+    public func amendGoal(runID: WorkflowRunID, messageID: MessageID, text: String) async throws {
+        guard !dataEraseSuspended else { throw WorkflowScriptRuntimeError.cancelled }
+        let amendment = WorkflowGoalAmendment(id: messageID, text: text, acceptedAt: try await clock.now())
+        if let current = active[runID] {
+            try await current.session.amendGoal(amendment)
+        } else {
+            let saved = try await requiredProjection(runID)
+            if let prior = saved.taskGraph?.amendments.first(where: { $0.id == messageID }) {
+                guard prior.text == text else { throw WorkflowTaskGraphError.stale }
+                try await spawner.deliverGoalAmendment(prior, goalID: runID, conversationID: saved.launch.conversationID,
+                    runIDs: prior.targetRunIDs ?? [saved.launch.initiatingRunID])
+                return
+            }
+            let stored = WorkflowGoalAmendment(id: messageID, text: text, acceptedAt: amendment.acceptedAt,
+                targetRunIDs: goalAmendmentRecipients(saved))
+            _ = try await append([.goalAmended(stored)], to: saved)
+            try await spawner.deliverGoalAmendment(stored, goalID: runID, conversationID: saved.launch.conversationID,
+                runIDs: stored.targetRunIDs ?? [])
+        }
     }
 
     /// Resolves an uncertain child operation through that child's durable AgentExecutor command,
@@ -395,8 +449,8 @@ public actor DynamicWorkflowEngine {
 
     public func resumeAfterDataErase() { dataEraseSuspended = false }
 
-    public func quiesceForBackground() async throws {
-        for id in Array(active.keys) { try await deferToForeground(runID: id) }
+    public func quiesceForBackground(excluding runs: Set<WorkflowRunID> = []) async throws {
+        for id in Array(active.keys) where !runs.contains(id) { try await deferToForeground(runID: id) }
     }
 
     public func projection(runID: WorkflowRunID) async throws -> WorkflowRunProjectionV1? {
@@ -538,6 +592,13 @@ private actor DynamicWorkflowSession {
     private let budgetCounter: WorkflowBudgetCounter
     private var projection: WorkflowRunProjectionV1
     private var stopped = false
+    private var evidenceCache: (sequence: UInt64, query: String?, value: JSONValue)?
+    /// Only observations reached by this execution prefix may enter prompts. A recovered journal
+    /// can contain later settled calls, which must not leak backward and change replay identities.
+    private var evidenceVisibleCalls: Set<WorkflowAgentCallID> = []
+    private var detachedCalls: [UInt32: WorkflowAgentCallID] = [:]
+    private var journalWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+    private var nextWaitIndex: UInt32 = 1
 
     init(
         projection: WorkflowRunProjectionV1,
@@ -574,10 +635,11 @@ private actor DynamicWorkflowSession {
     func execute() async throws -> CanonicalJSON {
         do {
             if projection.state != .running {
-                projection = try await append([.stateChanged(
+                _ = try await append([.stateChanged(
                     from: projection.state, to: .running, reason: "execution-started"
                 )])
             }
+            try await deliverGoalAmendments()
             let host = makeHost(depth: 0)
             let result = try await runtime.execute(
                 script,
@@ -587,19 +649,33 @@ private actor DynamicWorkflowSession {
                 host: host
             )
             try await flushSignals()
+            guard projection.state != .waitingForReconciliation else {
+                throw WorkflowScriptRuntimeError.hostFailure("child reconciliation required")
+            }
             if stopped {
                 try await terminateAsCancelled()
                 throw WorkflowScriptRuntimeError.cancelled
             }
+            if let blocker = try await deliveryCompletionBlocker() { throw WorkflowScriptRuntimeError.invalidResult(blocker) }
+            if let graph = projection.taskGraph, try outputLimits(graph) != nil || requiresAcceptedReviews() {
+                guard case .string(let answer) = try JSONDecoder().decode(JSONValue.self, from: result.data),
+                      try outputLimits(graph)?.finalRejection(answer) == nil,
+                      projection.collaborationReceipts.contains(where: { receipt in
+                          guard receipt.feedback == nil, receipt.graph.state == .completed,
+                                case .object(let value)? = receipt.observation,
+                                case .string(let digest)? = value["acceptedAnswerDigest"] else { return false }
+                          return digest == StableDigest.sha256(Data(answer.utf8)).rawValue
+                      }) else { throw WorkflowScriptRuntimeError.invalidResult("The returned answer does not match the accepted delivery contract.") }
+            }
             let reference = try await valueStore.store(result, runID: projection.runID)
-            projection = try await append([
+            _ = try await append([
                 .outputCommitted(reference),
                 .stateChanged(from: projection.state, to: .completed, reason: nil),
             ])
             return result
         } catch let runtimeError as WorkflowScriptRuntimeError where runtimeError == .cancelled {
             if projection.state == .pausing {
-                projection = try await append([
+                _ = try await append([
                     .stateChanged(from: .pausing, to: .paused, reason: "pause-checkpoint")
                 ])
                 throw WorkflowPausedAtStableBoundary()
@@ -610,7 +686,7 @@ private actor DynamicWorkflowSession {
             throw runtimeError
         } catch is CancellationError {
             if projection.state == .pausing {
-                projection = try await append([
+                _ = try await append([
                     .stateChanged(from: .pausing, to: .paused, reason: "pause-checkpoint")
                 ])
                 throw WorkflowPausedAtStableBoundary()
@@ -622,7 +698,7 @@ private actor DynamicWorkflowSession {
         } catch let childFailure as WorkflowChildExecutionFailed {
             if !projection.isTerminal {
                 try? await flushSignals()
-                projection = try await append([
+                _ = try await append([
                     .failureCommitted(childFailure.failure.safeMessage),
                     .stateChanged(from: projection.state, to: .failed, reason: childFailure.failure.code),
                 ])
@@ -630,12 +706,20 @@ private actor DynamicWorkflowSession {
             throw childFailure
         } catch {
             if projection.state == .waitingForReconciliation { throw error }
+            if let goal = projection.taskGraph, [.blocked, .budgetExhausted, .paused].contains(goal.state),
+               projection.submittedHandles.keys.allSatisfy({ projection.outcomes[$0] != nil }),
+               !projection.isTerminal {
+                _ = try await append([.stateChanged(from: projection.state, to: .paused, reason: goal.reason)])
+                throw error
+            }
             if !projection.isTerminal {
                 // JavaScriptCore transports host failures through a bounded bridge error. Recover
                 // the already-journaled typed child failure so the workflow terminal record uses
                 // only its explicitly safe message and stable code, never debug/error wrapping.
                 let durableChildFailure = projection.calls.reversed().compactMap { call -> AgentFailure? in
-                    guard case .failed(let failure, _) = projection.outcomes[call.callID] else {
+                    guard case .hostFailure(let detail) = error as? WorkflowScriptRuntimeError,
+                          case .failed(let failure, _) = projection.outcomes[call.callID],
+                          detail == Self.sanitize(failure.safeMessage) else {
                         return nil
                     }
                     return failure
@@ -643,7 +727,7 @@ private actor DynamicWorkflowSession {
                 let message = durableChildFailure?.safeMessage
                     ?? Self.sanitize(String(describing: error))
                 try? await flushSignals()
-                projection = try await append([
+                _ = try await append([
                     .failureCommitted(message),
                     .stateChanged(
                         from: projection.state,
@@ -673,14 +757,409 @@ private actor DynamicWorkflowSession {
         return WorkflowScriptHost(
             agent: { [weak self] invocation in
                 guard let self else { throw CancellationError() }
+                guard depth == 0 || !invocation.deliversOnWait else { throw WorkflowScriptRuntimeError.unsupportedRequirement }
                 let global = try await router.map(invocation)
-                return try await self.invokeAgent(global)
+                return try await self.invokeAgent(global, detachedHandle: invocation.deliversOnWait ? invocation.sequence : nil)
             },
             callSavedWorkflow: savedCall,
             phase: { [signals] in signals.recordPhase($0) },
             log: { [signals] in signals.recordLog($0) },
-            budget: { [budgetCounter] in budgetCounter.snapshot() }
+            budget: { [budgetCounter] in budgetCounter.snapshot() },
+            settledBudget: { [weak self] in
+                guard let self else { throw CancellationError() }
+                return try await self.recordedBudget()
+            },
+            webEvidence: { [weak self] in
+                guard let self else { throw CancellationError() }
+                return try await self.recordedWebEvidence()
+            },
+            queryWebEvidence: { [weak self] query in
+                guard let self else { throw CancellationError() }
+                return try await self.recordedWebEvidence(query: query)
+            },
+            waitAny: { [weak self] index, ordinals in
+                guard let self, depth == 0 else { throw WorkflowScriptRuntimeError.unsupportedRequirement }
+                return try await self.waitAny(index: index, ordinals: ordinals)
+            },
+            collaborate: { [weak self] index, command in
+                guard let self, depth == 0 else { throw WorkflowScriptRuntimeError.unsupportedRequirement }
+                return try await self.collaborate(index: index, command: command)
+            }
         )
+    }
+
+    /// Waiting occupies no dispatch permit, model request, or residency lease. Journal changes
+    /// wake the caller; the persisted receipt fixes the chosen result before it enters a prompt.
+    private func waitAny(index: UInt32, ordinals: [UInt32]) async throws -> JSONValue {
+        guard index == nextWaitIndex, !ordinals.isEmpty,
+              ordinals.count <= projection.launch.limits.maximumAgentCalls,
+              Set(ordinals).count == ordinals.count else { throw DynamicWorkflowEngineError.invocationOrderMismatch }
+        nextWaitIndex += 1
+        while true {
+            try Task.checkCancellation()
+            if stopped { throw CancellationError() }
+            let candidates = ordinals.compactMap { detachedCalls[$0] }
+            if candidates.count == ordinals.count, candidates.allSatisfy({ id in projection.calls.contains { $0.callID == id } }) {
+                let selected: WorkflowAgentCallID?
+                if let saved = projection.waits.first(where: { $0.index == index }) {
+                    guard saved.candidates == candidates else { throw DynamicWorkflowEngineError.invocationOrderMismatch }
+                    selected = saved.selected
+                } else {
+                    selected = candidates.filter { projection.outcomes[$0] != nil }.min {
+                        projection.settledSequences[$0, default: .max] < projection.settledSequences[$1, default: .max]
+                    }
+                    if let selected {
+                        _ = try await append([.waitSelected(try WorkflowWaitSelection(
+                            index: index, candidates: candidates, selected: selected))])
+                    }
+                }
+                if let selected, let outcome = projection.outcomes[selected],
+                   let ordinal = ordinals.first(where: { detachedCalls[$0] == selected }) {
+                    evidenceVisibleCalls.insert(selected)
+                    evidenceCache = nil
+                    var result: [String: JSONValue] = ["handle": .unsignedInteger(UInt64(ordinal))]
+                    switch outcome {
+                    case .completed(let reference, _):
+                        result["status"] = .string("completed")
+                        result["value"] = try JSONDecoder().decode(JSONValue.self, from: await valueStore.load(reference).data)
+                    case .failed(let failure, _):
+                        result["status"] = .string("failed"); result["error"] = .string(failure.safeMessage)
+                        if projection.calls.first(where: { $0.callID == selected })?.options.task?.goalAmendmentCount != nil {
+                            result["code"] = .string(failure.code)
+                        }
+                    case .unavailable(let reason, _):
+                        result["status"] = .string("unavailable"); result["error"] = .string(reason)
+                    case .stopped:
+                        result["status"] = .string("cancelled")
+                    }
+                    return .object(result)
+                }
+            }
+            try await awaitJournalChange()
+        }
+    }
+
+    private func awaitJournalChange() async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                journalWaiters[id] = continuation
+                if Task.isCancelled { cancelJournalWait(id) }
+            }
+        } onCancel: {
+            Task { await self.cancelJournalWait(id) }
+        }
+    }
+
+    private func cancelJournalWait(_ id: UUID) {
+        journalWaiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
+    }
+
+    private func wakeJournalWaiters() {
+        let waiting = Array(journalWaiters.values)
+        journalWaiters.removeAll()
+        waiting.forEach { $0.resume() }
+    }
+
+    func amendGoal(_ amendment: WorkflowGoalAmendment) async throws {
+        let stored = try await appendMutex.run { [weak self] in
+            guard let self else { throw CancellationError() }
+            return try await self.acceptGoalAmendment(amendment)
+        }
+        try await spawner.deliverGoalAmendment(stored, goalID: projection.runID, conversationID: projection.launch.conversationID,
+            runIDs: stored.targetRunIDs ?? [projection.launch.initiatingRunID])
+    }
+
+    private func acceptGoalAmendment(_ amendment: WorkflowGoalAmendment) async throws -> WorkflowGoalAmendment {
+        if let prior = projection.taskGraph?.amendments.first(where: { $0.id == amendment.id }) {
+            guard prior.text == amendment.text else { throw WorkflowTaskGraphError.stale }
+            return prior
+        }
+        let stored = WorkflowGoalAmendment(id: amendment.id, text: amendment.text, acceptedAt: amendment.acceptedAt,
+            targetRunIDs: goalAmendmentRecipients(projection))
+        _ = try await performAppendAndInstall([.goalAmended(stored)])
+        return stored
+    }
+
+    private func deliverGoalAmendments(only runID: AgentRunID? = nil) async throws {
+        for amendment in projection.taskGraph?.amendments ?? [] {
+            let targets = amendment.targetRunIDs ?? [projection.launch.initiatingRunID]
+            let selected = runID.map { id in targets.filter { $0 == id } } ?? targets
+            try await spawner.deliverGoalAmendment(amendment, goalID: projection.runID,
+                conversationID: projection.launch.conversationID, runIDs: selected)
+        }
+    }
+
+    private func collaborate(index: UInt32, command: CanonicalJSON) async throws -> JSONValue {
+        guard command.data.count <= 262_144, index > 0, index <= 256 else { throw WorkflowTaskGraphError.invalid }
+        if let receipt = projection.collaborationReceipts.first(where: { $0.index == index }) {
+            guard receipt.commandDigest == command.fingerprint else { throw DynamicWorkflowEngineError.invocationOrderMismatch }
+            return try collaborationPacket(receipt, resumed: projection.goalResumptions[index])
+        }
+        let decoded = try JSONDecoder().decode(WorkflowCollaborationCommand.self, from: command.data)
+        if decoded.action == "admitted" {
+            guard let handles = decoded.handles, !handles.isEmpty else { throw WorkflowTaskGraphError.invalid }
+            while !handles.allSatisfy({ handle in
+                guard let id = detachedCalls[handle] else { return false }
+                return projection.calls.contains { $0.callID == id }
+            }) {
+                try Task.checkCancellation()
+                try await awaitJournalChange()
+            }
+        }
+        if decoded.action == "deliver" {
+            try await deliverGoalAmendments()
+            let runIDs = [projection.launch.initiatingRunID] + projection.calls.map(\.childRunID)
+            return try await spawner.withSessionInputBarrier(runIDs: runIDs) { [weak self] in
+                guard let self else { throw CancellationError() }
+                return try await self.commitCollaboration(index: index, command: command, decoded: decoded)
+            }
+        }
+        return try await commitCollaboration(index: index, command: command, decoded: decoded)
+    }
+
+    private func commitCollaboration(index: UInt32, command: CanonicalJSON,
+                                     decoded: WorkflowCollaborationCommand) async throws -> JSONValue {
+        try await appendMutex.run { [weak self] in
+            guard let self else { throw CancellationError() }
+            return try await self.performCollaboration(index: index, command: command, decoded: decoded)
+        }
+    }
+
+    private func performCollaboration(index: UInt32, command: CanonicalJSON,
+                                      decoded: WorkflowCollaborationCommand) async throws -> JSONValue {
+        guard index == projection.collaborationReceipts.count + 1 else { throw DynamicWorkflowEngineError.invocationOrderMismatch }
+        var graph: WorkflowTaskGraph
+        if let current = projection.taskGraph { graph = current }
+        else {
+            guard let args = projection.launch.args,
+                  case .object(let root) = try JSONDecoder().decode(JSONValue.self, from: args.data),
+                  case .string(let objective)? = root["goal"] else { throw WorkflowTaskGraphError.invalid }
+            let execution = projection.launch.capabilityCeiling.capabilities.contains(.codeExecution)
+                && projection.launch.capabilityCeiling.authority.workspaceIDs.count == 1
+            let share = projection.launch.budget.limits[.toolInvocations] / UInt64(projection.launch.limits.maximumConcurrentAgents)
+            graph = try WorkflowTaskGraph(objective: objective, maximumToolCallsPerTask: min(execution ? 12 : 6, share))
+        }
+        var feedback: String?
+        var observation: JSONValue?
+        let pendingInputs = try await spawner.pendingSessionInputs(runIDs: [projection.launch.initiatingRunID] + projection.calls.map(\.childRunID))
+        do {
+            switch decoded.action {
+            case "snapshot", "admitted": break
+            case "continueInbox":
+                guard let revision = decoded.expectedRevision, let recipient = decoded.recipient,
+                      recipient != "coordinator", !graph.tasks.contains(where: { $0.agent == recipient }),
+                      let message = pendingInputs.messages.first(where: { message in
+                          projection.calls.contains { $0.childRunID == message.seedRunID && $0.options.sessionKey == recipient }
+                      }), let source = projection.calls.first(where: { $0.childRunID == message.seedRunID }) else {
+                    throw WorkflowTaskGraphError.unavailableInput
+                }
+                // Reassignment changes task ownership, not the addressed agent's inbox. Give
+                // that existing session a bounded follow-up without undoing the reassignment or
+                // silently discarding messages. Its original profile/model remain the ceiling.
+                let prior = graph.artifacts.last(where: { $0.callID == source.callID })
+                try graph.update([WorkflowTaskUpdate(id: "inbox-" + message.id.description, expectedRevision: 0,
+                    agent: recipient,
+                    instruction: "Process your accepted pending messages for this goal. Your former assignment has been reassigned. Preserve the current ownership; do not redo that assignment unless a human explicitly requests it. Return any new evidence or correction, or acknowledge that an obsolete notice needs no further action. Your result reaches the coordinator automatically; do not send a redundant acknowledgement.",
+                    maximumToolCalls: source.options.maximumToolCalls ?? 0, model: source.options.requestedModel,
+                    artifactInputs: prior.map { [$0.id] } ?? [], profile: source.options.profile)], expectedRevision: revision)
+            case "update":
+                guard let revision = decoded.expectedRevision, let changes = decoded.tasks else { throw WorkflowTaskGraphError.invalid }
+                try graph.update(changes, expectedRevision: revision)
+            case "settle":
+                guard let handle = decoded.handle, let id = detachedCalls[handle], evidenceVisibleCalls.contains(id),
+                      let call = projection.calls.first(where: { $0.callID == id }), let outcome = projection.outcomes[id]
+                else { throw WorkflowTaskGraphError.ownership }
+                if case .failed(let failure, _) = outcome, failure.code == "workflow.task-admission" {
+                    // The call never acquired this task. Return the current graph so dispatch can
+                    // use the newer goal/task revision without inventing a failed execution.
+                } else {
+                    try graph.settle(call: call, outcome: outcome)
+                    if case .completed(let value, _) = outcome, let limits = try outputLimits(graph),
+                       limits.workerWords != nil || limits.workerCharacters != nil {
+                        let stored = try await valueStore.load(value)
+                        let decoded = try JSONDecoder().decode(JSONValue.self, from: stored.data)
+                        let text: String = if case .string(let text) = decoded { text } else { stored.string }
+                        if let reason = limits.workerRejection(text) { graph.rejectOutput(callID: call.callID, reason: reason) }
+                    }
+                    if case .completed(let value, _) = outcome,
+                       let task = graph.tasks.first(where: { $0.id == call.options.task?.taskID }),
+                       task.review != nil, task.state == .completed, task.outputArtifactID == call.options.task?.outputArtifactID {
+                        let stored = try await valueStore.load(value)
+                        let raw = try JSONDecoder().decode(JSONValue.self, from: stored.data)
+                        let bytes: Data = if case .string(let text) = raw { Data(text.utf8) } else { stored.data }
+                        if let report = try? JSONDecoder().decode(WorkflowReviewReport.self, from: bytes),
+                           (try? report.validate(against: task.review!)) != nil {
+                            guard let submitted = projection.submittedHandles[call.callID] else { throw WorkflowTaskGraphError.ownership }
+                            let evidence = try await spawner.reviewToolEvidence(submitted)
+                            try graph.recordReview(callID: call.callID, report: report, toolEvidence: evidence,
+                                goalAmendmentCount: call.options.task?.goalAmendmentCount ?? 0)
+                        } else {
+                            graph.rejectOutput(callID: call.callID, reason: WorkflowTaskGraphError.invalidReview.localizedDescription)
+                        }
+                    }
+                }
+            case "read":
+                guard let id = decoded.artifactID, let artifact = graph.artifacts.first(where: { $0.id == id }),
+                      let offset = decoded.offset, offset >= 0, let length = decoded.length, (1...12_000).contains(length)
+                else { throw WorkflowTaskGraphError.unavailableInput }
+                let raw = try await valueStore.load(artifact.value)
+                var excerpt = try WorkflowArtifactExcerpt.read(raw, id: id, offset: offset, length: length)
+                if let failure = artifact.validationFailure { excerpt["validationFailure"] = .string(failure) }
+                if let review = artifact.reviewResult {
+                    excerpt["reviewResult"] = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(review))
+                }
+                observation = .object(excerpt)
+            case "deliver":
+                guard decoded.expectedRevision == graph.revision else { throw WorkflowTaskGraphError.stale }
+                if let blocker = try deliveryPolicy()?.blocker { feedback = blocker; break }
+                guard pendingInputs.count == 0 else { throw AgentSessionError.pendingInput }
+                guard graph.unfinishedRequiredTasks.isEmpty, !graph.tasks.contains(where: { $0.state == .running }),
+                      projection.submittedHandles.keys.allSatisfy({ projection.outcomes[$0] != nil }),
+                      projection.reconciliationCallID == nil else { throw WorkflowTaskGraphError.incomplete }
+                if try requiresAcceptedReviews() { try graph.requireAcceptedReviews() }
+                if let blocker = try await deliveryCompletionBlocker() { feedback = blocker; break }
+                if let limits = try outputLimits(graph) {
+                    guard let answer = decoded.answer else { throw WorkflowTaskGraphError.invalid }
+                    if let rejected = limits.finalRejection(answer) {
+                        feedback = rejected
+                        observation = .object(["outputCorrectionNeeded": .bool(true)])
+                        break
+                    }
+                }
+                try graph.setGoalState(.completed, reason: decoded.reason)
+                if try outputLimits(graph) != nil || requiresAcceptedReviews(), let answer = decoded.answer {
+                    observation = .object(["acceptedAnswerDigest": .string(StableDigest.sha256(Data(answer.utf8)).rawValue)])
+                }
+            case "pause":
+                guard !graph.tasks.contains(where: { $0.state == .running }) else { throw WorkflowTaskGraphError.incomplete }
+                let next: WorkflowGoalState = decoded.reasonCode == "budget" ? .budgetExhausted : .blocked
+                try graph.setGoalState(next, reason: decoded.reason)
+            default: throw WorkflowTaskGraphError.invalid
+            }
+        } catch let error as WorkflowTaskGraphError {
+            feedback = error.localizedDescription
+            // Graph methods are transactional; an invalid model command is feedback, not a
+            // partial state change or an exception that discards successful sibling results.
+        } catch AgentSessionError.pendingInput {
+            feedback = "Accepted agent messages remain unincluded. Continue their addressed agents within the shared budget before delivering."
+        }
+        let sender = projection.calls.last(where: {
+            $0.options.requestedAgentType == "workflow-supervisor" && evidenceVisibleCalls.contains($0.callID)
+        })?.childRunID ?? projection.launch.initiatingRunID
+        let receipt = WorkflowCollaborationReceipt(index: index, commandDigest: command.fingerprint,
+            senderRunID: sender, graph: graph, feedback: feedback, observation: observation, pendingInputs: pendingInputs)
+        _ = try await performAppendAndInstall([.collaborationRecorded(receipt)])
+        return try collaborationPacket(receipt)
+    }
+
+    private func collaborationPacket(_ receipt: WorkflowCollaborationReceipt, resumed: WorkflowTaskGraph? = nil) throws -> JSONValue {
+        let graph = resumed ?? receipt.graph
+        let encoded = try JSONEncoder().encode(graph)
+        guard case .object(var value) = try JSONDecoder().decode(JSONValue.self, from: encoded) else { throw WorkflowTaskGraphError.invalid }
+        // Model-facing catalogs contain identities. Full protected payloads are retrieved only by
+        // bounded read operations; they are never serialized into every coordination prompt.
+        if case .array(let artifacts)? = value["artifacts"] {
+            value["artifacts"] = .array(artifacts.map { artifact in
+                guard case .object(var item) = artifact else { return artifact }
+                item.removeValue(forKey: "value")
+                return .object(item)
+            })
+        }
+        let pending = receipt.pendingInputs ?? AgentSessionPendingInputs()
+        let messages = pending.messages.map { item -> JSONValue in
+            let recipient = item.seedRunID == projection.launch.initiatingRunID ? "coordinator"
+                : projection.calls.first(where: { $0.childRunID == item.seedRunID })?.options.sessionKey ?? "unknown"
+            return .object(["id": .string(item.id.description), "recipient": .string(recipient), "preview": .string(item.preview)])
+        }
+        return .object(["graph": .object(value), "ready": .array(graph.readyTasks.map { .string($0.id) }),
+            "deliveryBlocker": try deliveryPolicy()?.blocker.map(JSONValue.string) ?? .null,
+            "pendingInputs": .object(["count": .integer(Int64(pending.count)), "messages": .array(messages)]),
+            "feedback": receipt.feedback.map(JSONValue.string) ?? .null, "observation": receipt.observation ?? .null])
+    }
+
+    private func outputLimits(_ graph: WorkflowTaskGraph) throws -> WorkflowOutputLimits? {
+        guard let args = projection.launch.args,
+              case .object(let values) = try JSONDecoder().decode(JSONValue.self, from: args.data),
+              let limitsValue = values["_mobileLLMOutputLimitsV1"] else { return nil }
+        var limits = try JSONDecoder().decode(WorkflowOutputLimits.self, from: CanonicalJSON(limitsValue).data)
+        guard limits.version == 1 else { throw WorkflowScriptRuntimeError.unsupportedRequirement }
+        for amendment in graph.amendments { limits = limits.applying(amendment.text) }
+        return limits
+    }
+
+    private func requiresAcceptedReviews() throws -> Bool {
+        guard let args = projection.launch.args,
+              case .object(let values) = try JSONDecoder().decode(JSONValue.self, from: args.data) else { return false }
+        return values["_mobileLLMReviewRequiredV1"] == .bool(true)
+    }
+
+    private func deliveryCompletionBlocker() async throws -> String? {
+        guard let policy = try deliveryPolicy() else { return nil }
+        if let blocker = policy.blocker { return blocker }
+        guard policy.requestedOutcome == .runningApplication || policy.requestedOutcome == .workspaceArtifact else { return nil }
+        var evidence: [WorkflowReviewToolEvidence] = []
+        for call in projection.calls where projection.outcomes[call.callID] != nil {
+            if let handle = projection.submittedHandles[call.callID] {
+                evidence += try await spawner.reviewToolEvidence(handle)
+            }
+        }
+        // Independent acceptance is enforced by graph.requireAcceptedReviews() at delivery.
+        // Execution receipts may come from any worker on the same unchanged source; forcing the
+        // reviewer to repeat them would add no execution evidence.
+        return policy.completionBlocker(workspaceID: SandboxWorkspaceHandleID(rawValue: projection.runID.rawValue),
+            evidence: evidence)
+    }
+
+    private func deliveryPolicy() throws -> WorkflowDeliveryPolicy? {
+        guard let args = projection.launch.args,
+              case .object(let values) = try JSONDecoder().decode(JSONValue.self, from: args.data),
+              let policy = values["_mobileLLMDeliveryV1"] else { return nil }
+        let result = try JSONDecoder().decode(WorkflowDeliveryPolicy.self, from: CanonicalJSON(policy).data)
+        guard result.version == 1 else { throw WorkflowScriptRuntimeError.unsupportedRequirement }
+        return result
+    }
+
+    private func recordedBudget() throws -> JSONValue {
+        var consumed = projection.preparationUsage ?? .zero
+        for call in projection.calls where evidenceVisibleCalls.contains(call.callID) {
+            let usage: AgentUsage
+            switch projection.outcomes[call.callID] {
+            case .completed(_, let value), .unavailable(_, let value), .failed(_, let value), .stopped(let value): usage = value
+            case nil: continue
+            }
+            consumed = try consumed.aggregating(usage)
+        }
+        func values(_ quantities: BudgetQuantities) -> JSONValue {
+            .object([
+                "toolCalls": .integer(Int64(clamping: quantities[.toolInvocations])),
+                "modelAttempts": .integer(Int64(clamping: quantities[.modelAttempts])),
+                "inputTokens": .integer(Int64(clamping: quantities[.inputTokens])),
+                "outputTokens": .integer(Int64(clamping: quantities[.outputTokens])),
+            ])
+        }
+        return .object(["limits": values(projection.launch.budget.limits), "consumed": values(consumed.quantities)])
+    }
+
+    private func recordedWebEvidence(query: String? = nil) async throws -> JSONValue {
+        let sequence = projection.lastSequence
+        if let cached = evidenceCache, cached.sequence == sequence, cached.query == query { return cached.value }
+        var latest: [UInt32: WorkflowAgentCallV1] = [:]
+        for call in projection.calls { latest[call.ordinal] = call }
+        let calls = latest.values.sorted { $0.ordinal < $1.ordinal }
+        var records: [(label: String, observation: WorkflowWebObservation)] = []
+        for call in calls where evidenceVisibleCalls.contains(call.callID)
+            && projection.outcomes[call.callID] != nil {
+            try Task.checkCancellation()
+            guard let handle = projection.submittedHandles[call.callID] else { continue }
+            for observation in try await spawner.webObservations(handle) {
+                records.append((call.options.label ?? "agent-\(call.ordinal)", observation))
+            }
+            if records.count >= WorkflowWebEvidence.maximumCandidates { break }
+        }
+        let value = try WorkflowWebEvidence.packet(records, matching: query)
+        if projection.lastSequence == sequence { evidenceCache = (sequence, query, value) }
+        return value
     }
 
     private func executeSavedWorkflow(
@@ -720,7 +1199,7 @@ private actor DynamicWorkflowSession {
             throw DynamicWorkflowEngineError.illegalRunState(projection.state)
         }
         await scheduler.pause()
-        projection = try await append([.stateChanged(from: .running, to: .pausing, reason: "user-pause")])
+        _ = try await append([.stateChanged(from: .running, to: .pausing, reason: "user-pause")])
         try await scheduler.waitUntilPaused()
     }
 
@@ -729,7 +1208,7 @@ private actor DynamicWorkflowSession {
             throw DynamicWorkflowEngineError.illegalRunState(projection.state)
         }
         await scheduler.resume()
-        projection = try await append([.stateChanged(from: projection.state, to: .running, reason: "user-resume")])
+        _ = try await append([.stateChanged(from: projection.state, to: .running, reason: "user-resume")])
     }
 
     func stop() async throws {
@@ -745,6 +1224,16 @@ private actor DynamicWorkflowSession {
             do {
                 try await spawner.cancel(handle, runID: call.childRunID)
             } catch {
+                if let terminal = try? await spawner.terminalResult(handle),
+                   terminal.runID == call.childRunID, terminal.handleID == handle {
+                    if case .failed(let failure, _) = terminal.outcome, failure.externalEffect == .uncertain {
+                        try await suspendForReconciliation(callID: call.callID, reason: failure.safeMessage)
+                        throw WorkflowScriptRuntimeError.hostFailure("child cancellation requires reconciliation")
+                    }
+                    // The active collection task (or stopAndDrain after recovery) still commits
+                    // the exact terminal result and usage; no external operation is repeated.
+                    continue
+                }
                 try await suspendForReconciliation(
                     callID: call.callID,
                     reason: "Unable to durably cancel a submitted child."
@@ -779,25 +1268,59 @@ private actor DynamicWorkflowSession {
         try await terminateAsCancelled()
     }
 
-    private func invokeAgent(_ invocation: WorkflowAgentInvocation) async throws -> WorkflowAgentBridgeResult {
+    private func invokeAgent(_ invocation: WorkflowAgentInvocation, detachedHandle: UInt32? = nil) async throws -> WorkflowAgentBridgeResult {
         guard !stopped else { return .stopped }
+        guard projection.state != .waitingForReconciliation else {
+            throw WorkflowScriptRuntimeError.hostFailure("child reconciliation required")
+        }
         guard invocation.sequence <= projection.launch.limits.maximumAgentCalls else {
             throw DynamicWorkflowEngineError.agentCallLimitExceeded
         }
         try await order.wait(for: invocation.sequence)
+        var visibleCallID: WorkflowAgentCallID?
+        defer {
+            if let callID = visibleCallID, !invocation.deliversOnWait, projection.outcomes[callID] != nil {
+                evidenceVisibleCalls.insert(callID)
+                evidenceCache = nil
+            }
+        }
         do {
             try await flushSignals()
-            let decision = try await replay.next(prompt: invocation.prompt, options: invocation.options)
+            // A goal's recorded failure belongs to its replay prefix. Re-executing a failed
+            // coordinator here would change control flow before its recorded pause/resume grant.
+            // Legacy scripts without goal sessions keep their existing retry semantics.
+            let replayFailure = invocation.deliversOnWait
+                || (invocation.options.sessionKey != nil && projection.taskGraph != nil)
+            let decision = try await replay.next(prompt: invocation.prompt, options: invocation.options,
+                                                 reuseSettledFailures: replayFailure)
+            if invocation.deliversOnWait {
+                let call: WorkflowAgentCallV1
+                switch decision { case .reuse(let value, _), .continue(let value), .execute(let value): call = value }
+                detachedCalls[detachedHandle ?? invocation.sequence] = call.callID
+                wakeJournalWaiters()
+            }
             switch decision {
-            case .reuse(_, let outcome):
+            case .reuse(let call, let outcome):
+                visibleCallID = call.callID
                 await order.complete(invocation.sequence)
                 return try await bridge(outcome)
             case .continue(let call):
+                visibleCallID = call.callID
                 await order.complete(invocation.sequence)
                 return try await execute(call: call, prompt: invocation.prompt, prepared: true)
             case .execute(let call):
+                visibleCallID = call.callID
                 try await invalidateUnsettledSuffix(startingAt: call.ordinal)
-                projection = try await append([.agentCallPrepared(call)])
+                do {
+                    _ = try await append([.agentCallPrepared(call)])
+                } catch let error as WorkflowTaskGraphError {
+                    let failure = try AgentFailure(code: "workflow.task-admission", classification: .permanent,
+                        safeMessage: error.localizedDescription, retryAdvice: .never, externalEffect: .confirmedNone,
+                        requiredUserAction: .none, redaction: RedactionMetadata(classification: .publicMetadata, policyVersion: 1))
+                    _ = try await append([.agentCallRejected(call: call, failure: failure)])
+                    await order.complete(invocation.sequence)
+                    throw WorkflowChildExecutionFailed(failure: failure)
+                }
                 await order.complete(invocation.sequence)
                 return try await execute(call: call, prompt: invocation.prompt, prepared: false)
             }
@@ -821,7 +1344,7 @@ private actor DynamicWorkflowSession {
             do {
                 try await spawner.cancel(handle, runID: call.childRunID)
             } catch {
-                projection = try await append([
+                _ = try await append([
                     .reconciliationRequired(
                         callID: call.callID,
                         reason: "Unable to cancel an invalidated recovered child"
@@ -838,7 +1361,7 @@ private actor DynamicWorkflowSession {
             }
         }
 
-        projection = try await append(stale.map {
+        _ = try await append(stale.map {
             .agentCallSettled(callID: $0.callID, outcome: .stopped(usage: .zero))
         })
         for call in stale where projection.submittedHandles[call.callID] != nil {
@@ -861,6 +1384,9 @@ private actor DynamicWorkflowSession {
         call: WorkflowAgentCallV1,
         prompt: String
     ) async throws -> WorkflowAgentBridgeResult {
+        guard projection.state != .waitingForReconciliation else {
+            throw WorkflowScriptRuntimeError.hostFailure("child reconciliation required")
+        }
         let handleID: AgentExecutionHandleID
         let admission: WorkflowBudgetAdmission
         if let existing = projection.submittedHandles[call.callID] {
@@ -871,34 +1397,73 @@ private actor DynamicWorkflowSession {
                 isRecoveredSubmission: true
             )
         } else {
-            let request = try requestBuilder.makeRequest(
-                launch: projection.launch,
-                call: call,
-                prompt: prompt
-            )
-            try childRequestValidator.validate(
-                request,
-                launch: projection.launch,
-                call: call
-            )
-            admission = try await workflowBudget.admit(
-                request: request,
-                call: call,
-                isRecoveredSubmission: false
-            )
+            let launch = projection.launch
+            let builder = requestBuilder
+            let validator = childRequestValidator
+            let admitted: (request: SubagentSpawnRequest, admission: WorkflowBudgetAdmission)
             do {
-                handleID = try await spawner.spawn(request)
+                admitted = try await workflowBudget.admitAvailable(call: call) { remaining in
+                    let request = try builder.makeRequest(
+                        launch: launch, call: call, prompt: prompt, budgetLimit: remaining
+                    )
+                    try validator.validate(request, launch: launch, call: call)
+                    return request
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // No executor submission occurred. Persist the failed result so a caught
+                // admission failure is replayable, rather than leaving a phantom prepared call.
+                let classification: AgentFailureClassification
+                if case AgentContractError.budgetExceeded = error { classification = .budgetRelated }
+                else { classification = .permanent }
+                let failure = try AgentFailure(code: "workflow.child-admission",
+                    classification: classification, safeMessage: Self.sanitize((error as? LocalizedError)?.errorDescription ?? String(describing: error)),
+                    retryAdvice: .never, externalEffect: .confirmedNone, requiredUserAction: .none,
+                    redaction: RedactionMetadata(classification: .publicMetadata, policyVersion: 1))
+                _ = try await append([.agentCallSettled(callID: call.callID,
+                    outcome: .failed(failure: failure, usage: .zero))])
+                throw WorkflowChildExecutionFailed(failure: failure)
+            }
+            let request = admitted.request
+            admission = admitted.admission
+            do {
+                let seed = call.options.sessionKey.flatMap { key in
+                    projection.calls.first(where: {
+                        $0.ordinal < call.ordinal && $0.options.sessionKey == key && projection.submittedHandles[$0.callID] != nil
+                    })?.childRunID
+                        ?? (key == "coordinator" && call.options.requestedAgentType == "workflow-supervisor" ? launch.initiatingRunID : nil)
+                }
+                if let seed {
+                    // Identity is selected by the host from committed coordinator calls, never
+                    // accepted as a sender name from model-produced options.
+                    let sender = projection.calls.last(where: {
+                        guard $0.ordinal < call.ordinal, $0.options.requestedAgentType == "workflow-supervisor",
+                              projection.submittedHandles[$0.callID] != nil else { return false }
+                        if case .completed = projection.outcomes[$0.callID] { return true }
+                        return false
+                    })?.childRunID ?? launch.initiatingRunID
+                    handleID = try await spawner.spawn(request, continuing: seed, senderRunID: sender)
+                } else {
+                    handleID = try await spawner.spawn(request)
+                }
             } catch {
                 try? await workflowBudget.releaseUnsubmitted(admission)
                 throw error
             }
-            projection = try await append([.agentChildSubmitted(callID: call.callID, handleID: handleID)])
+            _ = try await append([.agentChildSubmitted(callID: call.callID, handleID: handleID)])
         }
         let result: SubagentResult
         do {
-            result = try await spawner.collect(handleID)
+            do { try await deliverGoalAmendments(only: call.childRunID) }
+            catch is CancellationError { throw CancellationError() }
+            catch { signals.recordLog("Saved goal instructions await inbox delivery; completion will retry delivery.") }
+            result = try await spawner.collect(handleID, stallMilliseconds: call.options.stallMilliseconds)
+        } catch let timeout as SubagentStallTimeout {
+            try await settleAfterCancellation(call: call, handleID: handleID, admission: admission)
+            throw WorkflowScriptRuntimeError.hostFailure("Child agent made no observable progress for \(timeout.milliseconds) ms and was stopped.")
         } catch SubagentSpawnError.reconciliationRequired(let failure) {
-            projection = try await append([
+            _ = try await append([
                 .reconciliationRequired(callID: call.callID, reason: failure.safeMessage),
                 .stateChanged(
                     from: projection.state,
@@ -923,7 +1488,7 @@ private actor DynamicWorkflowSession {
         if case .failed(let failure, _) = result.outcome,
            failure.externalEffect == .uncertain
         {
-            projection = try await append([
+            _ = try await append([
                 .reconciliationRequired(callID: call.callID, reason: failure.safeMessage),
                 .stateChanged(
                     from: projection.state,
@@ -948,8 +1513,8 @@ private actor DynamicWorkflowSession {
             let nextUsage = try await commitSettlement(
                 call: call,
                 admission: admission,
-                outcome: .stopped(usage: .zero),
-                usage: .zero
+                outcome: .stopped(usage: result.usage),
+                usage: result.usage
             )
             budgetCounter.update(spent: nextUsage.quantities[.outputTokens])
             return .stopped
@@ -958,8 +1523,8 @@ private actor DynamicWorkflowSession {
             let nextUsage = try await commitSettlement(
                 call: call,
                 admission: admission,
-                outcome: .failed(failure: failure, usage: .zero),
-                usage: .zero
+                outcome: .failed(failure: failure, usage: result.usage),
+                usage: result.usage
             )
             budgetCounter.update(spent: nextUsage.quantities[.outputTokens])
             throw WorkflowChildExecutionFailed(failure: failure)
@@ -988,8 +1553,24 @@ private actor DynamicWorkflowSession {
         if projection.outcomes[call.callID] != nil { return }
         let spawner = self.spawner
         let cleanup = Task.detached {
-            try await spawner.cancel(handleID, runID: call.childRunID)
-            return try await spawner.collect(handleID)
+            do {
+                try await spawner.cancel(handleID, runID: call.childRunID)
+                return try await spawner.collect(handleID)
+            } catch {
+                // Cancellation acknowledgement/event-stream races do not invalidate a committed
+                // terminal result. Unknown live outcomes still require reconciliation below.
+                if let terminal = try await spawner.terminalResult(handleID) { return terminal }
+                // The accepted command may finish draining just after its observer closes. Give
+                // that durable terminal commit a bounded grace period, without resubmitting work.
+                if error as? SubagentSpawnError == .resultUnavailable
+                    || error as? AgentExecutionError == .invalidRecoveryBoundary {
+                    for delay in [50, 100, 200] {
+                        try await Task.sleep(for: .milliseconds(delay))
+                        if let terminal = try await spawner.terminalResult(handleID) { return terminal }
+                    }
+                }
+                throw error
+            }
         }
         let result: SubagentResult
         do {
@@ -1019,8 +1600,8 @@ private actor DynamicWorkflowSession {
             _ = try await commitSettlement(
                 call: call,
                 admission: admission,
-                outcome: .stopped(usage: .zero),
-                usage: .zero
+                outcome: .stopped(usage: result.usage),
+                usage: result.usage
             )
         case .completed, .failed:
             if case .failed(let failure, _) = result.outcome,
@@ -1056,7 +1637,7 @@ private actor DynamicWorkflowSession {
     ) async throws {
         guard !projection.isTerminal else { return }
         if projection.reconciliationCallID == nil {
-            projection = try await append([
+            _ = try await append([
                 .reconciliationRequired(callID: callID, reason: reason),
                 .stateChanged(
                     from: projection.state,
@@ -1101,6 +1682,7 @@ private actor DynamicWorkflowSession {
             .agentCallSettled(callID: call.callID, outcome: outcome),
             .usageCommitted(nextUsage),
         ])
+        wakeJournalWaiters()
         return nextUsage
     }
 
@@ -1169,7 +1751,7 @@ private actor DynamicWorkflowSession {
             case .log(let value): return .logAppended(value)
             }
         }
-        projection = try await append(kinds)
+        _ = try await append(kinds)
     }
 
     private func append(_ kinds: [WorkflowRunEventKindV1]) async throws -> WorkflowRunProjectionV1 {
@@ -1184,6 +1766,7 @@ private actor DynamicWorkflowSession {
     ) async throws -> WorkflowRunProjectionV1 {
         let next = try await performAppend(kinds)
         projection = next
+        wakeJournalWaiters()
         return next
     }
 
@@ -1213,7 +1796,7 @@ private actor DynamicWorkflowSession {
 
     private func terminateAsCancelled() async throws {
         guard !projection.isTerminal else { return }
-        projection = try await append([
+        _ = try await append([
             .stateChanged(from: projection.state, to: .cancelled, reason: "execution-cancelled")
         ])
     }
@@ -1367,7 +1950,8 @@ private actor WorkflowInvocationRouter {
         return WorkflowAgentInvocation(
             sequence: global,
             prompt: invocation.prompt,
-            options: invocation.options
+            options: invocation.options,
+            deliversOnWait: invocation.deliversOnWait
         )
     }
 
@@ -1436,4 +2020,24 @@ private final class WorkflowHostSignalBuffer: @unchecked Sendable {
         }
         signals.append(signal)
     }
+}
+
+private struct WorkflowCollaborationCommand: Decodable, Sendable {
+    let action: String
+    let expectedRevision: UInt64?
+    let tasks: [WorkflowTaskUpdate]?
+    let handles: [UInt32]?
+    let handle: UInt32?
+    let artifactID: String?
+    let offset: Int?
+    let length: Int?
+    let reason: String?
+    let reasonCode: String?
+    let recipient: String?
+    let answer: String?
+}
+
+private func goalAmendmentRecipients(_ projection: WorkflowRunProjectionV1) -> [AgentRunID] {
+    let active = projection.calls.filter { projection.outcomes[$0.callID] == nil }.map(\.childRunID)
+    return Array(Set([projection.launch.initiatingRunID] + active)).sorted { $0.description < $1.description }
 }
