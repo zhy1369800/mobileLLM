@@ -521,8 +521,9 @@ struct MarkdownTable: View {
     @State private var availableWidth: CGFloat = 0
     @State private var isExpanded: Bool = false
 
+    private static let maxCollapsedRows = 10
     private var columns: Int { max(1, max(header.count, rows.map(\.count).max() ?? 0)) }
-    private var isCollapsible: Bool { rows.count > 3 }
+    private var isCollapsible: Bool { rows.count > Self.maxCollapsedRows }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
@@ -536,7 +537,7 @@ struct MarkdownTable: View {
                 )
                 tableRow(header, widths: widths, header: true)
                 Divider().overlay(Theme.hairline)
-                let displayRows = (isCollapsible && !isExpanded) ? Array(rows.prefix(3)) : rows
+                let displayRows = (isCollapsible && !isExpanded) ? Array(rows.prefix(Self.maxCollapsedRows)) : rows
                 ForEach(Array(displayRows.enumerated()), id: \.offset) { _, row in
                     tableRow(row, widths: widths, header: false)
                 }
