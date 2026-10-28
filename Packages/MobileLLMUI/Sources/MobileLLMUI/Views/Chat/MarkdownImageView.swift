@@ -777,26 +777,21 @@ struct MarkdownImageViewerSheet: View {
                     }
                 } else {
                     let fallbackImage = UIImage(data: rawData) ?? image
-                    if let fallbackImage {
-                        PHPhotoLibrary.shared().performChanges({
-                            PHAssetChangeRequest.creationRequestForAsset(from: fallbackImage)
-                        }) { fallbackSuccess, fallbackError in
-                            DispatchQueue.main.async {
-                                if fallbackSuccess {
-                                    saved = true
-                                    Task {
-                                        try? await Task.sleep(nanoseconds: 1_500_000_000)
-                                        saved = false
-                                    }
-                                } else {
-                                    saveErrorMessage = fallbackError?.localizedDescription ?? error?.localizedDescription ?? "Failed to save image."
-                                    showSaveErrorAlert = true
+                    PHPhotoLibrary.shared().performChanges({
+                        PHAssetChangeRequest.creationRequestForAsset(from: fallbackImage)
+                    }) { fallbackSuccess, fallbackError in
+                        DispatchQueue.main.async {
+                            if fallbackSuccess {
+                                saved = true
+                                Task {
+                                    try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                    saved = false
                                 }
+                            } else {
+                                saveErrorMessage = fallbackError?.localizedDescription ?? error?.localizedDescription ?? "Failed to save image."
+                                showSaveErrorAlert = true
                             }
                         }
-                    } else {
-                        saveErrorMessage = error?.localizedDescription ?? "Failed to save image."
-                        showSaveErrorAlert = true
                     }
                 }
             }
