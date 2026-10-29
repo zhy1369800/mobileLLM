@@ -7,16 +7,6 @@ import LLMCore
 import UIKit
 #endif
 
-/// Tracks the bottom anchor's position in the scroll's coordinate space so we can detect "scrolled
-/// away" (for the scroll-to-bottom pill) and sticky-bottom autoscroll on iOS 17 / macOS 14.
-private struct BottomOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
-/// Tracks the content's top edge so auto-follow can tell "the user scrolled" (the top moves with
-/// them) from "content grew at the bottom" (the top stays put until we re-pin). The sentinel is a
-/// permanent VStack sibling, never a lazy child, so it always reports.
 /// The message list + streaming surface (DESIGN §4). User turns are right-aligned bubbles; assistant
 /// turns are full-width document text. History ALWAYS renders (a suspended/absent model never hides the
 /// thread); a distinct loading state owns a cold-start load; sticky-bottom autoscroll with a "⌄ new"
@@ -109,105 +99,72 @@ struct ChatThreadView: View {
     // MARK: Thread
 
     private func thread(_ convo: Conversation) -> some View {
-        GeometryReader { outer in
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
-                        LazyVStack(alignment: .leading, spacing: Theme.Space.lg) {
-                            ForEach(convo.messages) { message in
-                                row(message).id(message.id)
-                            }
-                            if let agentRuns {
-                                AgentRunPanelRow(store: agentRuns, conversationID: convo.id)
-                            }
-                        }
-                        .padding(Theme.Space.lg)
-                        .frame(maxWidth: Theme.Layout.readingColumn, alignment: .leading)
-                        .frame(maxWidth: .infinity)
-
-                        // The bottom marker is deliberately OUTSIDE the lazy stack: a lazy child far
-                        // below the viewport gets unloaded, which silently stops its preference from
-                        // firing and freezes auto-follow (the thread appears stuck at the top). As a
-                        // permanent sibling it always reports its position, so follow and the
-                        // "Scroll to latest" pill stay live at every scroll offset.
-                        Color.clear
-                            .frame(height: 1)
-                            .id(bottomID)
-                            .background(GeometryReader { geo in
-                                Color.clear.preference(key: BottomOffsetKey.self,
-                                                       value: geo.frame(in: .named("thread")).maxY)
-                            })
+        ScrollViewReader { proxy in
+            ScrollView(showsIndicators: false) {
+                LazyVStack(alignment: .leading, spacing: Theme.Space.lg) {
+                    ForEach(convo.messages) { message in
+                        row(message).id(message.id)
                     }
-                    .frame(maxWidth: .infinity)
-                }
-                // Aligned with Kelivo: remove aggressive defaultScrollAnchor(.bottom) which fights
-                // the user's manual dragging gesture during LazyVStack content growth.
-                .scrollDismissesKeyboard(.interactively)   // drag the thread down to dismiss the keyboard
-                .coordinateSpace(name: "thread")
-                .background(Theme.bg)
-                .onPreferenceChange(BottomOffsetKey.self) { maxY in
-                    // Only update atBottom when boolean changes to prevent high-frequency (120Hz) re-renders
-                    let newAtBottom = maxY <= outer.size.height + 40
-                    if atBottom != newAtBottom {
-                        atBottom = newAtBottom
+                    if let agentRuns {
+                        AgentRunPanelRow(store: agentRuns, conversationID: convo.id)
                     }
+                    Color.clear
+                        .frame(height: 1)
+                        .id(bottomID)
+                        .onAppear { atBottom = true }
+                        .onDisappear { atBottom = false }
                 }
-                .onChange(of: convo.messages.count) { _, _ in
-                    // Only auto-follow when already at the bottom; yield unconditionally to user historical browsing
-                    if atBottom {
-                        scrollToBottom(proxy, animated: false)
-                    }
+                .padding(Theme.Space.lg)
+                .frame(maxWidth: Theme.Layout.readingColumn, alignment: .leading)
+                .frame(maxWidth: .infinity)
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .background(Theme.bg)
+            .onChange(of: convo.messages.count) { _, _ in
+                // Only auto-follow when already at the bottom; yield unconditionally to user historical browsing
+                if atBottom {
+                    scrollToBottom(proxy, animated: false)
                 }
-                .onChange(of: outer.size.height) { _, _ in
-                    if atBottom {
-                        scrollToBottom(proxy, animated: false)
-                    }
-                }
-                .onChange(of: chat.activeID) { _, _ in scrollToBottom(proxy, animated: false) }
-                .onAppear { scrollToBottom(proxy, animated: false) }
-                .overlay(alignment: .bottom) {
-                    if !atBottom { scrollPill(proxy) }
-                }
+            }
+            .onChange(of: chat.activeID) { _, _ in
+                scrollToBottom(proxy, animated: false)
+                warmupCurrentConversation(convo)
+            }
+            .onAppear {
+                scrollToBottom(proxy, animated: false)
+                warmupCurrentConversation(convo)
+            }
+            .overlay(alignment: .bottom) {
+                if !atBottom { scrollPill(proxy) }
             }
         }
     }
 
-    @ViewBuilder private func row(_ message: Message) -> some View {
-        if message.role == .user {
-            VStack(alignment: .trailing, spacing: Theme.Space.xs) {
-                UserBubble(message: message,
-                           onEdit: isBusy ? nil : { beginEdit(message) },
-                           onCopy: { Clipboard.copy(message.answer); chat.showToast(Toast("Copied")) },
-                           attachmentLoader: { await chat.attachmentData($0) })
-                if let workflow = message.workflowRecord {
-                    NavigationLink {
-                        WorkflowSummaryPage(
-                            store: chat.workflowStore,
-                            conversationID: workflow.conversationID ?? chat.activeID
-                        )
-                    } label: {
-                        WorkflowMessageRow(record: workflow)
-                    }
-                    .buttonStyle(.plain)
-                    .frame(maxWidth: 360, alignment: .trailing)
-                }
-            }
-        } else if message.id == chat.streamingMessageID {
-            StreamingRow(chat: chat, displayMode: displayMode)
-        } else {
-            AssistantView(
-                reasoning: message.reasoning ?? "",
-                answer: message.answer,
-                disclosurePhase: .answered(seconds: completedThinkSeconds(message)),
-                displayMode: displayMode,
-                isStreaming: false,
-                stats: message.stats,
-                modelName: message.generatedBy?.displayName ?? "Model",
-                toolRuns: message.toolRuns ?? [],
-                emptyOutcome: message.emptyOutcome,
-                onCopy: { Clipboard.copy(message.answer); chat.showToast(Toast("Copied")) },
-                onRegenerate: isBusy ? nil : { requestRegenerate(message) })
+    private func warmupCurrentConversation(_ convo: Conversation) {
+        let texts = convo.messages.compactMap { m -> String? in
+            guard m.role == .assistant, !m.answer.isEmpty else { return nil }
+            return m.answer
         }
+        MarkdownBlockCache.warmup(texts: texts)
+    }
+
+    @ViewBuilder private func row(_ message: Message) -> some View {
+        let isStreamingRow = message.id == chat.streamingMessageID
+        MessageRowItem(
+            message: message,
+            isStreamingRow: isStreamingRow,
+            isBusy: isBusy,
+            displayMode: displayMode,
+            thinkSeconds: completedThinkSeconds(message),
+            onEdit: isBusy ? nil : { beginEdit(message) },
+            onCopy: { Clipboard.copy(message.answer); chat.showToast(Toast("Copied")) },
+            onRegenerate: isBusy ? nil : { requestRegenerate(message) },
+            attachmentLoader: { await chat.attachmentData($0) },
+            workflowStore: chat.workflowStore,
+            activeID: chat.activeID,
+            chat: chat
+        )
+        .equatable()
     }
 
     /// One-tap regenerate for the newest assistant turn; confirm first when regenerating an earlier one
@@ -401,6 +358,73 @@ private struct AgentRunPanelRow: View {
         if let run = store.presentation(for: conversationID), run.needsPanel {
             AgentRunPanel(store: store, conversationID: conversationID)
                 .id("agent-run-\(run.runID.description)")
+        }
+    }
+}
+
+/// Equatable message row to eliminate unnecessary re-renders of history cards during scrolling
+private struct MessageRowItem: View, Equatable {
+    let message: Message
+    let isStreamingRow: Bool
+    let isBusy: Bool
+    let displayMode: ThinkingDisplayMode
+    let thinkSeconds: Double?
+    let onEdit: (() -> Void)?
+    let onCopy: () -> Void
+    let onRegenerate: (() -> Void)?
+    let attachmentLoader: (ImageRef) async -> Data?
+    let workflowStore: WorkflowStore?
+    let activeID: UUID?
+    let chat: ChatStore
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.message.id == rhs.message.id &&
+        lhs.message.answer == rhs.message.answer &&
+        lhs.message.reasoning == rhs.message.reasoning &&
+        lhs.isStreamingRow == rhs.isStreamingRow &&
+        lhs.isBusy == rhs.isBusy &&
+        lhs.displayMode == rhs.displayMode &&
+        lhs.thinkSeconds == rhs.thinkSeconds &&
+        lhs.message.stats == rhs.message.stats &&
+        lhs.message.emptyOutcome == rhs.message.emptyOutcome &&
+        lhs.message.toolRuns == rhs.message.toolRuns
+    }
+
+    var body: some View {
+        if message.role == .user {
+            VStack(alignment: .trailing, spacing: Theme.Space.xs) {
+                UserBubble(message: message,
+                           onEdit: onEdit,
+                           onCopy: onCopy,
+                           attachmentLoader: attachmentLoader)
+                if let workflow = message.workflowRecord {
+                    NavigationLink {
+                        WorkflowSummaryPage(
+                            store: workflowStore,
+                            conversationID: workflow.conversationID ?? activeID
+                        )
+                    } label: {
+                        WorkflowMessageRow(record: workflow)
+                    }
+                    .buttonStyle(.plain)
+                    .frame(maxWidth: 360, alignment: .trailing)
+                }
+            }
+        } else if isStreamingRow {
+            StreamingRow(chat: chat, displayMode: displayMode)
+        } else {
+            AssistantView(
+                reasoning: message.reasoning ?? "",
+                answer: message.answer,
+                disclosurePhase: .answered(seconds: thinkSeconds),
+                displayMode: displayMode,
+                isStreaming: false,
+                stats: message.stats,
+                modelName: message.generatedBy?.displayName ?? "Model",
+                toolRuns: message.toolRuns ?? [],
+                emptyOutcome: message.emptyOutcome,
+                onCopy: onCopy,
+                onRegenerate: onRegenerate)
         }
     }
 }

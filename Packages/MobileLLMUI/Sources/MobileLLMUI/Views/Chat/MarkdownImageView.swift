@@ -215,9 +215,31 @@ final class MarkdownImageLoader: ObservableObject {
 
     init(source: MarkdownImageSource) {
         self.source = source
+        // Check memory cache IMMEDIATELY in init to eliminate 2-phase skeleton flicker and height jumps
+        let key = source.cacheKey
+        if let cached = MarkdownImageCache.shared.image(forKey: key) {
+            switch source {
+            case .data(let data):
+                _state = Published(initialValue: .success(image: cached, rawData: data))
+                return
+            case .remote(let url):
+                if let localURL = MarkdownImageDiskStore.localURLForRemote(url: url),
+                   let localData = try? Data(contentsOf: localURL), !localData.isEmpty {
+                    _state = Published(initialValue: .success(image: cached, rawData: localData))
+                    return
+                }
+            case .file(let url):
+                if let localData = try? Data(contentsOf: url), !localData.isEmpty {
+                    _state = Published(initialValue: .success(image: cached, rawData: localData))
+                    return
+                }
+            }
+        }
+        _state = Published(initialValue: .loading)
     }
 
     func load() {
+        if case .success = state { return }
         let key = source.cacheKey
         if let cached = MarkdownImageCache.shared.image(forKey: key) {
             // Instant memory cache hit (0ms UI render)

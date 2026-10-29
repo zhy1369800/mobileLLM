@@ -57,7 +57,7 @@ public struct RichContentWebView: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.webViewSnapshotController) private var snapshotController
-    @State private var internalHeight: CGFloat = 200
+    @State private var internalHeight: CGFloat = 260
 
     public init(
         htmlString: String,
@@ -86,8 +86,11 @@ public struct RichContentWebView: View {
                     htmlString: prepareHTML(htmlString, colorScheme: colorScheme, interactive: false),
                     isScrollEnabled: false,
                     onHeightCalculated: { height in
-                        internalHeight = max(80, height)
-                        onHeightCalculated?(internalHeight)
+                        let target = max(80, height)
+                        if abs(internalHeight - target) > 20 {
+                            internalHeight = target
+                            onHeightCalculated?(internalHeight)
+                        }
                     },
                     snapshotController: snapshotController
                 )

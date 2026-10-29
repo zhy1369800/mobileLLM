@@ -17,7 +17,25 @@ struct ThinkingDisclosure: View {
     let phase: Phase
     let displayMode: ThinkingDisplayMode
 
-    @State private var timeline = ThinkingTimeline()
+    @State private var timeline: ThinkingTimeline
+
+    init(reasoning: String, phase: Phase, displayMode: ThinkingDisplayMode) {
+        self.reasoning = reasoning
+        self.phase = phase
+        self.displayMode = displayMode
+        var initial = ThinkingTimeline()
+        if !reasoning.isEmpty {
+            switch phase {
+            case .thinking:
+                initial.onReasoning()
+            case let .answered(seconds):
+                initial.onReasoning()
+                if let seconds { initial.restoreCompleted(seconds: seconds) }
+                else { initial.onAnswerStart() }
+            }
+        }
+        _timeline = State(initialValue: initial)
+    }
 
     var body: some View {
         if displayMode == .hidden || reasoning.isEmpty {
@@ -96,19 +114,23 @@ struct ThinkingDisclosure: View {
     /// Drive the tested `ThinkingTimeline` from the current inputs.
     private func advance() {
         guard !reasoning.isEmpty else { return }
+        var updated = timeline
         switch phase {
         case .thinking:
-            timeline.onReasoning()
+            updated.onReasoning()
         case let .answered(seconds):
-            if timeline.hasReasoning {
+            if updated.hasReasoning {
                 // The store supplies accumulated model-reasoning time, excluding tool/network waits.
-                timeline.onAnswerStart(elapsed: seconds)
+                updated.onAnswerStart(elapsed: seconds)
             } else {
                 // A completed message opened directly (never observed the streaming thinking phase).
-                timeline.onReasoning()
-                if let seconds { timeline.restoreCompleted(seconds: seconds) }
-                else { timeline.onAnswerStart() }
+                updated.onReasoning()
+                if let seconds { updated.restoreCompleted(seconds: seconds) }
+                else { updated.onAnswerStart() }
             }
+        }
+        if updated != timeline {
+            timeline = updated
         }
     }
 

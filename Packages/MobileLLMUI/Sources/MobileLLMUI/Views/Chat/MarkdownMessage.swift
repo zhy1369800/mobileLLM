@@ -294,6 +294,8 @@ struct MarkdownBlock: Identifiable {
 enum MarkdownInline {
     private static let lock = NSLock()
     private static var cache: [String: AttributedString] = [:]
+    private static var order: [String] = []
+    private static let maxEntries = 2048
     private static let triggerChars: Set<Character> = ["*", "_", "`", "[", "]", "~", "<"]
 
     static func attributed(_ raw: String) -> AttributedString {
@@ -314,13 +316,64 @@ enum MarkdownInline {
         }
 
         lock.lock()
-        if cache.count >= 256 {
-            cache.removeAll(keepingCapacity: true)
+        if cache[raw] == nil {
+            order.append(raw)
+            if order.count > maxEntries {
+                // Gently evict the oldest 256 entries rather than wiping the entire cache,
+                // preventing catastrophic multi-frame hitching (frame drop avalanche) during fast scrolling.
+                let evictCount = min(256, order.count)
+                for _ in 0..<evictCount {
+                    let oldKey = order.removeFirst()
+                    cache.removeValue(forKey: oldKey)
+                }
+            }
         }
         cache[raw] = attr
         lock.unlock()
 
         return attr
+    }
+}
+
+/// Cache for parsed MarkdownBlock ASTs to eliminate repetitive AST parsing in LazyVStack
+enum MarkdownBlockCache {
+    private static let lock = NSLock()
+    private static var cache: [String: [MarkdownBlock]] = [:]
+    private static var order: [String] = []
+    private static let maxEntries = 512
+
+    static func get(text: String, isStreaming: Bool) -> [MarkdownBlock]? {
+        guard !isStreaming else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        return cache[text]
+    }
+
+    static func set(text: String, blocks: [MarkdownBlock], isStreaming: Bool) {
+        guard !isStreaming else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        if cache[text] == nil {
+            order.append(text)
+            if order.count > maxEntries {
+                let evicted = order.removeFirst()
+                cache.removeValue(forKey: evicted)
+            }
+        }
+        cache[text] = blocks
+    }
+
+    /// Background warm-up of markdown AST for an array of message texts
+    static func warmup(texts: [String]) {
+        guard !texts.isEmpty else { return }
+        Task.detached(priority: .utility) {
+            for text in texts {
+                if get(text: text, isStreaming: false) == nil {
+                    let parsed = MarkdownBlock.parse(text, isStreaming: false)
+                    set(text: text, blocks: parsed, isStreaming: false)
+                }
+            }
+        }
     }
 }
 
@@ -331,8 +384,16 @@ struct MarkdownMessage: View {
     var isStreaming: Bool = false
 
     var body: some View {
+        let blocks = isStreaming
+            ? MarkdownBlock.parse(text, isStreaming: true)
+            : (MarkdownBlockCache.get(text: text, isStreaming: false) ?? {
+                let parsed = MarkdownBlock.parse(text, isStreaming: false)
+                MarkdownBlockCache.set(text: text, blocks: parsed, isStreaming: false)
+                return parsed
+            }())
+
         VStack(alignment: .leading, spacing: Theme.Space.md) {
-            ForEach(MarkdownBlock.parse(text, isStreaming: isStreaming)) { block in
+            ForEach(blocks) { block in
                 switch block.kind {
                 case .prose(let s): ProseText(s)
                 case let .code(language, code): CodeCard(language: language, code: code)
@@ -434,9 +495,7 @@ struct ProseText: View {
         Text(MarkdownInline.attributed(raw))
             .font(.body)
             .foregroundStyle(Theme.textPrimary)
-            .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -457,9 +516,7 @@ struct MarkdownHeading: View {
         Text(MarkdownInline.attributed(text))
             .font(font)
             .foregroundStyle(Theme.textPrimary)
-            .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .fixedSize(horizontal: false, vertical: true)
             .padding(.top, level <= 2 ? Theme.Space.xs : 0)
     }
 }
@@ -479,13 +536,11 @@ struct MarkdownList: View {
                     Text(MarkdownInline.attributed(row.text))
                         .font(.body)
                         .foregroundStyle(Theme.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.leading, CGFloat(row.level) * Theme.Space.lg)
             }
         }
-        .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -502,8 +557,6 @@ struct MarkdownQuote: View {
         Text(MarkdownInline.attributed(lines.joined(separator: "\n")))
             .font(.body)
             .foregroundStyle(Theme.textSecondary)
-            .textSelection(.enabled)
-            .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, Theme.Space.md)
             .overlay(alignment: .leading) { Capsule().fill(Theme.textTertiary).frame(width: 2) }
@@ -516,9 +569,9 @@ struct MarkdownQuote: View {
 struct MarkdownTable: View {
     let header: [String]
     let rows: [[String]]
-    /// The table's actual available width, measured from the thread (the GeometryReader lives in the
-    /// background so it never greedily expands the card's height).
-    @State private var availableWidth: CGFloat = 0
+    /// Default to sensible initial reading column width (340) so the first frame renders full height immediately,
+    /// eliminating the 2-phase jitter from height: 0 to measured height.
+    @State private var availableWidth: CGFloat = 340
     @State private var isExpanded: Bool = false
 
     private static let maxCollapsedRows = 10
@@ -527,54 +580,61 @@ struct MarkdownTable: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
-            if availableWidth > 0 {
-                let widths = Self.columnWidths(
-                    header: header,
-                    rows: rows,
-                    totalWidth: availableWidth,
-                    spacing: Theme.Space.lg,
-                    horizontalPadding: Theme.Space.md * 2
-                )
-                tableRow(header, widths: widths, header: true)
-                Divider().overlay(Theme.hairline)
-                let displayRows = (isCollapsible && !isExpanded) ? Array(rows.prefix(Self.maxCollapsedRows)) : rows
-                ForEach(Array(displayRows.enumerated()), id: \.offset) { _, row in
-                    tableRow(row, widths: widths, header: false)
-                }
+            let width = max(200, availableWidth)
+            let widths = Self.columnWidths(
+                header: header,
+                rows: rows,
+                totalWidth: width,
+                spacing: Theme.Space.lg,
+                horizontalPadding: Theme.Space.md * 2
+            )
+            tableRow(header, widths: widths, header: true)
+            Divider().overlay(Theme.hairline)
+            let displayRows = (isCollapsible && !isExpanded) ? Array(rows.prefix(Self.maxCollapsedRows)) : rows
+            ForEach(Array(displayRows.enumerated()), id: \.offset) { _, row in
+                tableRow(row, widths: widths, header: false)
+            }
 
-                if isCollapsible && !isExpanded {
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            isExpanded = true
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text("查看完整内容")
-                                .font(.subheadline.weight(.medium))
-                            Image(systemName: "chevron.down")
-                                .font(.caption.weight(.bold))
-                        }
-                        .foregroundStyle(Theme.textSecondary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(Theme.surface2.opacity(0.6))
-                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .strokeBorder(Theme.hairline)
-                        )
+            if isCollapsible && !isExpanded {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isExpanded = true
                     }
-                    .buttonStyle(.plain)
-                    .padding(.top, 4)
+                } label: {
+                    HStack(spacing: 4) {
+                        Text("查看完整内容")
+                            .font(.subheadline.weight(.medium))
+                        Image(systemName: "chevron.down")
+                            .font(.caption.weight(.bold))
+                    }
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Theme.surface2.opacity(0.6))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .strokeBorder(Theme.hairline)
+                    )
                 }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
             }
         }
         .padding(Theme.Space.md)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(GeometryReader { g in
             Color.clear
-                .onAppear { availableWidth = g.size.width }
-                .onChange(of: g.size.width) { _, new in availableWidth = new }
+                .onAppear {
+                    if g.size.width > 50 && abs(availableWidth - g.size.width) > 30 {
+                        availableWidth = g.size.width
+                    }
+                }
+                .onChange(of: g.size.width) { _, new in
+                    if new > 50 && abs(availableWidth - new) > 30 {
+                        availableWidth = new
+                    }
+                }
         })
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous).strokeBorder(Theme.hairline))

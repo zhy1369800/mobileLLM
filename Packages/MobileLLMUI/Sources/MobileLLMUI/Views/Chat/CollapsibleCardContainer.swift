@@ -153,7 +153,7 @@ public struct CollapsibleCardContainer<Content: View, ExpandedContent: View>: Vi
                     }
                 )
                 .frame(
-                    maxHeight: (!isExpandedInPlace && isOverflowing) ? collapsedHeight : nil,
+                    maxHeight: isExpandedInPlace ? nil : collapsedHeight,
                     alignment: .topLeading
                 )
                 .clipped()
