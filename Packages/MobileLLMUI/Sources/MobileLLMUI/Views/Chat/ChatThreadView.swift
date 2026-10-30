@@ -25,6 +25,8 @@ struct ChatThreadView: View {
     var agentRuns: AgentRunStore? = nil
 
     @State private var atBottom = true
+    @State private var userScrolledUp = false
+    @State private var lastAutoScrollTime: Double = 0
     @State private var editing: Message?
     @State private var editText = ""
     /// A mid-history regenerate awaiting confirmation (nil = none pending).
@@ -111,19 +113,42 @@ struct ChatThreadView: View {
                     Color.clear
                         .frame(height: 1)
                         .id(bottomID)
-                        .onAppear { atBottom = true }
+                        .onAppear {
+                            atBottom = true
+                            userScrolledUp = false
+                        }
                         .onDisappear { atBottom = false }
                 }
                 .padding(Theme.Space.lg)
                 .frame(maxWidth: Theme.Layout.readingColumn, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 10).onChanged { value in
+                    // 用户向上滑动翻看历史或非触底状态拖拽时，手势绝对优先，挂起自动滚动
+                    if (value.translation.height > 0 || !atBottom) && !userScrolledUp {
+                        userScrolledUp = true
+                    }
+                }
+            )
             .scrollDismissesKeyboard(.interactively)
             .background(Theme.bg)
             .onChange(of: convo.messages.count) { _, _ in
                 // Only auto-follow when already at the bottom; yield unconditionally to user historical browsing
                 if atBottom {
                     scrollToBottom(proxy, animated: false)
+                }
+            }
+            .onChange(of: chat.streaming?.answer.count) { _, _ in
+                autoScrollDuringStreaming(proxy)
+            }
+            .onChange(of: chat.streaming?.reasoning.count) { _, _ in
+                autoScrollDuringStreaming(proxy)
+            }
+            .onChange(of: isBusy) { _, busy in
+                if busy && atBottom {
+                    userScrolledUp = false
+                    autoScrollDuringStreaming(proxy)
                 }
             }
             .onChange(of: chat.activeID) { _, _ in
@@ -192,6 +217,7 @@ struct ChatThreadView: View {
     private func scrollPill(_ proxy: ScrollViewProxy) -> some View {
         Button {
             atBottom = true
+            userScrolledUp = false
             scrollToBottom(proxy)
         } label: {
             Label(isBusy ? "New" : "Latest", systemImage: "chevron.down")
@@ -223,6 +249,23 @@ struct ChatThreadView: View {
             proxy.scrollTo(bottomID, anchor: .bottom)
         }
         atBottom = true
+        userScrolledUp = false
+    }
+
+    /// 80ms 时间窗口极轻量节流自动滚动，流式输出时平滑紧随最新内容，同时保证 0 多余电量与计算消耗
+    private func autoScrollDuringStreaming(_ proxy: ScrollViewProxy) {
+        guard atBottom, !userScrolledUp else { return }
+        let now = Date().timeIntervalSinceReferenceDate
+        guard now - lastAutoScrollTime > 0.08 else { return }
+        lastAutoScrollTime = now
+
+        if !Motion.reduce {
+            withAnimation(.easeOut(duration: 0.1)) {
+                proxy.scrollTo(bottomID, anchor: .bottom)
+            }
+        } else {
+            proxy.scrollTo(bottomID, anchor: .bottom)
+        }
     }
 
     // MARK: Edit & resend
