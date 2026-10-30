@@ -149,6 +149,9 @@ struct ChatThreadView: View {
                 if busy && atBottom {
                     userScrolledUp = false
                     autoScrollDuringStreaming(proxy)
+                } else if !busy && atBottom && !userScrolledUp {
+                    // 云端或本地高速生成结束时，进行最终的自然对齐，确保末尾内容完整贴底呈现
+                    scrollToBottom(proxy, animated: true)
                 }
             }
             .onChange(of: chat.activeID) { _, _ in
