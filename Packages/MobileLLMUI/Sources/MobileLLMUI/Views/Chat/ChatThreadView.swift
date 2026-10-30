@@ -26,7 +26,6 @@ struct ChatThreadView: View {
 
     @State private var atBottom = true
     @State private var userScrolledUp = false
-    @State private var lastAutoScrollTime: Double = 0
     @State private var editing: Message?
     @State private var editText = ""
     /// A mid-history regenerate awaiting confirmation (nil = none pending).
@@ -105,13 +104,13 @@ struct ChatThreadView: View {
             ScrollView(showsIndicators: true) {
                 LazyVStack(alignment: .leading, spacing: Theme.Space.lg) {
                     ForEach(convo.messages) { message in
-                        row(message, proxy: proxy).id(message.id)
+                        row(message).id(message.id)
                     }
                     if let agentRuns {
                         AgentRunPanelRow(store: agentRuns, conversationID: convo.id)
                     }
                     Color.clear
-                        .frame(height: 1)
+                        .frame(height: 8)
                         .id(bottomID)
                         .onAppear {
                             atBottom = true
@@ -123,6 +122,7 @@ struct ChatThreadView: View {
                 .frame(maxWidth: Theme.Layout.readingColumn, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
+            .defaultScrollAnchor(.bottom)
             .simultaneousGesture(
                 DragGesture(minimumDistance: 10).onChanged { value in
                     // 用户向上滑动翻看历史或非触底状态拖拽时，手势绝对优先，挂起自动滚动
@@ -142,7 +142,6 @@ struct ChatThreadView: View {
             .onChange(of: isBusy) { _, busy in
                 if busy && atBottom {
                     userScrolledUp = false
-                    followBottomDuringStreaming(proxy)
                 } else if !busy && atBottom && !userScrolledUp {
                     // 云端或本地高速生成结束时，进行最终的自然对齐，确保末尾内容完整贴底呈现
                     scrollToBottom(proxy, animated: true)
@@ -170,7 +169,7 @@ struct ChatThreadView: View {
         MarkdownBlockCache.warmup(texts: texts)
     }
 
-    @ViewBuilder private func row(_ message: Message, proxy: ScrollViewProxy) -> some View {
+    @ViewBuilder private func row(_ message: Message) -> some View {
         let isStreamingRow = message.id == chat.streamingMessageID
         MessageRowItem(
             message: message,
@@ -184,8 +183,7 @@ struct ChatThreadView: View {
             attachmentLoader: { await chat.attachmentData($0) },
             workflowStore: chat.workflowStore,
             activeID: chat.activeID,
-            chat: chat,
-            onFollowBottom: { followBottomDuringStreaming(proxy) }
+            chat: chat
         )
         .equatable()
     }
@@ -250,16 +248,6 @@ struct ChatThreadView: View {
         userScrolledUp = false
     }
 
-    /// 50ms 极轻量节流自动滚动，流式输出时平滑紧随最新内容，绝无 withAnimation 减速插值冲突
-    private func followBottomDuringStreaming(_ proxy: ScrollViewProxy) {
-        guard atBottom, !userScrolledUp else { return }
-        let now = Date().timeIntervalSinceReferenceDate
-        guard now - lastAutoScrollTime > 0.05 else { return }
-        lastAutoScrollTime = now
-
-        proxy.scrollTo(bottomID, anchor: .bottom)
-    }
-
     // MARK: Edit & resend
 
     private func beginEdit(_ message: Message) {
@@ -309,7 +297,6 @@ struct ChatThreadView: View {
 private struct StreamingRow: View {
     let chat: ChatStore
     let displayMode: ThinkingDisplayMode
-    var onFollowBottom: () -> Void = {}
 
     @State private var shownReasoning = ""
     @State private var targetReasoning = ""
@@ -360,12 +347,6 @@ private struct StreamingRow: View {
         .onChange(of: chat.streaming?.reasoning ?? "") { _, new in
             targetReasoning = new
             ensureReasoningTicker()
-        }
-        .onChange(of: chat.streaming?.answer ?? "") { _, _ in
-            onFollowBottom()
-        }
-        .onChange(of: shownReasoning) { _, _ in
-            onFollowBottom()
         }
         .onDisappear {
             reasoningTicker?.cancel()
@@ -418,7 +399,6 @@ private struct MessageRowItem: View, Equatable {
     let workflowStore: WorkflowStore?
     let activeID: UUID?
     let chat: ChatStore
-    var onFollowBottom: () -> Void = {}
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.message.id == rhs.message.id &&
@@ -454,7 +434,7 @@ private struct MessageRowItem: View, Equatable {
                 }
             }
         } else if isStreamingRow {
-            StreamingRow(chat: chat, displayMode: displayMode, onFollowBottom: onFollowBottom)
+            StreamingRow(chat: chat, displayMode: displayMode)
         } else {
             AssistantView(
                 reasoning: message.reasoning ?? "",
