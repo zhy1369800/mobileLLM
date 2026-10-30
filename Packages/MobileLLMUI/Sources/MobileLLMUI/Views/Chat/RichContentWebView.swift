@@ -85,11 +85,11 @@ public struct RichContentWebView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                // Card preview mode: constrained to measured content height
+                // Card preview mode: constrained to measured content height or fixed preview height
                 RepresentedWebView(
                     htmlString: prepareHTML(htmlString, colorScheme: colorScheme, interactive: false),
                     isScrollEnabled: false,
-                    onHeightCalculated: { height in
+                    onHeightCalculated: onHeightCalculated == nil ? nil : { height in
                         let target = max(80, height)
                         if abs(internalHeight - target) > 20 {
                             internalHeight = target
@@ -99,7 +99,7 @@ public struct RichContentWebView: View {
                     snapshotController: snapshotController,
                     onSVGCaptured: onSVGCaptured
                 )
-                .frame(height: internalHeight)
+                .frame(height: onHeightCalculated == nil ? 240 : internalHeight)
             }
         }
     }

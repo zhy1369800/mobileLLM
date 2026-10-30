@@ -100,7 +100,7 @@ struct ChatThreadView: View {
 
     private func thread(_ convo: Conversation) -> some View {
         ScrollViewReader { proxy in
-            ScrollView(showsIndicators: false) {
+            ScrollView(showsIndicators: true) {
                 LazyVStack(alignment: .leading, spacing: Theme.Space.lg) {
                     ForEach(convo.messages) { message in
                         row(message).id(message.id)

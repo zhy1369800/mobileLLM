@@ -27,6 +27,14 @@ final class MermaidSVGCache: @unchecked Sendable {
 }
 
 public struct MermaidDiagramView: View {
+    @State private var shouldMountWebView: Bool = false
+
+    /// Global shared cache for sanitized Mermaid code
+    private static let sanitizeCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 128
+        return cache
+    }()
 
     private var cacheKey: String {
         let prefix = colorScheme == .dark ? "dark" : "light"
@@ -90,21 +98,52 @@ public struct MermaidDiagramView: View {
             RichContentWebView(
                 htmlString: generateStaticSVGHTML(svg: cachedSVG, colorScheme: colorScheme),
                 isScrollEnabled: false,
-                onHeightCalculated: onHeightCalculated
+                onHeightCalculated: nil
             )
             .frame(height: 240)
-        } else {
-            // Cold render: render with full mermaid engine and cache the resulting SVG string
+        } else if shouldMountWebView {
+            // Settled in viewport: smoothly mount WebKit to generate and cache SVG
             RichContentWebView(
                 htmlString: generateMermaidHTML(code: code, colorScheme: colorScheme, interactive: false),
                 isScrollEnabled: false,
-                onHeightCalculated: onHeightCalculated,
+                onHeightCalculated: nil,
                 onSVGCaptured: { svg in
                     MermaidSVGCache.shared.setSVG(svg, forKey: cacheKey)
                 }
             )
             .frame(height: 240)
+        } else {
+            // Fast scroll phase: pure native lightweight skeleton to preserve 120fps and 0 WebKit overhead
+            skeletonPlaceholder
+                .frame(height: 240)
+                .task {
+                    // 75ms debounce delay: if user is fling-scrolling past this card, the task will be cancelled automatically!
+                    try? await Task.sleep(nanoseconds: 75_000_000)
+                    if !Task.isCancelled {
+                        withAnimation(.easeIn(duration: 0.15)) {
+                            shouldMountWebView = true
+                        }
+                    }
+                }
         }
+    }
+
+    private var skeletonPlaceholder: some View {
+        VStack(spacing: Theme.Space.sm) {
+            Image(systemName: "point.3.connected.trianglepath.dotted")
+                .font(.system(size: 24))
+                .foregroundStyle(Theme.accent.opacity(0.7))
+
+            Text("图表排版中...")
+                .font(.caption2)
+                .foregroundStyle(Theme.textTertiary)
+
+            ProgressView()
+                .controlSize(.small)
+                .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.surface)
     }
 
     private func generateStaticSVGHTML(svg: String, colorScheme: ColorScheme) -> String {
@@ -165,6 +204,7 @@ public struct MermaidDiagramView: View {
 
         let hasBundledEngine = !Self.bundledMermaidJS.isEmpty
 
+        // Use the single global shared copy of bundledMermaidJS — zero redundant duplicate allocations in memory
         let scriptTag = hasBundledEngine
             ? "<script>\(Self.bundledMermaidJS)</script>"
             : "<script src=\"https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js\"></script>"
@@ -380,6 +420,9 @@ public struct MermaidDiagramView: View {
     /// 1. Splits inline boolean branching operators like `||` into standard multi-line statements.
     /// 2. Automatically wraps unquoted labels containing special characters or unescaped quotes in double quotes.
     public static func sanitizeMermaidCode(_ code: String) -> String {
+        if let cached = sanitizeCache.object(forKey: code as NSString) {
+            return cached as String
+        }
         let lines = code.components(separatedBy: "\n")
         var isERDiagram = false
         for line in lines {
@@ -485,6 +528,8 @@ public struct MermaidDiagramView: View {
             return finalLine
         }
 
-        return sanitizedLines.joined(separator: "\n")
+        let finalResult = sanitizedLines.joined(separator: "\n")
+        sanitizeCache.setObject(finalResult as NSString, forKey: code as NSString)
+        return finalResult
     }
 }
