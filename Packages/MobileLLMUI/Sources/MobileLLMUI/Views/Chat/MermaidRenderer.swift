@@ -5,7 +5,34 @@ import AppUI
 
 /// Renders Mermaid diagram specifications using the 100% official, fully offline Mermaid engine
 /// bundled directly in the app. Zero network lag, zero CDN reliance, and complete syntax support.
+/// In-memory cache for pre-rendered Mermaid SVG markup, completely bypassing repeated JS execution and WebKit lag.
+final class MermaidSVGCache: @unchecked Sendable {
+    static let shared = MermaidSVGCache()
+
+    private let cache = NSCache<NSString, NSString>()
+
+    private init() {
+        cache.countLimit = 128
+        cache.totalCostLimit = 16 * 1024 * 1024 // 16 MB text
+    }
+
+    func svg(forKey key: String) -> String? {
+        cache.object(forKey: key as NSString) as String?
+    }
+
+    func setSVG(_ svg: String, forKey key: String) {
+        guard !svg.isEmpty, svg.contains("<svg") else { return }
+        cache.setObject(svg as NSString, forKey: key as NSString)
+    }
+}
+
 public struct MermaidDiagramView: View {
+
+    private var cacheKey: String {
+        let prefix = colorScheme == .dark ? "dark" : "light"
+        return "\(prefix)_\(code.hashValue)"
+    }
+
     public let code: String
     public let isInteractiveZoom: Bool
     public var onHeightCalculated: ((CGFloat) -> Void)?
@@ -51,11 +78,76 @@ public struct MermaidDiagramView: View {
     private static let sanitizeSpecialCharacters = CharacterSet(charactersIn: "()[]{}=^√·*+/%&|<>:;,!?~#\\\"？")
 
     public var body: some View {
-        RichContentWebView(
-            htmlString: generateMermaidHTML(code: code, colorScheme: colorScheme, interactive: isInteractiveZoom),
-            isScrollEnabled: isInteractiveZoom,
-            onHeightCalculated: onHeightCalculated
-        )
+        if isInteractiveZoom {
+            // Fullscreen interactive mode: full dynamic WebView with zoom/pan capabilities
+            RichContentWebView(
+                htmlString: generateMermaidHTML(code: code, colorScheme: colorScheme, interactive: true),
+                isScrollEnabled: true,
+                onHeightCalculated: onHeightCalculated
+            )
+        } else if let cachedSVG = MermaidSVGCache.shared.svg(forKey: cacheKey) {
+            // Warm cache hit: render pre-generated static SVG instantly without 2MB mermaid.js library overhead!
+            RichContentWebView(
+                htmlString: generateStaticSVGHTML(svg: cachedSVG, colorScheme: colorScheme),
+                isScrollEnabled: false,
+                onHeightCalculated: onHeightCalculated
+            )
+            .frame(height: 240)
+        } else {
+            // Cold render: render with full mermaid engine and cache the resulting SVG string
+            RichContentWebView(
+                htmlString: generateMermaidHTML(code: code, colorScheme: colorScheme, interactive: false),
+                isScrollEnabled: false,
+                onHeightCalculated: onHeightCalculated,
+                onSVGCaptured: { svg in
+                    MermaidSVGCache.shared.setSVG(svg, forKey: cacheKey)
+                }
+            )
+            .frame(height: 240)
+        }
+    }
+
+    private func generateStaticSVGHTML(svg: String, colorScheme: ColorScheme) -> String {
+        let isDark = colorScheme == .dark
+        let bgColor = isDark ? "#221B12" : "#F7F1E7"
+        let textColor = isDark ? "#EFE6D5" : "#211B12"
+
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+            <style>
+                * { box-sizing: border-box; }
+                html, body {
+                    width: 100%;
+                    height: 100%;
+                    margin: 0;
+                    padding: 12px 8px;
+                    background-color: \(bgColor);
+                    color: \(textColor);
+                    overflow: hidden;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                }
+                svg {
+                    width: 100% !important;
+                    max-width: 100% !important;
+                    max-height: 220px !important;
+                    height: auto !important;
+                    display: block;
+                    margin: 0 auto;
+                }
+            </style>
+        </head>
+        <body>
+            \(svg)
+        </body>
+        </html>
+        """
     }
 
     private func generateMermaidHTML(code: String, colorScheme: ColorScheme, interactive: Bool) -> String {
@@ -266,6 +358,9 @@ public struct MermaidDiagramView: View {
                                         svg.style.width = '100%';
                                         svg.style.height = 'auto';
                                     }
+                                }
+                                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.mermaidSVG) {
+                                    window.webkit.messageHandlers.mermaidSVG.postMessage(res.svg);
                                 }
                             })
                             .catch(function(err) {

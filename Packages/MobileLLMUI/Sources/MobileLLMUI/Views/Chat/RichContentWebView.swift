@@ -54,6 +54,7 @@ public struct RichContentWebView: View {
     public let htmlString: String
     public let isScrollEnabled: Bool
     public var onHeightCalculated: ((CGFloat) -> Void)?
+    public var onSVGCaptured: ((String) -> Void)?
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.webViewSnapshotController) private var snapshotController
@@ -62,11 +63,13 @@ public struct RichContentWebView: View {
     public init(
         htmlString: String,
         isScrollEnabled: Bool = false,
-        onHeightCalculated: ((CGFloat) -> Void)? = nil
+        onHeightCalculated: ((CGFloat) -> Void)? = nil,
+        onSVGCaptured: ((String) -> Void)? = nil
     ) {
         self.htmlString = htmlString
         self.isScrollEnabled = isScrollEnabled
         self.onHeightCalculated = onHeightCalculated
+        self.onSVGCaptured = onSVGCaptured
     }
 
     public var body: some View {
@@ -77,7 +80,8 @@ public struct RichContentWebView: View {
                     htmlString: prepareHTML(htmlString, colorScheme: colorScheme, interactive: true),
                     isScrollEnabled: true,
                     onHeightCalculated: nil,
-                    snapshotController: snapshotController
+                    snapshotController: snapshotController,
+                    onSVGCaptured: onSVGCaptured
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -92,7 +96,8 @@ public struct RichContentWebView: View {
                             onHeightCalculated?(internalHeight)
                         }
                     },
-                    snapshotController: snapshotController
+                    snapshotController: snapshotController,
+                    onSVGCaptured: onSVGCaptured
                 )
                 .frame(height: internalHeight)
             }
@@ -198,12 +203,17 @@ private struct RepresentedWebView: UIViewRepresentable {
     let isScrollEnabled: Bool
     let onHeightCalculated: ((CGFloat) -> Void)?
     var snapshotController: WebViewSnapshotController? = nil
+    var onSVGCaptured: ((String) -> Void)? = nil
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         // Allow disk caching so static engines load in 0ms on subsequent views
         config.websiteDataStore = .default()
+
+        let contentController = WKUserContentController()
+        contentController.add(context.coordinator, name: "mermaidSVG")
+        config.userContentController = contentController
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.isOpaque = false
@@ -214,6 +224,7 @@ private struct RepresentedWebView: UIViewRepresentable {
         webView.scrollView.contentInsetAdjustmentBehavior = .automatic
         webView.navigationDelegate = context.coordinator
         snapshotController?.targetView = webView
+        context.coordinator.targetWebView = webView
         return webView
     }
 
@@ -221,7 +232,9 @@ private struct RepresentedWebView: UIViewRepresentable {
         webView.scrollView.isScrollEnabled = isScrollEnabled
         webView.scrollView.alwaysBounceVertical = isScrollEnabled
         context.coordinator.onHeightCalculated = onHeightCalculated
+        context.coordinator.onSVGCaptured = onSVGCaptured
         snapshotController?.targetView = webView
+        context.coordinator.targetWebView = webView
 
         if context.coordinator.currentHTML != htmlString {
             context.coordinator.currentHTML = htmlString
@@ -229,25 +242,42 @@ private struct RepresentedWebView: UIViewRepresentable {
         }
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onHeightCalculated: onHeightCalculated)
+    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
+        uiView.configuration.userContentController.removeScriptMessageHandler(forName: "mermaidSVG")
+        coordinator.targetWebView = nil
     }
 
-    class Coordinator: NSObject, WKNavigationDelegate {
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onHeightCalculated: onHeightCalculated, onSVGCaptured: onSVGCaptured)
+    }
+
+    class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var currentHTML: String = ""
         var onHeightCalculated: ((CGFloat) -> Void)?
+        var onSVGCaptured: ((String) -> Void)?
+        weak var targetWebView: WKWebView?
 
-        init(onHeightCalculated: ((CGFloat) -> Void)?) {
+        init(onHeightCalculated: ((CGFloat) -> Void)?, onSVGCaptured: ((String) -> Void)?) {
             self.onHeightCalculated = onHeightCalculated
+            self.onSVGCaptured = onSVGCaptured
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            self.targetWebView = webView
             guard let onHeightCalculated = onHeightCalculated else { return }
             webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)") { result, _ in
                 if let height = result as? CGFloat, height > 0 {
                     DispatchQueue.main.async {
                         onHeightCalculated(height)
                     }
+                }
+            }
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "mermaidSVG", let svg = message.body as? String, !svg.isEmpty {
+                DispatchQueue.main.async { [weak self] in
+                    self?.onSVGCaptured?(svg)
                 }
             }
         }
@@ -267,21 +297,30 @@ private struct RepresentedWebView: NSViewRepresentable {
     let isScrollEnabled: Bool
     let onHeightCalculated: ((CGFloat) -> Void)?
     var snapshotController: WebViewSnapshotController? = nil
+    var onSVGCaptured: ((String) -> Void)? = nil
 
     func makeNSView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         config.websiteDataStore = .default()
 
+        let contentController = WKUserContentController()
+        contentController.add(context.coordinator, name: "mermaidSVG")
+        config.userContentController = contentController
+
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = context.coordinator
         snapshotController?.targetView = webView
+        context.coordinator.targetWebView = webView
         return webView
     }
 
     func updateNSView(_ webView: WKWebView, context: Context) {
         context.coordinator.onHeightCalculated = onHeightCalculated
+        context.coordinator.onSVGCaptured = onSVGCaptured
+        snapshotController?.targetView = webView
+        context.coordinator.targetWebView = webView
 
         if context.coordinator.currentHTML != htmlString {
             context.coordinator.currentHTML = htmlString
@@ -289,25 +328,42 @@ private struct RepresentedWebView: NSViewRepresentable {
         }
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onHeightCalculated: onHeightCalculated)
+    static func dismantleNSView(_ nsView: WKWebView, coordinator: Coordinator) {
+        nsView.configuration.userContentController.removeScriptMessageHandler(forName: "mermaidSVG")
+        coordinator.targetWebView = nil
     }
 
-    class Coordinator: NSObject, WKNavigationDelegate {
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onHeightCalculated: onHeightCalculated, onSVGCaptured: onSVGCaptured)
+    }
+
+    class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         var currentHTML: String = ""
         var onHeightCalculated: ((CGFloat) -> Void)?
+        var onSVGCaptured: ((String) -> Void)?
+        weak var targetWebView: WKWebView?
 
-        init(onHeightCalculated: ((CGFloat) -> Void)?) {
+        init(onHeightCalculated: ((CGFloat) -> Void)?, onSVGCaptured: ((String) -> Void)?) {
             self.onHeightCalculated = onHeightCalculated
+            self.onSVGCaptured = onSVGCaptured
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            self.targetWebView = webView
             guard let onHeightCalculated = onHeightCalculated else { return }
             webView.evaluateJavaScript("Math.max(document.body.scrollHeight, document.documentElement.scrollHeight)") { result, _ in
                 if let height = result as? CGFloat, height > 0 {
                     DispatchQueue.main.async {
                         onHeightCalculated(height)
                     }
+                }
+            }
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "mermaidSVG", let svg = message.body as? String, !svg.isEmpty {
+                DispatchQueue.main.async { [weak self] in
+                    self?.onSVGCaptured?(svg)
                 }
             }
         }
