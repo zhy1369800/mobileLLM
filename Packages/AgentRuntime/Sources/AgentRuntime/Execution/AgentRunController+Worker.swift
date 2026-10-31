@@ -1007,9 +1007,13 @@ extension AgentRunController {
             reported,
             structuredRepair: reservation.maximumUsage.quantities[.structuredRepairs] > 0
         )
-        let isRemote = facts.submission.flatMap { submission in
-            try? modelProviders.provider(for: submission.frozenInputs.modelSelection).descriptor.location == .remote
-        } ?? false
+        let isRemote: Bool
+        if let frozen = try? await frozenInputs(facts),
+           let provider = try? modelProviders.provider(for: frozen.modelSelection) {
+            isRemote = provider.descriptor.location == .remote
+        } else {
+            isRemote = false
+        }
         // For completed remote attempts, clamp usage to reservation bounds so slight thinking/token variance
         // on the server never aborts an already-successful reply.
         let actual: AgentUsage

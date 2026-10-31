@@ -67,7 +67,6 @@ struct AgentRunPanel: View {
                 if expanded {
                     stepsList(run)
                 }
-                controls(run)
             }
             .padding(Theme.Space.md)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -199,36 +198,6 @@ struct AgentRunPanel: View {
         .padding(.top, Theme.Space.xs)
     }
 
-    // MARK: Controls
-
-    @ViewBuilder
-    private func controls(_ run: AgentRunPresentation) -> some View {
-        if run.isActive || run.isResumable || run.state == .waitingForApproval
-            || run.state == .waitingForUser || run.state == .waitingForReconciliation
-        {
-            HStack(spacing: Theme.Space.sm) {
-                if run.isActive {
-                    Button {
-                        Task { await store.pause(conversationID: conversationID) }
-                    } label: {
-                        Label("Pause", systemImage: "pause.fill")
-                    }
-                    .buttonStyle(StudioButtonStyle(.secondary))
-                    .accessibilityLabel("Pause run")
-                    // Stop lives on the composer's Send↔Stop button; duplicating it here would
-                    // present two identical controls for one action.
-                } else if run.isResumable {
-                    Button {
-                        Task { await store.resume(conversationID: conversationID) }
-                    } label: {
-                        Label("Resume", systemImage: "play.fill")
-                    }
-                    .buttonStyle(StudioButtonStyle(.primary))
-                    .accessibilityLabel("Resume run")
-                }
-            }
-        }
-    }
 }
 
 /// One expandable action row. Collapsed: icon + readable name + one-line preview of the concrete

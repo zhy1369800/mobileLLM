@@ -421,7 +421,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
 
         let started = ContinuousClock.now
         let firstBody = try body()
-        var (parsed, streamed, data) = try await attempt(
+        var (parsed, streamed, _) = try await attempt(
             firstBody,
             allowEffortFallback: true,
             allowAutoFallback: parameters.outputBudgetMode == .auto,
@@ -442,7 +442,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                 retryCeiling
             )
             let retryBody = try body(maxOutputTokensOverride: bumped)
-            let (retried, retriedStreamed, retriedData) = try await attempt(
+            let (retried, retriedStreamed, _) = try await attempt(
                 retryBody,
                 allowEffortFallback: false,
                 allowAutoFallback: false,
@@ -470,12 +470,10 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                         )
                     }
                     parsed = retried
-                    data = retriedData
                 }
             } else if !retried.isTruncated || retried.text.utf8.count > parsed.text.utf8.count {
                 parsed = retried
                 streamed = retriedStreamed
-                data = retriedData
             }
         }
 
@@ -484,7 +482,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
             // handled below; both stay inside the same authorization boundary).
             if parsed.text.isEmpty, parsed.calls.isEmpty, parsed.hasReasoning {
                 let retryBody = try body(reasoningDisabled: true)
-                let (retried, retriedStreamed, retriedData) = try await attempt(
+                let (retried, retriedStreamed, _) = try await attempt(
                     retryBody,
                     allowEffortFallback: false,
                     allowAutoFallback: false,
@@ -492,13 +490,12 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                 )
                 parsed = retried
                 streamed = retriedStreamed
-                data = retriedData
             }
         } else if parsed.text.isEmpty, parsed.calls.isEmpty, parsed.hasReasoning {
             // Streamed reasoning-only: reasoning was already shown live; retry once without reasoning
             // so the ANSWER streams too (no duplication of answer text).
             let retryBody = try body(reasoningDisabled: true)
-            let (retried, retriedStreamed, retriedData) = try await attempt(
+            let (retried, retriedStreamed, _) = try await attempt(
                 retryBody,
                 allowEffortFallback: false,
                 allowAutoFallback: false,
@@ -506,7 +503,6 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
             )
             parsed = retried
             streamed = retriedStreamed
-            data = retriedData
         }
         try Task.checkCancellation()
         let elapsedMilliseconds = UInt64(
