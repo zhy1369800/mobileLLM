@@ -26,7 +26,8 @@ struct ChatThreadView: View {
 
     @State private var atBottom = true
     @State private var userScrolledUp = false
-    @State private var autoScrollTask: Task<Void, Never>?
+    @State private var viewportHeight: CGFloat = 0
+    @State private var isContentOverflowing = false
     @State private var editing: Message?
     @State private var editText = ""
     /// A mid-history regenerate awaiting confirmation (nil = none pending).
@@ -111,7 +112,7 @@ struct ChatThreadView: View {
                         AgentRunPanelRow(store: agentRuns, conversationID: convo.id)
                     }
                     Color.clear
-                        .frame(height: 8)
+                        .frame(height: 1)
                         .id(bottomID)
                         .onAppear {
                             atBottom = true
@@ -119,14 +120,42 @@ struct ChatThreadView: View {
                         }
                         .onDisappear { atBottom = false }
                 }
-                .padding(Theme.Space.lg)
+                .padding([.top, .horizontal], Theme.Space.lg)
                 .frame(maxWidth: Theme.Layout.readingColumn, alignment: .leading)
                 .frame(maxWidth: .infinity)
+                .background(GeometryReader { geo in
+                    Color.clear
+                        .onAppear {
+                            let overflowing = viewportHeight > 0 && geo.size.height > viewportHeight
+                            if isContentOverflowing != overflowing {
+                                isContentOverflowing = overflowing
+                            }
+                        }
+                        .onChange(of: geo.size.height) { oldHeight, newHeight in
+                            let overflowing = viewportHeight > 0 && newHeight > viewportHeight
+                            if isContentOverflowing != overflowing {
+                                isContentOverflowing = overflowing
+                            }
+                            // 流式输出中，仅当内容总高度已超过可视范围、高度继续增长（换行/新段落）且未被手势打断时，才跟随到底部
+                            if isBusy && !userScrolledUp && overflowing && newHeight > oldHeight + 0.5 {
+                                proxy.scrollTo(bottomID, anchor: .bottom)
+                            }
+                        }
+                })
             }
+            .background(GeometryReader { geo in
+                Color.clear
+                    .onAppear { viewportHeight = geo.size.height }
+                    .onChange(of: geo.size.height) { _, newHeight in
+                        if abs(viewportHeight - newHeight) > 0.5 {
+                            viewportHeight = newHeight
+                        }
+                    }
+            })
             .simultaneousGesture(
                 DragGesture(minimumDistance: 10).onChanged { value in
-                    // 用户向上滑动翻看历史或非触底状态拖拽时，手势绝对优先，挂起自动滚动
-                    if (value.translation.height > 0 || !atBottom) && !userScrolledUp {
+                    // 用户手指往下拉动屏幕（翻看上方历史内容）时，手势绝对优先，立即停止自动滚动
+                    if value.translation.height > 10 && !userScrolledUp {
                         userScrolledUp = true
                     }
                 }
@@ -136,47 +165,42 @@ struct ChatThreadView: View {
             .onChange(of: convo.messages.count) { _, _ in
                 // Only auto-follow when already at the bottom; yield unconditionally to user historical browsing
                 if atBottom {
-                    scrollToBottom(proxy, animated: false)
+                    userScrolledUp = false
+                    if convo.messages.count > 2 || isContentOverflowing {
+                        scrollToBottom(proxy, animated: false)
+                    }
                 }
             }
             .onChange(of: isBusy) { _, busy in
-                autoScrollTask?.cancel()
-                autoScrollTask = nil
-                if busy {
-                    if atBottom {
-                        userScrolledUp = false
-                    }
-                    autoScrollTask = Task { @MainActor in
-                        while !Task.isCancelled && isBusy {
-                            try? await Task.sleep(nanoseconds: 100_000_000)
-                            if Task.isCancelled || !isBusy { break }
-                            // 仅在超出屏幕且未被手势打断时平滑跟随（未传 anchor，不足一屏滚动量恒为0）
-                            if atBottom && !userScrolledUp {
-                                proxy.scrollTo(bottomID)
-                            }
-                        }
-                    }
-                } else if !busy && atBottom && !userScrolledUp {
-                    // 云端或本地高速生成结束时，进行最终的自然对齐，确保末尾内容完整贴底呈现
-                    scrollToBottom(proxy, animated: true)
+                if busy && atBottom {
+                    userScrolledUp = false
+                } else if !busy && !userScrolledUp && isContentOverflowing {
+                    scrollToBottom(proxy, animated: false)
                 }
             }
             .onChange(of: chat.activeID) { _, _ in
-                autoScrollTask?.cancel()
-                autoScrollTask = nil
-                scrollToBottom(proxy, animated: false)
+                userScrolledUp = false
+                isContentOverflowing = convo.messages.count > 2
+                if convo.messages.count > 2 {
+                    scrollToBottom(proxy, animated: false)
+                } else {
+                    atBottom = true
+                }
                 warmupCurrentConversation(convo)
             }
             .onAppear {
-                scrollToBottom(proxy, animated: false)
+                if convo.messages.count > 2 {
+                    scrollToBottom(proxy, animated: false)
+                } else {
+                    atBottom = true
+                    userScrolledUp = false
+                }
                 warmupCurrentConversation(convo)
             }
-            .onDisappear {
-                autoScrollTask?.cancel()
-                autoScrollTask = nil
-            }
             .overlay(alignment: .bottom) {
-                if !atBottom { scrollPill(proxy) }
+                if !atBottom && (!isBusy || userScrolledUp) {
+                    scrollPill(proxy)
+                }
             }
         }
     }
@@ -260,9 +284,9 @@ struct ChatThreadView: View {
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
         if animated && !Motion.reduce {
-            withAnimation(Motion.canvas) { proxy.scrollTo(bottomID) }
+            withAnimation(Motion.canvas) { proxy.scrollTo(bottomID, anchor: .bottom) }
         } else {
-            proxy.scrollTo(bottomID)
+            proxy.scrollTo(bottomID, anchor: .bottom)
         }
         atBottom = true
         userScrolledUp = false
