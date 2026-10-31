@@ -17,8 +17,16 @@ private enum IncrementalThinkingSplitter {
     private static var cachedStableByteCount: Int = 0
     private static var cachedStableChunks: [ThinkingChunk] = []
 
-    static func split(_ text: String) -> [ThinkingChunk] {
+    /// Splits reasoning text into ~1.2 KB blocks.
+    /// Non-streaming (historical) traces use a pure stateless function so multiple thinking cards
+    /// never contend for locks or thrash global cache. Live streaming traces incrementally reuse
+    /// completed stable blocks and strictly verify full UTF-8 prefixes.
+    static func split(text: String, isStreaming: Bool) -> [ThinkingChunk] {
         guard !text.isEmpty else { return [] }
+        guard isStreaming else {
+            return splitStatic(text)
+        }
+
         lock.lock()
         defer { lock.unlock() }
 
@@ -67,16 +75,38 @@ private enum IncrementalThinkingSplitter {
         return result
     }
 
+    /// Pure stateless chunker for finalized historical messages — zero locks, zero memory retention.
+    private static func splitStatic(_ text: String) -> [ThinkingChunk] {
+        guard text.utf8.count >= chunkByteThreshold else {
+            return [ThinkingChunk(id: 0, text: text)]
+        }
+        var chunks: [ThinkingChunk] = []
+        var remainder = text[...]
+        while remainder.utf8.count >= chunkByteThreshold {
+            let limit = remainder.index(
+                remainder.startIndex,
+                offsetBy: chunkByteThreshold,
+                limitedBy: remainder.endIndex
+            ) ?? remainder.endIndex
+            let window = remainder[..<limit]
+            if let newline = window.lastIndex(of: "\n"), newline > remainder.startIndex {
+                chunks.append(ThinkingChunk(id: chunks.count, text: String(remainder[..<newline])))
+                remainder = remainder[remainder.index(after: newline)...]
+            } else {
+                chunks.append(ThinkingChunk(id: chunks.count, text: String(remainder[..<limit])))
+                remainder = remainder[limit...]
+            }
+        }
+        if !remainder.isEmpty {
+            chunks.append(ThinkingChunk(id: chunks.count, text: String(remainder)))
+        }
+        return chunks
+    }
+
     private static func hasMatchingPrefix(_ text: String) -> Bool {
         guard cachedStableByteCount > 0 else { return true }
         guard text.utf8.count >= cachedStableByteCount else { return false }
-        if cachedStableByteCount <= 64 {
-            return text.utf8.starts(with: cachedSourcePrefix.utf8)
-        }
-        let checkIdx = text.utf8.index(text.utf8.startIndex, offsetBy: cachedStableByteCount - 1)
-        let prefixLastIdx = cachedSourcePrefix.utf8.index(before: cachedSourcePrefix.utf8.endIndex)
-        return text.utf8.first == cachedSourcePrefix.utf8.first
-            && text.utf8[checkIdx] == cachedSourcePrefix.utf8[prefixLastIdx]
+        return text.utf8.starts(with: cachedSourcePrefix.utf8)
     }
 }
 
@@ -174,8 +204,9 @@ struct ThinkingDisclosure: View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             header
             if isExpanded {
-                let chunks = IncrementalThinkingSplitter.split(reasoning)
-                let isDone = phase != .thinking
+                let isStreaming = phase == .thinking
+                let chunks = IncrementalThinkingSplitter.split(text: reasoning, isStreaming: isStreaming)
+                let isDone = !isStreaming
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(chunks) { chunk in
                         ThinkingChunkRow(text: chunk.text, selectable: isDone)

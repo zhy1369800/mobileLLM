@@ -418,13 +418,7 @@ enum MarkdownBlockCache {
     private static func hasMatchingStreamPrefix(_ text: String) -> Bool {
         guard streamStableByteCount > 0 else { return true }
         guard text.utf8.count >= streamStableByteCount else { return false }
-        if streamStableByteCount <= 64 {
-            return text.utf8.starts(with: streamSourcePrefix.utf8)
-        }
-        let checkIdx = text.utf8.index(text.utf8.startIndex, offsetBy: streamStableByteCount - 1)
-        let prefixLastIdx = streamSourcePrefix.utf8.index(before: streamSourcePrefix.utf8.endIndex)
-        return text.utf8.first == streamSourcePrefix.utf8.first
-            && text.utf8[checkIdx] == streamSourcePrefix.utf8[prefixLastIdx]
+        return text.utf8.starts(with: streamSourcePrefix.utf8)
     }
 
     private static func findSafeBreak(in slice: Substring) -> String.Index? {
@@ -554,15 +548,9 @@ enum StreamingPacer {
     }
 
     private static func hasMatchingPrefix(visible: String, toward target: String) -> Bool {
-        let visibleBytes = visible.utf8.count
-        guard visibleBytes > 0 else { return true }
-        if visibleBytes <= 64 {
-            return target.utf8.starts(with: visible.utf8)
-        }
-        let checkIdx = target.utf8.index(target.utf8.startIndex, offsetBy: visibleBytes - 1)
-        let visibleLastIdx = visible.utf8.index(before: visible.utf8.endIndex)
-        return target.utf8.first == visible.utf8.first
-            && target.utf8[checkIdx] == visible.utf8[visibleLastIdx]
+        guard !visible.isEmpty else { return true }
+        guard target.utf8.count >= visible.utf8.count else { return false }
+        return target.utf8.starts(with: visible.utf8)
     }
 }
 
