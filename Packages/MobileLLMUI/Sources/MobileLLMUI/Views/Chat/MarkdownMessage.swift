@@ -814,6 +814,32 @@ struct CodeCard: View {
     var isStreaming: Bool = false
     @State private var copied = false
 
+    /// Capped height matching the finalized `HTMLCardView` (260pt) / `DiagramCardView` (280pt) so
+    /// streaming a 500-line HTML/Mermaid block never inflates the message to 8,000pt and then
+    /// collapses to 260pt on completion (which leaves LazyVStack stranded on a blank bottom page).
+    private var previewCapHeight: CGFloat? {
+        guard let lang = language?.lowercased() else { return nil }
+        if lang == "html" || lang == "htm" { return 260 }
+        if lang == "mermaid" { return 280 }
+        return nil
+    }
+
+    private var displayedStreamingCode: String {
+        guard previewCapHeight != nil else { return code }
+        var newlineCount = 0
+        var idx = code.endIndex
+        while idx > code.startIndex {
+            idx = code.index(before: idx)
+            if code[idx] == "\n" {
+                newlineCount += 1
+                if newlineCount >= 20 {
+                    return String(code[code.index(after: idx)...])
+                }
+            }
+        }
+        return code
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
@@ -836,21 +862,35 @@ struct CodeCard: View {
             .padding(.vertical, Theme.Space.xs)
             .background(Theme.surface2)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                if isStreaming {
-                    Text(code)
+            if let capHeight = previewCapHeight, isStreaming {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(displayedStreamingCode)
                         .font(.system(.callout, design: .monospaced))
                         .foregroundStyle(Theme.textPrimary)
                         .padding(Theme.Space.md)
-                        .frame(minWidth: 0, alignment: .leading)
-                } else {
-                    Text(code)
-                        .font(.system(.callout, design: .monospaced))
-                        .foregroundStyle(Theme.textPrimary)
-                        .textSelection(.enabled)
-                        .padding(Theme.Space.md)
+                        .fixedSize(horizontal: true, vertical: true)
                         .frame(minWidth: 0, alignment: .leading)
                 }
+                .frame(maxHeight: capHeight, alignment: .bottomLeading)
+                .clipped()
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    if isStreaming {
+                        Text(code)
+                            .font(.system(.callout, design: .monospaced))
+                            .foregroundStyle(Theme.textPrimary)
+                            .padding(Theme.Space.md)
+                            .frame(minWidth: 0, alignment: .leading)
+                    } else {
+                        Text(code)
+                            .font(.system(.callout, design: .monospaced))
+                            .foregroundStyle(Theme.textPrimary)
+                            .textSelection(.enabled)
+                            .padding(Theme.Space.md)
+                            .frame(minWidth: 0, alignment: .leading)
+                    }
+                }
+                .frame(maxHeight: previewCapHeight)
             }
         }
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
