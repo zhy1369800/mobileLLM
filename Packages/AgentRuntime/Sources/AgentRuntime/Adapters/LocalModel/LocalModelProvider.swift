@@ -172,6 +172,7 @@ private enum LocalModelGeneration {
         var parsedCalls: [ToolCall] = []
         var answer = ""
         var rawResponse = ""
+        var accumulatedReasoning = ""
         var stats: Stats?
         var silentActionBytes: UInt64 = 0
         var responseTail = ""
@@ -222,6 +223,7 @@ private enum LocalModelGeneration {
                             emitter: emitter
                         )
                     }
+                    accumulatedReasoning += value
                     try await emitter.emit(
                         .reasoningDelta(value),
                         responseBytes: UInt64(value.utf8.count)
@@ -367,6 +369,12 @@ private enum LocalModelGeneration {
                 try await emitter.emit(.toolCalls(calls), responseBytes: 0)
             }
             return try await complete(action, usage: usage, emitter: emitter)
+        }
+
+        if answer.isEmpty && !accumulatedReasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // When an on-device model stream ends without closing </think>, promote the unclosed
+            // reasoning text to the final answer instead of failing the run.
+            answer = accumulatedReasoning
         }
 
         let action: AgentAction

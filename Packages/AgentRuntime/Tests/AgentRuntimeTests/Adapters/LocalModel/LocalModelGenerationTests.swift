@@ -52,6 +52,28 @@ final class LocalModelGenerationTests: XCTestCase {
         XCTAssertTrue(capture.sampling.thinking)
     }
 
+    func testTextGenerationPromotesUnclosedReasoningToFinalAnswer() async throws {
+        let script = LocalEngineScript([
+            .reasoning("I am a 1-bit Bonsai model without closing think tags"),
+            .done(localStats(prompt: 5, generated: 10, memory: 1_024)),
+        ])
+        let harness = try LocalAdapterHarness.make(scripts: [script])
+        let sink = RecordingModelEventSink()
+        let result = try await harness.execute(sink: sink)
+
+        guard case .completed(let completion) = result.outcome,
+              case .finalAnswer(let answer) = completion.action
+        else { return XCTFail("expected final answer promoted from unclosed reasoning") }
+        XCTAssertEqual(answer.text, "I am a 1-bit Bonsai model without closing think tags")
+        XCTAssertEqual(result.provisionalAnswer, .none)
+        let sinkEvents = await sink.events()
+        XCTAssertEqual(sinkEvents, [
+            .visibleReasoningDelta("I am a 1-bit Bonsai model without closing think tags"),
+            .usage(completion.usage),
+            .provisionalAnswerResolved(.none),
+        ])
+    }
+
     func testVisionUsesOnlyPreloadedVerifiedBytesAndMapsAllMessageRoles() async throws {
         let reference = try ModelFixture.imageArtifact()
         let resolver = try PreloadedLocalModelArtifactResolver([
