@@ -184,7 +184,8 @@ struct ToolActivityPresentation: Equatable {
     }
 
     private static func argumentSummary(_ arguments: String) -> String {
-        guard let data = arguments.data(using: .utf8),
+        let cleaned = ToolFormatting.extractArgumentsJSON(arguments)
+        guard let data = cleaned.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any], !obj.isEmpty else { return "" }
         return obj.map { "\($0.value)" }.joined(separator: ", ")
     }
@@ -247,15 +248,139 @@ struct ToolActivityRow: View {
 }
 
 enum ToolFormatting {
+    /// Extracts the clean arguments JSON string from raw input that may contain protocol noise,
+    /// such as arguments":{...}, {"name":"...","arguments":{...}}, or markdown fences.
+    /// Handles arbitrary internal nested braces {} and quotes safely via grammar-aware parsing.
+    static func extractArgumentsJSON(_ raw: String) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return raw }
+
+        // 1. Strip <tool_call> ... </tool_call> tags if wrapped
+        if let open = text.range(of: "<tool_call>") {
+            text = String(text[open.upperBound...])
+        }
+        if let close = text.range(of: "</tool_call>") {
+            text = String(text[..<close.lowerBound])
+        }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 2. Strip markdown code fences if present
+        if text.hasPrefix("```") {
+            if let firstNL = text.firstIndex(of: "\n") {
+                text = String(text[text.index(after: firstNL)...])
+            } else {
+                text = String(text.dropFirst(3))
+            }
+            if let end = text.range(of: "```", options: .backwards) {
+                text = String(text[..<end.lowerBound])
+            }
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        func formatObject(_ obj: Any) -> String? {
+            if let str = obj as? String,
+               let data = str.data(using: .utf8),
+               let inner = try? JSONSerialization.jsonObject(with: data),
+               let pretty = try? JSONSerialization.data(withJSONObject: inner, options: [.prettyPrinted, .sortedKeys]),
+               let s = String(data: pretty, encoding: .utf8) {
+                return s
+            }
+            if let pretty = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+               let s = String(data: pretty, encoding: .utf8) {
+                return s
+            }
+            return nil
+        }
+
+        // 3. Try direct JSON parsing: if it's already a full envelope or standalone arguments object
+        if let data = text.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let fnObj = obj["function"] as? [String: Any],
+               let args = fnObj["arguments"] ?? fnObj["parameters"] {
+                if let formatted = formatObject(args) { return formatted }
+            } else if let args = obj["arguments"] ?? obj["parameters"] {
+                if let formatted = formatObject(args) { return formatted }
+            } else if let formatted = formatObject(obj) {
+                return formatted
+            }
+        }
+
+        // 4. Handle streaming prefix leakage like arguments":{...} or ,"arguments":{...}
+        // By trimming leading commas/whitespace and prefixing {"", we reconstruct a valid JSON envelope.
+        var repairedCandidate = text
+        if repairedCandidate.hasPrefix(",") {
+            repairedCandidate = String(repairedCandidate.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if repairedCandidate.hasPrefix("arguments\":") || repairedCandidate.hasPrefix("\"arguments\":") ||
+           repairedCandidate.hasPrefix("parameters\":") || repairedCandidate.hasPrefix("\"parameters\":") {
+            let prefix = repairedCandidate.hasPrefix("\"") ? "{" : "{\""
+            let candidateJSON = prefix + repairedCandidate
+            if let data = candidateJSON.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let args = obj["arguments"] ?? obj["parameters"],
+               let formatted = formatObject(args) {
+                return formatted
+            }
+        }
+
+        // 5. Grammar-aware brace matching (skip string literals and escape sequences safely)
+        if let firstBrace = text.firstIndex(of: "{") {
+            let sub = text[firstBrace...]
+            var depth = 0
+            var inString = false
+            var isEscaped = false
+            var matchedEndIndex: String.Index? = nil
+
+            for idx in sub.indices {
+                let char = sub[idx]
+                if inString {
+                    if isEscaped {
+                        isEscaped = false
+                    } else if char == "\\" {
+                        isEscaped = true
+                    } else if char == "\"" {
+                        inString = false
+                    }
+                } else {
+                    if char == "\"" {
+                        inString = true
+                    } else if char == "{" {
+                        depth += 1
+                    } else if char == "}" {
+                        depth -= 1
+                        if depth == 0 {
+                            matchedEndIndex = sub.index(after: idx)
+                            break
+                        }
+                    }
+                }
+            }
+
+            if let matchedEnd = matchedEndIndex {
+                let balanced = String(sub[..<matchedEnd])
+                if let data = balanced.data(using: .utf8),
+                   let obj = try? JSONSerialization.jsonObject(with: data),
+                   let pretty = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .sortedKeys]),
+                   let s = String(data: pretty, encoding: .utf8) {
+                    return s
+                }
+                return balanced
+            }
+        }
+
+        return text
+    }
+
     static func prettyJSON(orRaw raw: String) -> String {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = extractArgumentsJSON(raw)
+        let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return raw }
         guard let data = trimmed.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data),
               let prettyData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]),
               let str = String(data: prettyData, encoding: .utf8)
         else {
-            return raw
+            return cleaned
         }
         return str
     }
