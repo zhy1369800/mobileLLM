@@ -26,6 +26,7 @@ struct ChatThreadView: View {
 
     @State private var atBottom = true
     @State private var userScrolledUp = false
+    @State private var autoScrollTask: Task<Void, Never>?
     @State private var editing: Message?
     @State private var editText = ""
     /// A mid-history regenerate awaiting confirmation (nil = none pending).
@@ -122,7 +123,6 @@ struct ChatThreadView: View {
                 .frame(maxWidth: Theme.Layout.readingColumn, alignment: .leading)
                 .frame(maxWidth: .infinity)
             }
-            .defaultScrollAnchor(.bottom)
             .simultaneousGesture(
                 DragGesture(minimumDistance: 10).onChanged { value in
                     // 用户向上滑动翻看历史或非触底状态拖拽时，手势绝对优先，挂起自动滚动
@@ -140,20 +140,40 @@ struct ChatThreadView: View {
                 }
             }
             .onChange(of: isBusy) { _, busy in
-                if busy && atBottom {
-                    userScrolledUp = false
+                autoScrollTask?.cancel()
+                autoScrollTask = nil
+                if busy {
+                    if atBottom {
+                        userScrolledUp = false
+                    }
+                    autoScrollTask = Task { @MainActor in
+                        while !Task.isCancelled && isBusy {
+                            try? await Task.sleep(nanoseconds: 100_000_000)
+                            if Task.isCancelled || !isBusy { break }
+                            // 仅在超出屏幕且未被手势打断时平滑跟随（未传 anchor，不足一屏滚动量恒为0）
+                            if atBottom && !userScrolledUp {
+                                proxy.scrollTo(bottomID)
+                            }
+                        }
+                    }
                 } else if !busy && atBottom && !userScrolledUp {
                     // 云端或本地高速生成结束时，进行最终的自然对齐，确保末尾内容完整贴底呈现
                     scrollToBottom(proxy, animated: true)
                 }
             }
             .onChange(of: chat.activeID) { _, _ in
+                autoScrollTask?.cancel()
+                autoScrollTask = nil
                 scrollToBottom(proxy, animated: false)
                 warmupCurrentConversation(convo)
             }
             .onAppear {
                 scrollToBottom(proxy, animated: false)
                 warmupCurrentConversation(convo)
+            }
+            .onDisappear {
+                autoScrollTask?.cancel()
+                autoScrollTask = nil
             }
             .overlay(alignment: .bottom) {
                 if !atBottom { scrollPill(proxy) }
@@ -240,9 +260,9 @@ struct ChatThreadView: View {
 
     private func scrollToBottom(_ proxy: ScrollViewProxy, animated: Bool = true) {
         if animated && !Motion.reduce {
-            withAnimation(Motion.canvas) { proxy.scrollTo(bottomID, anchor: .bottom) }
+            withAnimation(Motion.canvas) { proxy.scrollTo(bottomID) }
         } else {
-            proxy.scrollTo(bottomID, anchor: .bottom)
+            proxy.scrollTo(bottomID)
         }
         atBottom = true
         userScrolledUp = false
