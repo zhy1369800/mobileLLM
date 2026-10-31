@@ -400,10 +400,7 @@ enum MarkdownBlockCache {
             for (offset, b) in parsedChunk.enumerated() {
                 streamStableBlocks.append(MarkdownBlock(id: baseId + offset, kind: b.kind))
             }
-            streamStableByteCount = text.utf8.distance(
-                from: text.utf8.startIndex,
-                to: safeBreak.samePosition(in: text.utf8) ?? text.utf8.endIndex
-            )
+            streamStableByteCount = text[..<safeBreak].utf8.count
             streamSourcePrefix = String(text[..<safeBreak])
         }
 
@@ -530,9 +527,7 @@ enum StreamingPacer {
         guard targetBytes > visibleBytes, hasMatchingPrefix(visible: visible, toward: target) else {
             return target
         }
-        guard let splitIdx = target.utf8.index(target.utf8.startIndex, offsetBy: visibleBytes).samePosition(in: target) else {
-            return target
-        }
+        let splitIdx = target.utf8.index(target.utf8.startIndex, offsetBy: visibleBytes)
         if let maxStep {
             guard maxStep > 0 else { return target }
             guard let sliceEnd = target.index(splitIdx, offsetBy: maxStep, limitedBy: target.endIndex),

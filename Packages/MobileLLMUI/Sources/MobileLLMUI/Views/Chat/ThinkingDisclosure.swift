@@ -34,29 +34,24 @@ private enum IncrementalThinkingSplitter {
             let unscanned = text[startIdx...]
             guard unscanned.utf8.count >= chunkByteThreshold else { break }
 
-            let searchLimit = unscanned.utf8.index(
-                unscanned.utf8.startIndex,
-                offsetBy: min(unscanned.utf8.count, chunkByteThreshold + 600)
-            ).samePosition(in: unscanned) ?? unscanned.endIndex
+            let searchLimit = unscanned.index(
+                unscanned.startIndex,
+                offsetBy: 600,
+                limitedBy: unscanned.endIndex
+            ) ?? unscanned.endIndex
             let window = unscanned[..<searchLimit]
 
             if let newlineIdx = window.lastIndex(of: "\n"), newlineIdx > unscanned.startIndex {
                 let chunkText = String(unscanned[..<newlineIdx])
                 cachedStableChunks.append(ThinkingChunk(id: cachedStableChunks.count, text: chunkText))
                 let afterNewline = unscanned.index(after: newlineIdx)
-                cachedStableByteCount = text.utf8.distance(
-                    from: text.utf8.startIndex,
-                    to: afterNewline.samePosition(in: text.utf8) ?? text.utf8.endIndex
-                )
+                cachedStableByteCount = text[..<afterNewline].utf8.count
                 cachedSourcePrefix = String(text[..<afterNewline])
             } else if unscanned.utf8.count >= chunkByteThreshold * 2 {
-                let cutIdx = unscanned.index(unscanned.startIndex, offsetBy: chunkByteThreshold, limitedBy: unscanned.endIndex) ?? unscanned.endIndex
+                let cutIdx = unscanned.index(unscanned.startIndex, offsetBy: 600, limitedBy: unscanned.endIndex) ?? unscanned.endIndex
                 let chunkText = String(unscanned[..<cutIdx])
                 cachedStableChunks.append(ThinkingChunk(id: cachedStableChunks.count, text: chunkText))
-                cachedStableByteCount = text.utf8.distance(
-                    from: text.utf8.startIndex,
-                    to: cutIdx.samePosition(in: text.utf8) ?? text.utf8.endIndex
-                )
+                cachedStableByteCount = text[..<cutIdx].utf8.count
                 cachedSourcePrefix = String(text[..<cutIdx])
             } else {
                 break
