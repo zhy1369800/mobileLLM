@@ -145,8 +145,29 @@ struct ThinkingDisclosure: View {
         }
     }
 
+    /// Synchronously projects `timeline` against the current `phase` during `body` evaluation so that
+    /// transitioning `.thinking -> .answered` collapses on the VERY SAME frame rather than flashing
+    /// one frame of full unthrottled `s.reasoning` before `.onChange(of: phase)` fires.
+    private var effectiveTimeline: ThinkingTimeline {
+        guard !reasoning.isEmpty else { return timeline }
+        var updated = timeline
+        switch phase {
+        case .thinking:
+            if !updated.hasReasoning { updated.onReasoning() }
+        case let .answered(seconds):
+            if updated.hasReasoning {
+                updated.onAnswerStart(elapsed: seconds)
+            } else {
+                updated.onReasoning()
+                if let seconds { updated.restoreCompleted(seconds: seconds) }
+                else { updated.onAnswerStart() }
+            }
+        }
+        return updated
+    }
+
     private var isExpanded: Bool {
-        displayMode == .alwaysExpand ? true : timeline.isExpanded
+        displayMode == .alwaysExpand ? true : effectiveTimeline.isExpanded
     }
 
     private var content: some View {
@@ -181,14 +202,19 @@ struct ThinkingDisclosure: View {
     }
 
     private var header: some View {
-        Button {
-            withAnimation(Motion.spring) { timeline.toggle() }
+        let current = effectiveTimeline
+        return Button {
+            withAnimation(Motion.spring) {
+                var next = current
+                next.toggle()
+                timeline = next
+            }
         } label: {
             HStack(spacing: Theme.Space.xs) {
                 Image(systemName: "brain")
                     .font(.caption)
                     .foregroundStyle(Theme.accent)
-                Text(timeline.label)
+                Text(current.label)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(Theme.textSecondary)
                 if displayMode != .alwaysExpand {
@@ -202,29 +228,13 @@ struct ThinkingDisclosure: View {
         }
         .buttonStyle(.plain)
         .disabled(displayMode == .alwaysExpand)
-        .accessibilityLabel(timeline.label)
+        .accessibilityLabel(current.label)
         .accessibilityHint(isExpanded ? "Collapse reasoning" : "Expand reasoning")
     }
 
     /// Drive the tested `ThinkingTimeline` from the current inputs.
     private func advance() {
-        guard !reasoning.isEmpty else { return }
-        if phase == .thinking, timeline.hasReasoning { return }
-        var updated = timeline
-        switch phase {
-        case .thinking:
-            updated.onReasoning()
-        case let .answered(seconds):
-            if updated.hasReasoning {
-                // The store supplies accumulated model-reasoning time, excluding tool/network waits.
-                updated.onAnswerStart(elapsed: seconds)
-            } else {
-                // A completed message opened directly (never observed the streaming thinking phase).
-                updated.onReasoning()
-                if let seconds { updated.restoreCompleted(seconds: seconds) }
-                else { updated.onAnswerStart() }
-            }
-        }
+        let updated = effectiveTimeline
         if updated != timeline {
             timeline = updated
         }

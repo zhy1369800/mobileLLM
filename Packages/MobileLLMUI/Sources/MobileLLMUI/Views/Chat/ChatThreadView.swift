@@ -111,7 +111,7 @@ struct ChatThreadView: View {
     private func thread(_ convo: Conversation) -> some View {
         ScrollViewReader { proxy in
             ScrollView(showsIndicators: true) {
-                LazyVStack(alignment: .leading, spacing: Theme.Space.lg) {
+                VStack(alignment: .leading, spacing: Theme.Space.lg) {
                     ForEach(convo.messages) { message in
                         row(message).id(message.id)
                     }
@@ -143,13 +143,18 @@ struct ChatThreadView: View {
                             if isBusy && metrics.isOverflowing && newHeight > oldHeight + 0.5 {
                                 // 1. 流式输出增长且总高已超出一屏：平滑跟随到底部
                                 proxy.scrollTo(bottomID, anchor: .bottom)
-                            } else if newHeight < oldHeight - 10 {
-                                // 2. 思考框自动收纳导致高度骤降：立即校正视口，防止画面悬空停在底部空白页
-                                if metrics.isOverflowing {
-                                    proxy.scrollTo(bottomID, anchor: .bottom)
-                                } else if let firstID = convo.messages.first?.id {
-                                    proxy.scrollTo(firstID, anchor: .top)
-                                    atBottom = true
+                            } else if newHeight < oldHeight - 20 {
+                                // 2. 思考框自动收纳导致高度骤降：在折叠排版完成后校正视口，防止画面悬空停在底部空白页
+                                let overflowing = metrics.isOverflowing
+                                let firstID = convo.messages.first?.id
+                                DispatchQueue.main.async {
+                                    guard !userScrolledUp && !isUserDragging else { return }
+                                    if overflowing {
+                                        proxy.scrollTo(bottomID, anchor: .bottom)
+                                    } else if let firstID {
+                                        proxy.scrollTo(firstID, anchor: .top)
+                                        atBottom = true
+                                    }
                                 }
                             }
                         }
@@ -190,13 +195,6 @@ struct ChatThreadView: View {
             .onChange(of: isBusy) { _, busy in
                 if busy && atBottom {
                     userScrolledUp = false
-                } else if !busy && !userScrolledUp && !isUserDragging {
-                    if metrics.isOverflowing {
-                        scrollToBottom(proxy, animated: false)
-                    } else if let firstID = convo.messages.first?.id {
-                        proxy.scrollTo(firstID, anchor: .top)
-                        atBottom = true
-                    }
                 }
             }
             .onChange(of: chat.activeID) { _, _ in
@@ -239,12 +237,11 @@ struct ChatThreadView: View {
         MessageRowItem(
             message: message,
             isStreamingRow: isStreamingRow,
-            isBusy: isBusy,
             displayMode: displayMode,
             thinkSeconds: completedThinkSeconds(message),
-            onEdit: isBusy ? nil : { beginEdit(message) },
+            onEdit: { beginEdit(message) },
             onCopy: { Clipboard.copy(message.answer); chat.showToast(Toast("Copied")) },
-            onRegenerate: isBusy ? nil : { requestRegenerate(message) },
+            onRegenerate: { requestRegenerate(message) },
             attachmentLoader: { await chat.attachmentData($0) },
             workflowStore: chat.workflowStore,
             activeID: chat.activeID,
@@ -256,7 +253,7 @@ struct ChatThreadView: View {
     /// One-tap regenerate for the newest assistant turn; confirm first when regenerating an earlier one
     /// (it silently drops every turn after it — DESIGN §4, no unrecoverable surprise).
     private func requestRegenerate(_ message: Message) {
-        guard let convo = conversation else { return }
+        guard !isBusy, let convo = conversation else { return }
         if chat.isLastAssistantMessage(message.id, in: convo) {
             chat.regenerate(assistantMessageID: message.id)
         } else {
@@ -316,6 +313,7 @@ struct ChatThreadView: View {
     // MARK: Edit & resend
 
     private func beginEdit(_ message: Message) {
+        guard !isBusy else { return }
         editText = message.answer
         editing = message
     }
@@ -420,7 +418,6 @@ private struct AgentRunPanelRow: View {
 private struct MessageRowItem: View, Equatable {
     let message: Message
     let isStreamingRow: Bool
-    let isBusy: Bool
     let displayMode: ThinkingDisplayMode
     let thinkSeconds: Double?
     let onEdit: (() -> Void)?
@@ -436,7 +433,6 @@ private struct MessageRowItem: View, Equatable {
         lhs.message.answer == rhs.message.answer &&
         lhs.message.reasoning == rhs.message.reasoning &&
         lhs.isStreamingRow == rhs.isStreamingRow &&
-        lhs.isBusy == rhs.isBusy &&
         lhs.displayMode == rhs.displayMode &&
         lhs.thinkSeconds == rhs.thinkSeconds &&
         lhs.message.stats == rhs.message.stats &&
