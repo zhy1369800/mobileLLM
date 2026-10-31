@@ -855,10 +855,7 @@ public final class AgentRunStore {
             }
         }
         guard !parts.isEmpty else { return nil }
-        let joined = parts.joined(separator: " | ")
-            .replacingOccurrences(of: "\n", with: " ")
-            .trimmingCharacters(in: .whitespaces)
-        return joined.count <= 240 ? joined : String(joined.prefix(237)) + "…"
+        return parts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Overlays the exact tool-call / framed tool-result turns the local provider fed to the engine

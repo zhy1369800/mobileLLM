@@ -268,11 +268,11 @@ private struct AgentRunStepRow: View {
                         Text(title)
                             .font(.caption.weight(.medium))
                             .foregroundStyle(Theme.textPrimary)
-                        if !preview.isEmpty {
+                        if !expanded, !preview.isEmpty {
                             Text(preview)
                                 .font(.caption2)
                                 .foregroundStyle(Theme.textSecondary)
-                                .lineLimit(expanded ? nil : 1)
+                                .lineLimit(1)
                                 .textSelection(.enabled)
                         }
                     }

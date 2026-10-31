@@ -265,7 +265,6 @@ enum ToolFormatting {
 /// Displays pretty-printed arguments and result in scrollable, selectable blocks with one-tap copy.
 struct ToolDetailSheet: View {
     let run: ToolRun
-    @Environment(\.dismiss) private var dismiss
     @State private var copiedArguments = false
     @State private var copiedResult = false
 
@@ -285,8 +284,6 @@ struct ToolDetailSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Space.lg) {
-                    statusHeader
-
                     sectionBlock(
                         title: "Arguments",
                         content: prettyArguments,
@@ -326,11 +323,7 @@ struct ToolDetailSheet: View {
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
+
         }
         #if os(macOS)
         .frame(minWidth: 480, minHeight: 400)
@@ -338,32 +331,6 @@ struct ToolDetailSheet: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         #endif
-    }
-
-    private var statusHeader: some View {
-        let presentation = ToolActivityPresentation(run: run)
-        return HStack(spacing: Theme.Space.sm) {
-            if presentation.state == .running {
-                ProgressView().controlSize(.mini).tint(Theme.accent)
-            } else {
-                Image(systemName: presentation.state == .failed
-                      ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
-                    .font(.subheadline)
-                    .foregroundStyle(presentation.state == .failed ? Theme.danger : Theme.accent)
-            }
-            Text(presentation.state == .running ? "Running" : (presentation.state == .failed ? "Failed" : "Completed"))
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(Theme.textPrimary)
-            Spacer()
-        }
-        .padding(.horizontal, Theme.Space.md)
-        .padding(.vertical, Theme.Space.sm)
-        .background(Theme.surface2)
-        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous)
-                .strokeBorder(Theme.hairline)
-        )
     }
 
     private func sectionBlock(

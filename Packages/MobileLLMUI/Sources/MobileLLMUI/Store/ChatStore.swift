@@ -1528,9 +1528,10 @@ public final class ChatStore {
         let toolRuns = steps.compactMap { step -> ToolRun? in
             guard step.kind == .toolCall else { return nil }
             let result = step.resultText ?? step.statusText
+            let arguments = (step.rawArguments?.isEmpty == false) ? step.rawArguments! : step.detail
             return ToolRun(
                 name: step.title,
-                arguments: step.detail,
+                arguments: arguments,
                 result: result,
                 rawCallText: step.rawCallText,
                 rawResponseText: step.rawResponseText
