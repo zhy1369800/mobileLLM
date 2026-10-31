@@ -556,10 +556,14 @@ struct AppFrozenInputBuilder: Sendable {
             ? UInt64(snapshot.onlineContextLength)
             : UInt64(ContextPolicy.effective(requested: snapshot.contextLength, model: snapshot.model))
         let peakMemoryCeiling = UInt64(ProcessInfo.processInfo.physicalMemory)
+        // Online models run reasoning chains and multi-turn tool passes; provide a generous 60m run budget.
+        // Local models stay on the conservative 15m budget to protect battery and thermal limits.
+        let activeMilliseconds: UInt64 = online ? (60 * 60 * 1_000) : (15 * 60 * 1_000)
         let budget = try AgentBudget.firstReleaseDefaults(
             contextTokensPerAttempt: effectiveContext,
             outputTokens: outputBudget(snapshot: snapshot).maximumOutputTokens,
-            peakMemoryBytes: peakMemoryCeiling
+            peakMemoryBytes: peakMemoryCeiling,
+            activeMilliseconds: activeMilliseconds
         )
         var ceilingCapabilities = AgentCapabilitySet([
             .networkRead, .localRead, .localWrite, .unknownExternal,

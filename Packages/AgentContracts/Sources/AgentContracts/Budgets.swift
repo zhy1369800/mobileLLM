@@ -267,7 +267,8 @@ public struct AgentBudget: Hashable, Codable, Sendable {
     public static func firstReleaseDefaults(
         contextTokensPerAttempt: UInt64,
         outputTokens: UInt64,
-        peakMemoryBytes: UInt64
+        peakMemoryBytes: UInt64,
+        activeMilliseconds: UInt64? = nil
     ) throws -> Self {
         let (totalInputTokens, overflow) = contextTokensPerAttempt.multipliedReportingOverflow(by: 6)
         guard !overflow else { throw AgentContractError.arithmeticOverflow(dimension: .inputTokens) }
@@ -279,7 +280,7 @@ public struct AgentBudget: Hashable, Codable, Sendable {
             .structuredRepairs: 1,
             .repeatedCallsPerFingerprint: 1,
             .consecutiveNoProgressActions: 2,
-            .activeMilliseconds: 15 * 60 * 1_000,
+            .activeMilliseconds: activeMilliseconds ?? (15 * 60 * 1_000),
             // Run totals sized for the maximum attempt count: a tool turn makes up to six model
             // passes, and EVERY pass reserves its full per-reply ceiling (see modelReservation).
             // A total equal to one pass would make the second pass fail preflight even after a

@@ -692,10 +692,14 @@ extension AgentRunController {
         let isRemote = provider.descriptor.location == .remote
         // Local attempts cap at 5 minutes to protect device battery and heat; remote attempts allow up to 15 minutes for long reasoning.
         let attemptTimeoutCap: UInt64 = isRemote ? 900_000 : 300_000
-        let attemptActiveReservation: UInt64 = min(
+        let totalActiveLimit = facts.submission!.request.payload.budget.limits[.activeMilliseconds]
+        let consumedActive = facts.budgetLedger?.consumed.quantities[.activeMilliseconds] ?? 0
+        let remainingActive = totalActiveLimit > consumedActive ? (totalActiveLimit - consumedActive) : 0
+        // Clamp reservation to remaining budget so subsequent tool turns never exceed the cumulative budget ceiling.
+        let attemptActiveReservation: UInt64 = max(1, min(
             attemptTimeoutCap + (isRemote ? 120_000 : 60_000),
-            facts.submission!.request.payload.budget.limits[.activeMilliseconds]
-        )
+            remainingActive > 0 ? remainingActive : totalActiveLimit
+        ))
         let prepContext = try ModelPreparationContext(
             conversationID: facts.submission!.request.payload.conversationID,
             modelPolicy: facts.submission!.request.payload.modelPolicy,
@@ -705,7 +709,7 @@ extension AgentRunController {
             maximumResponseBytes: max(1, facts.submission!.request.payload.budget.limits[.persistedOutputBytes]),
             timeoutMilliseconds: max(1, min(
                 attemptTimeoutCap,
-                facts.submission!.request.payload.budget.limits[.activeMilliseconds]
+                remainingActive > 0 ? remainingActive : totalActiveLimit
             ))
         )
         let prepared = try await AgentModelRequestPreparer().prepare(
