@@ -2,6 +2,8 @@
 
 import XCTest
 import AgentContracts
+import AgentRuntime
+import LLMCore
 @testable import MobileLLMUI
 
 /// Codex-style action presentation: readable tool names, one-line concrete previews ("Search: …",
@@ -95,5 +97,62 @@ final class AgentRunStepPresentationTests: XCTestCase {
             userPreview: "Send this conversation to deepseek-v4-flash"
         )
         XCTAssertEqual(AgentRunStore.approvalToolDisplayName(plan), "deepseek-v4-flash")
+    }
+
+    func testToolDisplayNameStripsDevicePrefixes() {
+        XCTAssertEqual(AgentRunStore.toolDisplayName("builtin:current_datetime"), "current_datetime")
+        XCTAssertEqual(AgentRunStore.toolDisplayName("device:calendar_get_events"), "calendar_get_events")
+    }
+
+    func testToolDisplayNameResolvesServerNameFromCache() {
+        let serverID = UUID()
+        let server = MCPServer(name: "HuggingFace", url: "https://example.com/mcp", stableID: serverID)
+        MCPDiscoveryCache.shared.upsert(server: server)
+        defer { MCPDiscoveryCache.shared.remove(serverStableID: serverID) }
+
+        XCTAssertEqual(
+            AgentRunStore.toolDisplayName("mcp.\(serverID.uuidString).gr1_z_image_turbo_generate_image"),
+            "HuggingFace.gr1_z_image_turbo_generate_image"
+        )
+        XCTAssertEqual(
+            AgentRunStore.toolDisplayName("mcp:\(serverID.uuidString):generate_image"),
+            "HuggingFace.generate_image"
+        )
+    }
+
+    func testToolDisplayNameFallsBackWhenServerNotFound() {
+        let missingID = UUID()
+        XCTAssertEqual(
+            AgentRunStore.toolDisplayName("mcp.\(missingID.uuidString).gr1_z_image_turbo_generate_image"),
+            "gr1_z_image_turbo_generate_image"
+        )
+    }
+
+    func testApprovalTitlePrettifiesMcpToolNameWithServer() throws {
+        let serverID = UUID(uuidString: "4865807E-90EB-40B8-B2F1-9708D36BC01C")!
+        let server = MCPServer(name: "HuggingFace", url: "https://example.com/mcp", stableID: serverID)
+        MCPDiscoveryCache.shared.upsert(server: server)
+        defer { MCPDiscoveryCache.shared.remove(serverStableID: serverID) }
+
+        let destination = try ExternalDestination(
+            kind: .mcpServer,
+            normalizedIdentity: serverID.uuidString
+        )
+        let plan = try ExternalOperationPlan(
+            kind: .mcp,
+            subjectID: "mcp.\(serverID.uuidString).gr1_z_image_turbo_generate_image",
+            destination: destination,
+            dataCategories: [try AgentDataCategory(rawValue: "mcp.call")],
+            payloadDigest: StableDigest.sha256(Data("x".utf8)),
+            effects: [.networkRead],
+            requiredCapabilities: AgentCapabilitySet([.networkRead]),
+            maximumRequestBytes: 64,
+            maximumResponseBytes: 1024,
+            timeoutMilliseconds: 1_000,
+            retryPolicy: .never,
+            idempotency: .pureRead,
+            userPreview: "Generate an image"
+        )
+        XCTAssertEqual(AgentRunStore.approvalToolDisplayName(plan), "HuggingFace.gr1 z image turbo generate image")
     }
 }

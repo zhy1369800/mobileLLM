@@ -297,7 +297,14 @@ public final class ChatStore {
                     self.streaming?.toolActivity.append(ToolRun(name: name, arguments: delta, result: nil))
                 }
             case .toolResult(let name):
-                if let idx = self.streaming?.toolActivity.lastIndex(where: { $0.name == name && $0.result == nil }) {
+                let matchingIndex = self.streaming?.toolActivity.firstIndex(where: { activity in
+                    guard activity.result == nil else { return false }
+                    if activity.name == name { return true }
+                    if name.hasSuffix("." + activity.name) || name.hasSuffix(":" + activity.name) { return true }
+                    if activity.name.hasSuffix("." + name) || activity.name.hasSuffix(":" + name) { return true }
+                    return false
+                }) ?? self.streaming?.toolActivity.firstIndex(where: { $0.result == nil })
+                if let idx = matchingIndex {
                     self.streaming?.toolActivity[idx].result = delta
                 }
             }

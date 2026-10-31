@@ -796,10 +796,40 @@ public final class AgentRunStore {
         return step
     }
 
-    /// "builtin:current_datetime" / "7:builtin8:calculator" → "calculator": the visible action
-    /// keeps the tool's real name (the message row and panel prettify it), not the internal subject id.
-    private static func toolDisplayName(_ subjectID: String) -> String {
-        subjectID.split(separator: ":").last.map(String.init) ?? subjectID
+    /// "builtin:current_datetime" / "7:builtin8:calculator" → "calculator"
+    /// "mcp.<uuid>.<tool_name>" → "<serverName>.<tool_name>" (resolved from MCP cache using user-configured name)
+    /// Falling back to "<tool_name>" if the server cannot be found.
+    static func toolDisplayName(_ subjectID: String) -> String {
+        let trimmed = subjectID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.lowercased().hasPrefix("mcp.") {
+            let parts = trimmed.split(separator: ".")
+            if parts.count >= 3 {
+                let uuidString = String(parts[1])
+                let toolName = parts.dropFirst(2).joined(separator: ".")
+                if let uuid = UUID(uuidString: uuidString),
+                   let server = MCPDiscoveryCache.shared.server(serverStableID: uuid),
+                   !server.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let serverName = server.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return "\(serverName).\(toolName)"
+                }
+                return toolName
+            }
+        }
+        if trimmed.lowercased().hasPrefix("mcp:") {
+            let parts = trimmed.split(separator: ":")
+            if parts.count >= 3 {
+                let uuidString = String(parts[1])
+                let toolName = parts.dropFirst(2).joined(separator: ":")
+                if let uuid = UUID(uuidString: uuidString),
+                   let server = MCPDiscoveryCache.shared.server(serverStableID: uuid),
+                   !server.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let serverName = server.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return "\(serverName).\(toolName)"
+                }
+                return toolName
+            }
+        }
+        return trimmed.split(separator: ":").last.map(String.init) ?? trimmed
     }
 
     private static func toolArgumentSummary(_ json: String?) -> String {
@@ -980,7 +1010,7 @@ extension AgentRunStore {
             }
             return "online model"
         }
-        let raw = plan.subjectID.split(separator: ":").last.map(String.init) ?? plan.subjectID
+        let raw = toolDisplayName(plan.subjectID)
         return readableToolName(raw)
     }
 
