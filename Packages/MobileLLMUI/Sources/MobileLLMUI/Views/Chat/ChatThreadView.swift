@@ -112,8 +112,15 @@ struct ChatThreadView: View {
         ScrollViewReader { proxy in
             ScrollView(showsIndicators: true) {
                 VStack(alignment: .leading, spacing: Theme.Space.lg) {
-                    ForEach(convo.messages) { message in
-                        row(message).id(message.id)
+                    if convo.messages.count > 1 {
+                        LazyVStack(alignment: .leading, spacing: Theme.Space.lg) {
+                            ForEach(convo.messages.dropLast()) { message in
+                                row(message).id(message.id)
+                            }
+                        }
+                    }
+                    if let lastMessage = convo.messages.last {
+                        row(lastMessage).id(lastMessage.id)
                     }
                     if let agentRuns {
                         AgentRunPanelRow(store: agentRuns, conversationID: convo.id)
