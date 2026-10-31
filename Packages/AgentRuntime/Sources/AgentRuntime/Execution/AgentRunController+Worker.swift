@@ -677,10 +677,11 @@ extension AgentRunController {
             redaction: try RedactionMetadata(classification: .sensitive, policyVersion: 1)
         )
         let provider = try modelProviders.provider(for: frozen.modelSelection)
-        // Both local and remote attempts allow up to 5 minutes so complex reasoning and long answers can finish safely.
-        let attemptTimeoutCap: UInt64 = 300_000
+        let isRemote = provider.descriptor.location == .remote
+        // Local attempts cap at 5 minutes to protect device battery and heat; remote attempts allow up to 15 minutes for long reasoning.
+        let attemptTimeoutCap: UInt64 = isRemote ? 900_000 : 300_000
         let attemptActiveReservation: UInt64 = min(
-            attemptTimeoutCap + 60_000,
+            attemptTimeoutCap + (isRemote ? 120_000 : 60_000),
             facts.submission!.request.payload.budget.limits[.activeMilliseconds]
         )
         let prepContext = try ModelPreparationContext(
@@ -990,10 +991,28 @@ extension AgentRunController {
         case .interrupted(let value): value
         case .failed: nil
         }
-        let actual = usage(
+        let rawActual = usage(
             reported,
             structuredRepair: reservation.maximumUsage.quantities[.structuredRepairs] > 0
         )
+        let isRemote = facts.submission.flatMap { submission in
+            try? modelProviders.provider(for: submission.frozenInputs.modelSelection).descriptor.location == .remote
+        } ?? false
+        // For completed remote attempts, clamp usage to reservation bounds so slight thinking/token variance
+        // on the server never aborts an already-successful reply.
+        let actual: AgentUsage
+        if isRemote, case .completed = execution.outcome {
+            var clamped: [BudgetDimension: UInt64] = [:]
+            for dimension in BudgetDimension.allCases {
+                clamped[dimension] = min(
+                    rawActual.quantities[dimension],
+                    reservation.maximumUsage.quantities[dimension]
+                )
+            }
+            actual = AgentUsage(quantities: BudgetQuantities(clamped))
+        } else {
+            actual = rawActual
+        }
         let ledger: BudgetLedgerSnapshot
         do {
             ledger = try facts.budgetLedger!.settling(

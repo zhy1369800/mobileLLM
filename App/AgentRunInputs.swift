@@ -351,14 +351,17 @@ struct AppFrozenInputBuilder: Sendable {
             let requested = UInt64(snapshot.maxTokens > 0 ? snapshot.maxTokens : 2_048)
             return (.explicit, requested)
         }
-        let context = UInt64(snapshot.onlineContextLength)
+        // Online models report generous ceilings (up to 200k context). For online runs, reasoning chains
+        // and large generation output should not be clamped by local context bounds.
+        let defaultOnlineCap: UInt64 = snapshot.onlineReasoningEnabled ? 128_000 : 64_000
         let serviceCap = snapshot.onlineMaximumOutputTokens
             .flatMap { $0 > 0 ? UInt64($0) : nil }
-            ?? context
+            ?? defaultOnlineCap
         if snapshot.onlineOutputBudgetAuto {
-            return (.auto, min(serviceCap, context))
+            return (.auto, serviceCap)
         }
-        return (.explicit, min(UInt64(snapshot.maxTokens), serviceCap, context))
+        let requested = UInt64(snapshot.maxTokens > 0 ? snapshot.maxTokens : 2_048)
+        return (.explicit, min(requested, serviceCap))
     }
 
     func frozenInputs(
