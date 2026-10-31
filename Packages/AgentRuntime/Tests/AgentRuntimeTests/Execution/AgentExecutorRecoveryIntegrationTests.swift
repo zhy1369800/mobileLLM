@@ -96,6 +96,8 @@ final class AgentExecutorRecoveryIntegrationTests: XCTestCase {
         XCTAssertEqual(requests[0].generationParameters.temperature, 0.7)
         XCTAssertEqual(requests[1].generationParameters.thinkingMode, .disabled)
         XCTAssertEqual(requests[1].generationParameters.temperature, 0)
+        let stateMessage = requests[1].messages.first { $0.content.contains("repairInstruction") }
+        XCTAssertTrue(stateMessage?.content.contains("The tool you attempted to call does not exist or was invalid") == true)
 
         let result = try await handle.result()
         XCTAssertEqual(result?.status.state, .completed)

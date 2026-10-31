@@ -383,6 +383,13 @@ extension AgentRunController {
             let lastRepair = history.diagnostics.last { $0.1.code == "execution.structured-repair" }
                 ?? history.diagnostics.last { $0.1.code == "execution.repeated-tool-call" }
                 ?? history.diagnostics.last { $0.1.code == "execution.tool-budget-exhausted" }
+            let isTextRequirement: Bool
+            switch facts.submission?.request.payload.outputRequirement {
+            case .structured, .artifacts:
+                isTextRequirement = false
+            case .text, .textAndArtifacts, .none:
+                isTextRequirement = true
+            }
             if lastRepair?.1.code == "execution.tool-budget-exhausted" {
                 stateFields["repairInstruction"] = .string(
                     "Tool invocation budget limit reached for this run. Do NOT call any more tools — "
@@ -392,6 +399,11 @@ extension AgentRunController {
                 stateFields["repairInstruction"] = .string(
                     "Your last tool call already executed in this turn. Do NOT call any tool again — "
                         + "answer the user's request directly with text only."
+                )
+            } else if isTextRequirement {
+                stateFields["repairInstruction"] = .string(
+                    "The tool you attempted to call does not exist or was invalid. "
+                        + "Do NOT call any tool — answer the user's request directly with text or markdown."
                 )
             } else {
                 stateFields["repairInstruction"] = .string(
