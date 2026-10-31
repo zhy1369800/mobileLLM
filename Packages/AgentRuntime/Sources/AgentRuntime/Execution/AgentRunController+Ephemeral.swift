@@ -42,7 +42,7 @@ extension AgentRunController {
         for handleID: AgentExecutionHandleID
     ) -> AsyncThrowingStream<AgentEphemeralEventEnvelope, Error> {
         let subscriptionID = UUID()
-        return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(512)) { continuation in
+        return AsyncThrowingStream(bufferingPolicy: .unbounded) { continuation in
             ephemeralSubscriptions[handleID, default: [:]][subscriptionID] = continuation
             continuation.onTermination = { @Sendable _ in
                 Task { await self.detachEphemeral(subscriptionID, from: handleID) }

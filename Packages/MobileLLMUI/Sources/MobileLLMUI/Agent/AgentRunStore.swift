@@ -89,6 +89,7 @@ public final class AgentRunStore {
     private var handles: [AgentRunID: any AgentExecutionHandle] = [:]
     private var eventTasks: [AgentRunID: Task<Void, Never>] = [:]
     private var ephemeralTasks: [AgentRunID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var accumulatedReasoning: [UUID: String] = [:]
 
     public init(
         executor: any AgentExecutor,
@@ -143,6 +144,7 @@ public final class AgentRunStore {
         guard epoch == projectionEpoch else { throw CancellationError() }
         handles[submission.request.runID] = handle
         assistantMessageIDs[prepared.conversationID] = prepared.assistantMessageID
+        accumulatedReasoning.removeValue(forKey: prepared.conversationID)
         runs[prepared.conversationID] = AgentRunPresentation(
             conversationID: prepared.conversationID,
             runID: submission.request.runID,
@@ -165,6 +167,7 @@ public final class AgentRunStore {
         let handle = try await executor.attach(to: recoverable.handleID)
         guard epoch == projectionEpoch else { throw CancellationError() }
         handles[recoverable.runID] = handle
+        accumulatedReasoning.removeValue(forKey: recoverable.conversationID)
         if let assistantMessageID {
             assistantMessageIDs[recoverable.conversationID] = assistantMessageID
         }
@@ -324,6 +327,7 @@ public final class AgentRunStore {
     public func discard(conversationID: UUID) {
         guard let run = runs.removeValue(forKey: conversationID) else { return }
         assistantMessageIDs.removeValue(forKey: conversationID)
+        accumulatedReasoning.removeValue(forKey: conversationID)
         eventTasks[run.runID]?.cancel()
         ephemeralTasks[run.runID]?.cancel()
         eventTasks.removeValue(forKey: run.runID)
@@ -549,7 +553,7 @@ public final class AgentRunStore {
                     conversationID: conversationID,
                     run: run,
                     text: answer,
-                    reasoning: run.reasoningText,
+                    reasoning: accumulatedReasoning.removeValue(forKey: conversationID) ?? run.reasoningText,
                     steps: steps
                 )
             } else if let assistantMessageID = assistantMessageIDs[conversationID] {
@@ -593,8 +597,9 @@ public final class AgentRunStore {
         case .model(let event):
             switch event {
             case .visibleReasoningDelta(let delta):
-                run = run.replacing(reasoningText: run.reasoningText + delta)
+                accumulatedReasoning[conversationID, default: ""].append(delta)
                 onEphemeral?(conversationID, .reasoning, delta)
+                return
             case .provisionalAnswerDelta(let delta):
                 run = run.replacing(provisionalText: run.provisionalText + delta)
                 onEphemeral?(conversationID, .answer, delta)

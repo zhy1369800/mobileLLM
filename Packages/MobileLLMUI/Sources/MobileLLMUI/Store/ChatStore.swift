@@ -1430,7 +1430,13 @@ public final class ChatStore {
         pauseReasoningClock()
         var message = conversations[ci].messages[mi]
         message.answer = text
-        message.reasoning = reasoning
+        if streamingMessageID == assistantMessageID,
+           let streamedReasoning = streaming?.reasoning,
+           streamedReasoning.count > (reasoning?.count ?? 0) {
+            message.reasoning = streamedReasoning
+        } else {
+            message.reasoning = reasoning
+        }
         if let duration = streaming?.thinkingDuration, duration > 0 {
             message.thinkingSeconds = duration
         }
