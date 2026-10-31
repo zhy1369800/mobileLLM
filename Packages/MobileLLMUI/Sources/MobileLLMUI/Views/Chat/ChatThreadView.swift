@@ -7,6 +7,13 @@ import LLMCore
 import UIKit
 #endif
 
+/// 纯数值容器：记录视口与内容高度，避免软键盘收放动画或流式增长时修改 @State 触发整树重绘闪烁
+private final class ScrollMetrics {
+    var viewportHeight: CGFloat = 0
+    var contentHeight: CGFloat = 0
+    var isOverflowing: Bool { viewportHeight > 0 && contentHeight > viewportHeight + 2 }
+}
+
 /// The message list + streaming surface (DESIGN §4). User turns are right-aligned bubbles; assistant
 /// turns are full-width document text. History ALWAYS renders (a suspended/absent model never hides the
 /// thread); a distinct loading state owns a cold-start load; sticky-bottom autoscroll with a "⌄ new"
@@ -27,8 +34,7 @@ struct ChatThreadView: View {
     @State private var atBottom = true
     @State private var userScrolledUp = false
     @State private var isUserDragging = false
-    @State private var viewportHeight: CGFloat = 0
-    @State private var isContentOverflowing = false
+    @State private var metrics = ScrollMetrics()
     @State private var editing: Message?
     @State private var editText = ""
     /// A mid-history regenerate awaiting confirmation (nil = none pending).
@@ -129,30 +135,31 @@ struct ChatThreadView: View {
                 .background(GeometryReader { geo in
                     Color.clear
                         .onAppear {
-                            let overflowing = viewportHeight > 0 && geo.size.height > viewportHeight
-                            if isContentOverflowing != overflowing {
-                                isContentOverflowing = overflowing
-                            }
+                            metrics.contentHeight = geo.size.height
                         }
                         .onChange(of: geo.size.height) { oldHeight, newHeight in
-                            let overflowing = viewportHeight > 0 && newHeight > viewportHeight
-                            if isContentOverflowing != overflowing {
-                                isContentOverflowing = overflowing
-                            }
-                            // 流式输出中，仅当内容总高度已超过可视范围、高度继续增长且未处于手势拖拽/历史浏览态时，才跟随到底部
-                            if isBusy && !userScrolledUp && !isUserDragging && overflowing && newHeight > oldHeight + 0.5 {
+                            metrics.contentHeight = newHeight
+                            guard !userScrolledUp && !isUserDragging else { return }
+                            if isBusy && metrics.isOverflowing && newHeight > oldHeight + 0.5 {
+                                // 1. 流式输出增长且总高已超出一屏：平滑跟随到底部
                                 proxy.scrollTo(bottomID, anchor: .bottom)
+                            } else if newHeight < oldHeight - 10 {
+                                // 2. 思考框自动收纳导致高度骤降：立即校正视口，防止画面悬空停在底部空白页
+                                if metrics.isOverflowing {
+                                    proxy.scrollTo(bottomID, anchor: .bottom)
+                                } else if let firstID = convo.messages.first?.id {
+                                    proxy.scrollTo(firstID, anchor: .top)
+                                    atBottom = true
+                                }
                             }
                         }
                 })
             }
             .background(GeometryReader { geo in
                 Color.clear
-                    .onAppear { viewportHeight = geo.size.height }
+                    .onAppear { metrics.viewportHeight = geo.size.height }
                     .onChange(of: geo.size.height) { _, newHeight in
-                        if abs(viewportHeight - newHeight) > 0.5 {
-                            viewportHeight = newHeight
-                        }
+                        metrics.viewportHeight = newHeight
                     }
             })
             .simultaneousGesture(
@@ -165,31 +172,36 @@ struct ChatThreadView: View {
                             userScrolledUp = false
                         }
                     }
-                    .onEnded { _ in
+                    .onEnded { value in
                         isUserDragging = false
+                        if value.translation.height < 0 && atBottom && userScrolledUp {
+                            userScrolledUp = false
+                        }
                     }
             )
             .scrollDismissesKeyboard(.interactively)
             .background(Theme.bg)
             .onChange(of: convo.messages.count) { _, _ in
-                // Only auto-follow when already at the bottom; yield unconditionally to user historical browsing
+                // 发送新消息时若原本在底部，仅重置手势状态；不抢跑调用 scrollToBottom（交由新气泡排版后的高度增长自然驱动，消除发送瞬间闪烁）
                 if atBottom {
                     userScrolledUp = false
-                    if convo.messages.count > 2 || isContentOverflowing {
-                        scrollToBottom(proxy, animated: false)
-                    }
                 }
             }
             .onChange(of: isBusy) { _, busy in
                 if busy && atBottom {
                     userScrolledUp = false
-                } else if !busy && !userScrolledUp && isContentOverflowing {
-                    scrollToBottom(proxy, animated: false)
+                } else if !busy && !userScrolledUp && !isUserDragging {
+                    if metrics.isOverflowing {
+                        scrollToBottom(proxy, animated: false)
+                    } else if let firstID = convo.messages.first?.id {
+                        proxy.scrollTo(firstID, anchor: .top)
+                        atBottom = true
+                    }
                 }
             }
             .onChange(of: chat.activeID) { _, _ in
                 userScrolledUp = false
-                isContentOverflowing = convo.messages.count > 2
+                metrics.contentHeight = 0
                 if convo.messages.count > 2 {
                     scrollToBottom(proxy, animated: false)
                 } else {
