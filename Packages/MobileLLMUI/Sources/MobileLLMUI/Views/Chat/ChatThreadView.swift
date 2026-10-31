@@ -183,13 +183,13 @@ struct ChatThreadView: View {
                         if !isUserDragging { isUserDragging = true }
                         if value.translation.height > 6 && !userScrolledUp {
                             userScrolledUp = true
-                        } else if value.translation.height < -24 && atBottom && userScrolledUp {
+                        } else if !isBusy && value.translation.height < -24 && atBottom && userScrolledUp {
                             userScrolledUp = false
                         }
                     }
                     .onEnded { value in
                         isUserDragging = false
-                        if value.translation.height < 0 && atBottom && userScrolledUp {
+                        if !isBusy && value.translation.height < 0 && atBottom && userScrolledUp {
                             userScrolledUp = false
                         }
                     }
