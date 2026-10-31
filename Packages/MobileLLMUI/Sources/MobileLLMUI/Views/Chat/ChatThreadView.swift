@@ -111,22 +111,15 @@ struct ChatThreadView: View {
     private func thread(_ convo: Conversation) -> some View {
         ScrollViewReader { proxy in
             ScrollView(showsIndicators: true) {
-                VStack(alignment: .leading, spacing: Theme.Space.lg) {
-                    if convo.messages.count > 1 {
-                        LazyVStack(alignment: .leading, spacing: Theme.Space.lg) {
-                            ForEach(convo.messages.dropLast()) { message in
-                                row(message).id(message.id)
-                            }
-                        }
-                    }
-                    if let lastMessage = convo.messages.last {
-                        row(lastMessage).id(lastMessage.id)
+                LazyVStack(alignment: .leading, spacing: Theme.Space.lg) {
+                    ForEach(convo.messages) { message in
+                        row(message).id(message.id)
                     }
                     if let agentRuns {
                         AgentRunPanelRow(store: agentRuns, conversationID: convo.id)
                     }
                     Color.clear
-                        .frame(height: 1)
+                        .frame(height: Theme.Space.md)
                         .id(bottomID)
                         .onAppear {
                             atBottom = true
@@ -147,8 +140,8 @@ struct ChatThreadView: View {
                         .onChange(of: geo.size.height) { oldHeight, newHeight in
                             metrics.contentHeight = newHeight
                             guard !userScrolledUp && !isUserDragging else { return }
-                            if isBusy && metrics.isOverflowing && newHeight > oldHeight + 0.5 {
-                                // 1. 流式输出增长且总高已超出一屏：平滑跟随到底部
+                            if metrics.isOverflowing && newHeight > oldHeight + 0.5 {
+                                // 1. 流式输出增长或回复完成帧挂载底部按钮栏/统计栏且总高已超出一屏：平滑跟随到底部
                                 proxy.scrollTo(bottomID, anchor: .bottom)
                             } else if newHeight < oldHeight - 20 {
                                 // 2. 思考框自动收纳导致高度骤降：在折叠排版完成后校正视口，防止画面悬空停在底部空白页
