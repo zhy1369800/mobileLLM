@@ -11,6 +11,7 @@ import UIKit
 private final class ScrollMetrics {
     var viewportHeight: CGFloat = 0
     var contentHeight: CGFloat = 0
+    var needsInitialScroll: Bool = true
     var isOverflowing: Bool { viewportHeight > 0 && contentHeight > viewportHeight + 2 }
 }
 
@@ -136,9 +137,14 @@ struct ChatThreadView: View {
                     Color.clear
                         .onAppear {
                             metrics.contentHeight = geo.size.height
+                            performInitialScrollIfNeeded(proxy)
                         }
                         .onChange(of: geo.size.height) { oldHeight, newHeight in
                             metrics.contentHeight = newHeight
+                            if metrics.needsInitialScroll {
+                                performInitialScrollIfNeeded(proxy)
+                                return
+                            }
                             guard !userScrolledUp && !isUserDragging else { return }
                             if metrics.isOverflowing && newHeight > oldHeight + 0.5 {
                                 // 1. 流式输出增长或回复完成帧挂载底部按钮栏/统计栏且总高已超出一屏：平滑跟随到底部
@@ -162,9 +168,13 @@ struct ChatThreadView: View {
             }
             .background(GeometryReader { geo in
                 Color.clear
-                    .onAppear { metrics.viewportHeight = geo.size.height }
+                    .onAppear {
+                        metrics.viewportHeight = geo.size.height
+                        performInitialScrollIfNeeded(proxy)
+                    }
                     .onChange(of: geo.size.height) { _, newHeight in
                         metrics.viewportHeight = newHeight
+                        performInitialScrollIfNeeded(proxy)
                     }
             })
             .simultaneousGesture(
@@ -199,28 +209,39 @@ struct ChatThreadView: View {
             }
             .onChange(of: chat.activeID) { _, _ in
                 userScrolledUp = false
+                atBottom = true
                 metrics.contentHeight = 0
-                if convo.messages.count > 2 {
-                    scrollToBottom(proxy, animated: false)
-                } else {
-                    atBottom = true
-                }
+                metrics.needsInitialScroll = true
                 warmupCurrentConversation(convo)
+                performInitialScrollIfNeeded(proxy)
             }
             .onAppear {
-                if convo.messages.count > 2 {
-                    scrollToBottom(proxy, animated: false)
-                } else {
-                    atBottom = true
-                    userScrolledUp = false
-                }
+                userScrolledUp = false
+                atBottom = true
+                metrics.needsInitialScroll = true
                 warmupCurrentConversation(convo)
+                performInitialScrollIfNeeded(proxy)
             }
             .overlay(alignment: .bottom) {
                 if (!atBottom && !isBusy) || userScrolledUp {
                     scrollPill(proxy)
                 }
             }
+        }
+    }
+
+    private func performInitialScrollIfNeeded(_ proxy: ScrollViewProxy) {
+        guard metrics.needsInitialScroll, metrics.viewportHeight > 0, metrics.contentHeight > 0 else { return }
+        metrics.needsInitialScroll = false
+        userScrolledUp = false
+        if metrics.isOverflowing {
+            scrollToBottom(proxy, animated: false)
+            DispatchQueue.main.async {
+                guard !userScrolledUp && !isUserDragging else { return }
+                scrollToBottom(proxy, animated: false)
+            }
+        } else {
+            atBottom = true
         }
     }
 
