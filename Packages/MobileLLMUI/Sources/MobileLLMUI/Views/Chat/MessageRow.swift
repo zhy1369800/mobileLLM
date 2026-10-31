@@ -552,7 +552,6 @@ struct AssistantView: View {
                 StreamingMarkdown(text: answer)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Assistant answer")
-                    .accessibilityValue(answer)
                     .accessibilityIdentifier("assistant.answer")
             } else {
                 VStack(alignment: .leading, spacing: Theme.Space.sm) {

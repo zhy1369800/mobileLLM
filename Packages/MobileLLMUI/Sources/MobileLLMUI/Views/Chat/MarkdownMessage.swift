@@ -6,7 +6,7 @@ import AppUI
 /// A parsed block of assistant text (DESIGN §4). LLMs structure answers with markdown — headings,
 /// lists, quotes, tables (the stock system prompt even asks for tables) — so the renderer understands
 /// the common block grammar, not just fenced code + inline prose.
-struct MarkdownBlock: Identifiable {
+struct MarkdownBlock: Identifiable, Equatable {
     /// One row of a list block: nesting level (0 top / 1 nested — one level deep), whether it's ordered,
     /// the author's number for ordered items, and the (inline-markdown) text.
     struct ListRow: Equatable {
@@ -129,6 +129,12 @@ struct MarkdownBlock: Identifiable {
                     else { break }
                 }
                 blocks.append(MarkdownBlock(id: blocks.count, kind: .list(rows)))
+                continue
+            }
+
+            if line.trimmingCharacters(in: .whitespaces).isEmpty {
+                flushProse()
+                i += 1
                 continue
             }
 
@@ -342,6 +348,11 @@ enum MarkdownBlockCache {
     private static var order: [String] = []
     private static let maxEntries = 512
 
+    // Single-slot incremental streaming state (aligned with kelivo IncrementalMarkdownDocument)
+    private static var streamSourcePrefix: String = ""
+    private static var streamStableByteCount: Int = 0
+    private static var streamStableBlocks: [MarkdownBlock] = []
+
     static func get(text: String, isStreaming: Bool) -> [MarkdownBlock]? {
         guard !isStreaming else { return nil }
         lock.lock()
@@ -363,6 +374,82 @@ enum MarkdownBlockCache {
         cache[text] = blocks
     }
 
+    /// Incremental streaming parser: freezes completed blocks before safe blank-line boundaries so
+    /// each 50ms tick only parses the active trailing paragraph/fence in O(delta) time.
+    static func parseStreaming(text: String) -> [MarkdownBlock] {
+        let totalBytes = text.utf8.count
+        guard totalBytes >= 512 else {
+            return MarkdownBlock.parse(text, isStreaming: true)
+        }
+        lock.lock()
+        defer { lock.unlock() }
+
+        if totalBytes < streamStableByteCount || !hasMatchingStreamPrefix(text) {
+            streamSourcePrefix = ""
+            streamStableByteCount = 0
+            streamStableBlocks.removeAll(keepingCapacity: true)
+        }
+
+        let startIdx = text.utf8.index(text.utf8.startIndex, offsetBy: streamStableByteCount)
+        let unscanned = text[startIdx...]
+
+        if unscanned.utf8.count >= 256, let safeBreak = findSafeBreak(in: unscanned) {
+            let chunk = String(unscanned[..<safeBreak])
+            let parsedChunk = MarkdownBlock.parse(chunk, isStreaming: true)
+            let baseId = streamStableBlocks.count
+            for (offset, b) in parsedChunk.enumerated() {
+                streamStableBlocks.append(MarkdownBlock(id: baseId + offset, kind: b.kind))
+            }
+            streamStableByteCount = text.utf8.distance(
+                from: text.utf8.startIndex,
+                to: safeBreak.samePosition(in: text.utf8) ?? text.utf8.endIndex
+            )
+            streamSourcePrefix = String(text[..<safeBreak])
+        }
+
+        let tailStart = text.utf8.index(text.utf8.startIndex, offsetBy: streamStableByteCount)
+        let tail = String(text[tailStart...])
+        let tailBlocks = MarkdownBlock.parse(tail, isStreaming: true)
+        var result = streamStableBlocks
+        let baseId = result.count
+        for (offset, b) in tailBlocks.enumerated() {
+            result.append(MarkdownBlock(id: baseId + offset, kind: b.kind))
+        }
+        return result
+    }
+
+    private static func hasMatchingStreamPrefix(_ text: String) -> Bool {
+        guard streamStableByteCount > 0 else { return true }
+        guard text.utf8.count >= streamStableByteCount else { return false }
+        if streamStableByteCount <= 64 {
+            return text.utf8.starts(with: streamSourcePrefix.utf8)
+        }
+        let checkIdx = text.utf8.index(text.utf8.startIndex, offsetBy: streamStableByteCount - 1)
+        let prefixLastIdx = streamSourcePrefix.utf8.index(before: streamSourcePrefix.utf8.endIndex)
+        return text.utf8.first == streamSourcePrefix.utf8.first
+            && text.utf8[checkIdx] == streamSourcePrefix.utf8[prefixLastIdx]
+    }
+
+    private static func findSafeBreak(in slice: Substring) -> String.Index? {
+        guard let range = slice.range(of: "\n\n", options: .backwards) else { return nil }
+        let candidate = slice[..<range.lowerBound]
+        var fenceCount = 0
+        var lastNonEmptyLine = ""
+        for line in candidate.components(separatedBy: "\n") {
+            if line.hasPrefix("```") { fenceCount += 1 }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { lastNonEmptyLine = trimmed }
+        }
+        guard fenceCount % 2 == 0, !lastNonEmptyLine.isEmpty else { return nil }
+        // Do not split right after a list item, quote, or table row in case the next line continues it
+        if let firstChar = lastNonEmptyLine.first, "-*+>".contains(firstChar) { return nil }
+        if lastNonEmptyLine.contains("|") { return nil }
+        if lastNonEmptyLine.first?.isNumber == true && (lastNonEmptyLine.contains(". ") || lastNonEmptyLine.contains(") ")) {
+            return nil
+        }
+        return range.upperBound
+    }
+
     /// Background warm-up of markdown AST for an array of message texts
     static func warmup(texts: [String]) {
         guard !texts.isEmpty else { return }
@@ -377,6 +464,26 @@ enum MarkdownBlockCache {
     }
 }
 
+/// Equatable block row so SwiftUI short-circuits unchanged prefix blocks during 20fps streaming ticks.
+private struct MarkdownBlockRow: View, Equatable {
+    let block: MarkdownBlock
+    let isStreaming: Bool
+
+    var body: some View {
+        switch block.kind {
+        case .prose(let s): ProseText(s)
+        case let .code(language, code): CodeCard(language: language, code: code, isStreaming: isStreaming)
+        case let .heading(level, text): MarkdownHeading(level: level, text: text)
+        case let .list(rows): MarkdownList(rows: rows)
+        case let .quote(lines): MarkdownQuote(lines: lines)
+        case let .table(header, rows): MarkdownTable(header: header, rows: rows)
+        case let .html(code): HTMLCardView(code: code)
+        case let .diagram(type, code): DiagramCardView(type: type, code: code)
+        case let .image(source, alt): MarkdownImageView(source: source, alt: alt)
+        }
+    }
+}
+
 /// Renders assistant text as markdown blocks — prose, headings, lists, quotes, tables, and fenced code
 /// cards (DESIGN §4).
 struct MarkdownMessage: View {
@@ -385,7 +492,7 @@ struct MarkdownMessage: View {
 
     var body: some View {
         let blocks = isStreaming
-            ? MarkdownBlock.parse(text, isStreaming: true)
+            ? MarkdownBlockCache.parseStreaming(text: text)
             : (MarkdownBlockCache.get(text: text, isStreaming: false) ?? {
                 let parsed = MarkdownBlock.parse(text, isStreaming: false)
                 MarkdownBlockCache.set(text: text, blocks: parsed, isStreaming: false)
@@ -394,17 +501,8 @@ struct MarkdownMessage: View {
 
         VStack(alignment: .leading, spacing: Theme.Space.md) {
             ForEach(blocks) { block in
-                switch block.kind {
-                case .prose(let s): ProseText(s)
-                case let .code(language, code): CodeCard(language: language, code: code)
-                case let .heading(level, text): MarkdownHeading(level: level, text: text)
-                case let .list(rows): MarkdownList(rows: rows)
-                case let .quote(lines): MarkdownQuote(lines: lines)
-                case let .table(header, rows): MarkdownTable(header: header, rows: rows)
-                case let .html(code): HTMLCardView(code: code)
-                case let .diagram(type, code): DiagramCardView(type: type, code: code)
-                case let .image(source, alt): MarkdownImageView(source: source, alt: alt)
-                }
+                MarkdownBlockRow(block: block, isStreaming: isStreaming)
+                    .equatable()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -425,22 +523,51 @@ enum StreamingPacer {
         }
     }
 
-    /// Advances visible text towards target.
-    /// Uses UTF-8 prefix slicing so locating the unrendered tail is O(backlog) rather than O(document),
-    /// while advancing by Swift Extended Grapheme Clusters to preserve multi-byte and emoji boundaries.
+    /// Advances visible text towards target in O(step) time rather than scanning the full document.
     static func advance(visible: String, toward target: String, maxStep: Int? = nil) -> String {
-        guard target.utf8.count > visible.utf8.count,
-              target.utf8.starts(with: visible.utf8) else {
+        let visibleBytes = visible.utf8.count
+        let targetBytes = target.utf8.count
+        guard targetBytes > visibleBytes, hasMatchingPrefix(visible: visible, toward: target) else {
             return target
         }
-        let splitIdx = target.utf8.index(target.utf8.startIndex, offsetBy: visible.utf8.count)
-        let remaining = target[splitIdx...]
-        let backlog = remaining.count
-        guard backlog > 0 else { return target }
-        let step = maxStep ?? nextStep(backlog: backlog)
-        guard step < backlog else { return target }
-        let sliceEnd = target.index(splitIdx, offsetBy: step, limitedBy: target.endIndex) ?? target.endIndex
+        guard let splitIdx = target.utf8.index(target.utf8.startIndex, offsetBy: visibleBytes).samePosition(in: target) else {
+            return target
+        }
+        if let maxStep {
+            guard maxStep > 0 else { return target }
+            guard let sliceEnd = target.index(splitIdx, offsetBy: maxStep, limitedBy: target.endIndex),
+                  sliceEnd < target.endIndex else {
+                return target
+            }
+            return String(target[..<sliceEnd])
+        }
+        let remainingBytes = targetBytes - visibleBytes
+        let step: Int
+        if remainingBytes > 512 {
+            step = 120
+        } else {
+            let backlog = target[splitIdx...].count
+            guard backlog > 0 else { return target }
+            step = nextStep(backlog: backlog)
+            guard step < backlog else { return target }
+        }
+        guard let sliceEnd = target.index(splitIdx, offsetBy: step, limitedBy: target.endIndex),
+              sliceEnd < target.endIndex else {
+            return target
+        }
         return String(target[..<sliceEnd])
+    }
+
+    private static func hasMatchingPrefix(visible: String, toward target: String) -> Bool {
+        let visibleBytes = visible.utf8.count
+        guard visibleBytes > 0 else { return true }
+        if visibleBytes <= 64 {
+            return target.utf8.starts(with: visible.utf8)
+        }
+        let checkIdx = target.utf8.index(target.utf8.startIndex, offsetBy: visibleBytes - 1)
+        let visibleLastIdx = visible.utf8.index(before: visible.utf8.endIndex)
+        return target.utf8.first == visible.utf8.first
+            && target.utf8[checkIdx] == visible.utf8[visibleLastIdx]
     }
 }
 
@@ -689,6 +816,7 @@ struct MarkdownTable: View {
 struct CodeCard: View {
     let language: String?
     let code: String
+    var isStreaming: Bool = false
     @State private var copied = false
 
     var body: some View {
@@ -714,12 +842,20 @@ struct CodeCard: View {
             .background(Theme.surface2)
 
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
-                    .font(.system(.callout, design: .monospaced))
-                    .foregroundStyle(Theme.textPrimary)
-                    .textSelection(.enabled)
-                    .padding(Theme.Space.md)
-                    .frame(minWidth: 0, alignment: .leading)
+                if isStreaming {
+                    Text(code)
+                        .font(.system(.callout, design: .monospaced))
+                        .foregroundStyle(Theme.textPrimary)
+                        .padding(Theme.Space.md)
+                        .frame(minWidth: 0, alignment: .leading)
+                } else {
+                    Text(code)
+                        .font(.system(.callout, design: .monospaced))
+                        .foregroundStyle(Theme.textPrimary)
+                        .textSelection(.enabled)
+                        .padding(Theme.Space.md)
+                        .frame(minWidth: 0, alignment: .leading)
+                }
             }
         }
         .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))

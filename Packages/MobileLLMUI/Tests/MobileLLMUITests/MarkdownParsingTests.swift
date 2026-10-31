@@ -472,4 +472,22 @@ final class MarkdownParsingTests: XCTestCase {
         XCTAssertEqual(blocks.count, 1)
         XCTAssertEqual(blocks[0].kind, .prose(streamingMd))
     }
+
+    func testIncrementalStreamingParseMatchesFullParseAcrossParagraphsAndCode() {
+        let p1 = String(repeating: "First paragraph content with **bold** text. ", count: 10)
+        let p2 = String(repeating: "Second paragraph content with inline code. ", count: 10)
+        let code = "```swift\nfunc test() {\n\n    print(1)\n}\n```"
+        let p3 = String(repeating: "Trailing paragraph actively streaming. ", count: 8)
+        let full = [p1, p2, code, p3].joined(separator: "\n\n")
+
+        var current = ""
+        for chunk in stride(from: 0, to: full.count, by: 37) {
+            let start = full.index(full.startIndex, offsetBy: chunk)
+            let end = full.index(start, offsetBy: min(37, full.count - chunk))
+            current += full[start..<end]
+            let incremental = MarkdownBlockCache.parseStreaming(text: current + "\u{258C}")
+            let reference = MarkdownBlock.parse(current + "\u{258C}", isStreaming: true)
+            XCTAssertEqual(incremental, reference)
+        }
+    }
 }

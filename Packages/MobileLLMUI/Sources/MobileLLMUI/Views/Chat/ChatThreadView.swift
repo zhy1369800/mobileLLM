@@ -342,10 +342,6 @@ private struct StreamingRow: View {
     let chat: ChatStore
     let displayMode: ThinkingDisplayMode
 
-    @State private var shownReasoning = ""
-    @State private var targetReasoning = ""
-    @State private var reasoningTicker: Task<Void, Never>?
-
     var body: some View {
         Group {
             if let s = chat.streaming {
@@ -361,7 +357,7 @@ private struct StreamingRow: View {
                 } else {
                     VStack(alignment: .leading, spacing: Theme.Space.xs) {
                         AssistantView(
-                            reasoning: displayedReasoning(s),
+                            reasoning: s.reasoning,
                             answer: s.answer,
                             disclosurePhase: s.phase == .thinking ? .thinking
                                 : .answered(seconds: s.thinkingDuration),
@@ -383,36 +379,6 @@ private struct StreamingRow: View {
                 }
             }
         }
-        .onAppear {
-            let initial = chat.streaming?.reasoning ?? ""
-            shownReasoning = initial
-            targetReasoning = initial
-        }
-        .onChange(of: chat.streaming?.reasoning ?? "") { _, new in
-            targetReasoning = new
-            ensureReasoningTicker()
-        }
-        .onDisappear {
-            reasoningTicker?.cancel()
-            reasoningTicker = nil
-        }
-    }
-
-    private func ensureReasoningTicker() {
-        guard reasoningTicker == nil, shownReasoning != targetReasoning else { return }
-        reasoningTicker = Task { @MainActor in
-            while !Task.isCancelled {
-                guard shownReasoning != targetReasoning else { break }
-                shownReasoning = StreamingPacer.advance(visible: shownReasoning, toward: targetReasoning)
-                try? await Task.sleep(nanoseconds: 50_000_000)
-            }
-            reasoningTicker = nil
-        }
-    }
-
-    /// Throttled while thinking; the full text once thinking ends, so the frozen block is exact.
-    private func displayedReasoning(_ s: StreamingState) -> String {
-        s.phase == .thinking ? shownReasoning : s.reasoning
     }
 }
 

@@ -158,6 +158,11 @@ public final class ChatStore {
     /// the base system prompt. Public so the composer's Skill menu + management sheet reach the same store.
     public let skillStore: SkillStore?
     private var genTask: Task<Void, Never>?
+    @ObservationIgnored private var pendingStreamReasoning: String = ""
+    @ObservationIgnored private var pendingStreamAnswer: String = ""
+    @ObservationIgnored private var streamReasoningDirty: Bool = false
+    @ObservationIgnored private var streamAnswerDirty: Bool = false
+    @ObservationIgnored private var streamFlushTask: Task<Void, Never>?
     /// AppContainer uses this narrow synchronization hook when a model operation completes. Restoring a
     /// historical thread must update the engine identity without rewriting an empty, newly selected
     /// thread with a stale model from an earlier restore request.
@@ -271,25 +276,17 @@ public final class ChatStore {
             guard let self, self.activeID == conversationID, self.streaming != nil else { return }
             switch kind {
             case .reasoning:
-                if self.streaming?.thinkingStartedAt == nil {
-                    self.streaming?.thinkingStartedAt = Date()
-                }
-                if self.streaming?.phase != .stopping {
-                    self.streaming?.phase = .thinking
-                }
-                self.streaming?.reasoning += delta
+                self.appendStreamReasoning(delta)
             case .answer:
-                self.pauseReasoningClock()
-                if self.streaming?.phase != .stopping {
-                    self.streaming?.phase = .answering
-                }
-                self.streaming?.answer += delta
+                self.appendStreamAnswer(delta)
             case .discardProvisionalAnswer:
+                self.flushStreamingBuffer()
                 self.streaming?.answer = ""
                 if self.streaming?.phase != .stopping {
                     self.streaming?.phase = .warming
                 }
             case .toolCall(let name):
+                self.flushStreamingBuffer()
                 self.pauseReasoningClock()
                 if self.streaming?.phase != .stopping {
                     self.streaming?.phase = .answering
@@ -310,6 +307,85 @@ public final class ChatStore {
     /// Synchronize the engine selection into chat state. Explicit Models → Use operations may reseed an
     /// empty placeholder thread; historical-conversation restoration never may, because a superseded
     /// restore completing late must not overwrite the newly selected thread's remembered variant.
+    // MARK: - Streaming Coalescing Buffer (50ms / 20fps gate aligned with kelivo)
+
+    private func appendStreamReasoning(_ delta: String) {
+        guard !delta.isEmpty, streaming != nil else { return }
+        let isFirstToken = (streaming?.reasoning.isEmpty == true) && pendingStreamReasoning.isEmpty
+        if streaming?.warmingNote != nil { streaming?.warmingNote = nil }
+        if streaming?.thinkingStartedAt == nil { streaming?.thinkingStartedAt = Date() }
+        if streaming?.phase != .stopping && streaming?.phase != .thinking {
+            streaming?.phase = .thinking
+        }
+        pendingStreamReasoning.append(contentsOf: delta)
+        streamReasoningDirty = true
+        if isFirstToken {
+            flushStreamingBuffer()
+        } else {
+            scheduleStreamingFlush()
+        }
+    }
+
+    private func appendStreamAnswer(_ delta: String) {
+        guard !delta.isEmpty, streaming != nil else { return }
+        let isFirstToken = (streaming?.answer.isEmpty == true) && pendingStreamAnswer.isEmpty
+        pauseReasoningClock()
+        if streaming?.warmingNote != nil { streaming?.warmingNote = nil }
+        if streaming?.phase != .stopping && streaming?.phase != .answering {
+            flushStreamingBuffer()
+            streaming?.phase = .answering
+        }
+        pendingStreamAnswer.append(contentsOf: delta)
+        streamAnswerDirty = true
+        if isFirstToken {
+            flushStreamingBuffer()
+        } else {
+            scheduleStreamingFlush()
+        }
+    }
+
+    private func scheduleStreamingFlush() {
+        guard streamFlushTask == nil else { return }
+        streamFlushTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            guard let self else { return }
+            self.streamFlushTask = nil
+            self.flushStreamingBuffer()
+        }
+    }
+
+    private func flushStreamingBuffer() {
+        streamFlushTask?.cancel()
+        streamFlushTask = nil
+        guard streaming != nil else {
+            resetStreamingBuffer()
+            return
+        }
+        if streamReasoningDirty {
+            streamReasoningDirty = false
+            if !pendingStreamReasoning.isEmpty {
+                streaming?.reasoning += pendingStreamReasoning
+                pendingStreamReasoning.removeAll(keepingCapacity: true)
+            }
+        }
+        if streamAnswerDirty {
+            streamAnswerDirty = false
+            if !pendingStreamAnswer.isEmpty {
+                streaming?.answer += pendingStreamAnswer
+                pendingStreamAnswer.removeAll(keepingCapacity: true)
+            }
+        }
+    }
+
+    private func resetStreamingBuffer() {
+        streamFlushTask?.cancel()
+        streamFlushTask = nil
+        streamReasoningDirty = false
+        streamAnswerDirty = false
+        pendingStreamReasoning.removeAll(keepingCapacity: false)
+        pendingStreamAnswer.removeAll(keepingCapacity: false)
+    }
+
     public func synchronizeActiveModel(_ model: LoadedModel?, reseedEmptyConversation: Bool) {
         suppressEmptyConversationReseed = !reseedEmptyConversation
         activeModel = model
@@ -843,6 +919,7 @@ public final class ChatStore {
     public func finishConversationErase(succeeded: Bool, resetSessionState: Bool) {
         genTask?.cancel()
         genTask = nil
+        resetStreamingBuffer()
         streaming = nil
         streamingMessageID = nil
         if succeeded {
@@ -1424,6 +1501,7 @@ public final class ChatStore {
         reasoning: String?,
         steps: [AgentRunStep]
     ) {
+        flushStreamingBuffer()
         guard let ci = conversations.firstIndex(where: { $0.id == conversationID }),
               let mi = conversations[ci].messages.firstIndex(where: { $0.id == assistantMessageID })
         else { return }
@@ -1470,6 +1548,7 @@ public final class ChatStore {
         conversations[ci].updatedAt = Date()
         persist(conversations[ci])
         if streamingMessageID == assistantMessageID {
+            resetStreamingBuffer()
             streaming = nil
             streamingMessageID = nil
             genTask = nil
@@ -1501,11 +1580,13 @@ public final class ChatStore {
         reason: AgentTerminalReason,
         message: String?
     ) {
+        flushStreamingBuffer()
         pauseReasoningClock()
         guard let ci = conversations.firstIndex(where: { $0.id == conversationID }),
               let mi = conversations[ci].messages.firstIndex(where: { $0.id == assistantMessageID })
         else {
             if streamingMessageID == assistantMessageID {
+                resetStreamingBuffer()
                 streaming = nil
                 streamingMessageID = nil
                 genTask = nil
@@ -1526,6 +1607,7 @@ public final class ChatStore {
         conversations[ci].updatedAt = Date()
         persist(conversations[ci])
         if streamingMessageID == assistantMessageID {
+            resetStreamingBuffer()
             streaming = nil
             streamingMessageID = nil
             genTask = nil
@@ -1554,6 +1636,7 @@ public final class ChatStore {
             showToast(Toast(errorMessage, kind: .error, autoDismiss: 5))
         }
         if streamingMessageID == assistantMessageID {
+            resetStreamingBuffer()
             streaming = nil
             streamingMessageID = nil
             genTask = nil
@@ -1905,6 +1988,7 @@ public final class ChatStore {
         pendingImages = rollback.stagedImages + pendingImages.filter { !restoredIDs.contains($0.id) }
 
         if let assistantID = rollback.assistantID, streaming?.messageID == assistantID {
+            resetStreamingBuffer()
             streaming = nil
             streamingMessageID = nil
         }
@@ -1968,10 +2052,7 @@ public final class ChatStore {
         case .reasoning(let s): apply(.reasoning(s))
         case .answer(let s): apply(.answer(s))
         case .discardAnswer:
-            // Tool-loop text is provisional until that model pass proves it needs no tool. If a call or
-            // enforced correction appears later, remove the intermediate prose while keeping reasoning and
-            // completed tool rows. This is also the pass boundary when a model emitted reasoning followed
-            // directly by call markup, so pause idempotently even when no answer token did it first.
+            flushStreamingBuffer()
             pauseReasoningClock()
             streaming?.answer = ""
             if streaming?.phase != .stopping {
@@ -1979,6 +2060,7 @@ public final class ChatStore {
                 streaming?.phase = hasReasoning ? .thinking : .warming
             }
         case .toolCall(let call):
+            flushStreamingBuffer()
             pauseReasoningClock()
             if streaming?.phase != .stopping {
                 // Pre-tool prose is only an intermediate agent-loop step, not the final answer. Restore
@@ -2004,20 +2086,11 @@ public final class ChatStore {
         guard streaming != nil else { return }
         switch delta {
         case .reasoning(let s):
-            streaming?.warmingNote = nil
-            if streaming?.phase != .stopping { streaming?.phase = .thinking }
-            // A later tool-loop pass starts a fresh segment. Time spent executing the tool and prefilling
-            // this pass occurred before this delta and therefore never enters the accumulated duration.
-            if streaming?.thinkingStartedAt == nil { streaming?.thinkingStartedAt = Date() }
-            streaming?.reasoning += s
+            appendStreamReasoning(s)
         case .answer(let s):
-            // The first answer token closes only the current reasoning segment. Further answer generation
-            // is not reasoning time; a later pass may start and add another segment.
-            pauseReasoningClock()
-            streaming?.warmingNote = nil
-            if streaming?.phase != .stopping { streaming?.phase = .answering }
-            streaming?.answer += s
+            appendStreamAnswer(s)
         case .done(let stats):
+            flushStreamingBuffer()
             pauseReasoningClock()
             streaming?.stats = stats
         }
@@ -2027,6 +2100,7 @@ public final class ChatStore {
     /// reasoning and its frozen duration remain untouched; clearing first-pass stats prevents a clean
     /// second stream that omits `.done` from accidentally inheriting the first pass's terminal marker.
     private func beginAnswerRecovery() {
+        flushStreamingBuffer()
         pauseReasoningClock()
         guard streaming != nil else { return }
         streaming?.answer = ""
@@ -2040,6 +2114,7 @@ public final class ChatStore {
     /// cleared after the first close.
     private func pauseReasoningClock(at now: Date = Date()) {
         guard let started = streaming?.thinkingStartedAt else { return }
+        flushStreamingBuffer()
         let elapsed = max(0, now.timeIntervalSince(started))
         // Read before opening the observed property's `_modify` accessor. Combining the read and write in
         // one optional-chain assignment overlaps Swift's dynamic exclusivity accesses and crashes when a
@@ -2062,10 +2137,12 @@ public final class ChatStore {
     }
 
     private func commit(stopReason: StopReason, stats: Stats?, failed: Bool = false) {
+        flushStreamingBuffer()
         pauseReasoningClock()
         guard let state = streaming,
               let ci = conversations.firstIndex(where: { $0.messages.contains { $0.id == state.messageID } }),
               let mi = conversations[ci].messages.firstIndex(where: { $0.id == state.messageID }) else {
+            resetStreamingBuffer()
             streaming = nil
             streamingMessageID = nil
             return
@@ -2097,6 +2174,7 @@ public final class ChatStore {
         }
         conversations[ci].updatedAt = Date()
         let convo = conversations[ci]
+        resetStreamingBuffer()
         streaming = nil
         streamingMessageID = nil
         genTask = nil
@@ -2109,6 +2187,7 @@ public final class ChatStore {
     /// protection lives on the composer's Stop BUTTON (briefly disabled after send), not here, so an
     /// intentional stop during a long warm-up still works.
     public func stop() {
+        flushStreamingBuffer()
         // Agent runtime mode: Stop is a durable cancel command, not a task cancellation.
         if agentRuntimeEnabled,
            let agentRuns,
@@ -2565,6 +2644,7 @@ public final class ChatStore {
         conversations[ci].updatedAt = Date()
         persist(conversations[ci])
         if streamingMessageID == assistantMessageID {
+            resetStreamingBuffer()
             streaming = nil
             streamingMessageID = nil
             genTask = nil
