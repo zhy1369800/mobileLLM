@@ -26,6 +26,7 @@ struct ChatThreadView: View {
 
     @State private var atBottom = true
     @State private var userScrolledUp = false
+    @State private var isUserDragging = false
     @State private var viewportHeight: CGFloat = 0
     @State private var isContentOverflowing = false
     @State private var editing: Message?
@@ -116,7 +117,9 @@ struct ChatThreadView: View {
                         .id(bottomID)
                         .onAppear {
                             atBottom = true
-                            userScrolledUp = false
+                            if !isBusy && !isUserDragging {
+                                userScrolledUp = false
+                            }
                         }
                         .onDisappear { atBottom = false }
                 }
@@ -136,8 +139,8 @@ struct ChatThreadView: View {
                             if isContentOverflowing != overflowing {
                                 isContentOverflowing = overflowing
                             }
-                            // 流式输出中，仅当内容总高度已超过可视范围、高度继续增长（换行/新段落）且未被手势打断时，才跟随到底部
-                            if isBusy && !userScrolledUp && overflowing && newHeight > oldHeight + 0.5 {
+                            // 流式输出中，仅当内容总高度已超过可视范围、高度继续增长且未处于手势拖拽/历史浏览态时，才跟随到底部
+                            if isBusy && !userScrolledUp && !isUserDragging && overflowing && newHeight > oldHeight + 0.5 {
                                 proxy.scrollTo(bottomID, anchor: .bottom)
                             }
                         }
@@ -153,12 +156,18 @@ struct ChatThreadView: View {
                     }
             })
             .simultaneousGesture(
-                DragGesture(minimumDistance: 10).onChanged { value in
-                    // 用户手指往下拉动屏幕（翻看上方历史内容）时，手势绝对优先，立即停止自动滚动
-                    if value.translation.height > 10 && !userScrolledUp {
-                        userScrolledUp = true
+                DragGesture(minimumDistance: 6)
+                    .onChanged { value in
+                        if !isUserDragging { isUserDragging = true }
+                        if value.translation.height > 6 && !userScrolledUp {
+                            userScrolledUp = true
+                        } else if value.translation.height < -24 && atBottom && userScrolledUp {
+                            userScrolledUp = false
+                        }
                     }
-                }
+                    .onEnded { _ in
+                        isUserDragging = false
+                    }
             )
             .scrollDismissesKeyboard(.interactively)
             .background(Theme.bg)
@@ -198,7 +207,7 @@ struct ChatThreadView: View {
                 warmupCurrentConversation(convo)
             }
             .overlay(alignment: .bottom) {
-                if !atBottom && (!isBusy || userScrolledUp) {
+                if (!atBottom && !isBusy) || userScrolledUp {
                     scrollPill(proxy)
                 }
             }

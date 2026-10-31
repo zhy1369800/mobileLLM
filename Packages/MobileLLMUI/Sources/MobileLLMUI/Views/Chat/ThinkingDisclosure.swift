@@ -3,20 +3,21 @@
 import SwiftUI
 import AppUI
 
-/// Incremental line/paragraph splitter for live reasoning streams so SwiftUI only lays out the active
-/// trailing paragraph on each 50ms tick instead of re-measuring the entire multi-thousand-word string.
-private struct ThinkingParagraph: Identifiable, Equatable {
+/// Fixed-size (~1.2 KB newline-aligned) chunk of reasoning text so even a 15,000-word reasoning trace
+/// produces only ~10 lightweight Text views instead of hundreds of per-line nodes during scrolling.
+private struct ThinkingChunk: Identifiable, Equatable {
     let id: Int
     let text: String
 }
 
 private enum IncrementalThinkingSplitter {
+    private static let chunkByteThreshold = 1_200
     private static let lock = NSLock()
     private static var cachedSourcePrefix: String = ""
     private static var cachedStableByteCount: Int = 0
-    private static var cachedStableParagraphs: [ThinkingParagraph] = []
+    private static var cachedStableChunks: [ThinkingChunk] = []
 
-    static func split(_ text: String) -> [ThinkingParagraph] {
+    static func split(_ text: String) -> [ThinkingChunk] {
         guard !text.isEmpty else { return [] }
         lock.lock()
         defer { lock.unlock() }
@@ -25,30 +26,48 @@ private enum IncrementalThinkingSplitter {
         if totalBytes < cachedStableByteCount || !hasMatchingPrefix(text) {
             cachedSourcePrefix = ""
             cachedStableByteCount = 0
-            cachedStableParagraphs.removeAll(keepingCapacity: true)
+            cachedStableChunks.removeAll(keepingCapacity: true)
         }
 
-        let startIdx = text.utf8.index(text.utf8.startIndex, offsetBy: cachedStableByteCount)
-        let unscanned = text[startIdx...]
+        while true {
+            let startIdx = text.utf8.index(text.utf8.startIndex, offsetBy: cachedStableByteCount)
+            let unscanned = text[startIdx...]
+            guard unscanned.utf8.count >= chunkByteThreshold else { break }
 
-        if let lastNewline = unscanned.lastIndex(of: "\n") {
-            let newlyCompletedEnd = unscanned.index(after: lastNewline)
-            let newlyCompletedSlice = unscanned[..<lastNewline]
-            let lines = newlyCompletedSlice.components(separatedBy: "\n")
-            for line in lines {
-                cachedStableParagraphs.append(
-                    ThinkingParagraph(id: cachedStableParagraphs.count, text: line)
+            let searchLimit = unscanned.utf8.index(
+                unscanned.utf8.startIndex,
+                offsetBy: min(unscanned.utf8.count, chunkByteThreshold + 600)
+            ).samePosition(in: unscanned) ?? unscanned.endIndex
+            let window = unscanned[..<searchLimit]
+
+            if let newlineIdx = window.lastIndex(of: "\n"), newlineIdx > unscanned.startIndex {
+                let chunkText = String(unscanned[..<newlineIdx])
+                cachedStableChunks.append(ThinkingChunk(id: cachedStableChunks.count, text: chunkText))
+                let afterNewline = unscanned.index(after: newlineIdx)
+                cachedStableByteCount = text.utf8.distance(
+                    from: text.utf8.startIndex,
+                    to: afterNewline.samePosition(in: text.utf8) ?? text.utf8.endIndex
                 )
+                cachedSourcePrefix = String(text[..<afterNewline])
+            } else if unscanned.utf8.count >= chunkByteThreshold * 2 {
+                let cutIdx = unscanned.index(unscanned.startIndex, offsetBy: chunkByteThreshold, limitedBy: unscanned.endIndex) ?? unscanned.endIndex
+                let chunkText = String(unscanned[..<cutIdx])
+                cachedStableChunks.append(ThinkingChunk(id: cachedStableChunks.count, text: chunkText))
+                cachedStableByteCount = text.utf8.distance(
+                    from: text.utf8.startIndex,
+                    to: cutIdx.samePosition(in: text.utf8) ?? text.utf8.endIndex
+                )
+                cachedSourcePrefix = String(text[..<cutIdx])
+            } else {
+                break
             }
-            cachedStableByteCount = text.utf8.distance(from: text.utf8.startIndex, to: newlyCompletedEnd.samePosition(in: text.utf8) ?? text.utf8.endIndex)
-            cachedSourcePrefix = String(text[..<newlyCompletedEnd])
         }
 
         let tailStart = text.utf8.index(text.utf8.startIndex, offsetBy: cachedStableByteCount)
         let tail = String(text[tailStart...])
-        var result = cachedStableParagraphs
+        var result = cachedStableChunks
         if !tail.isEmpty {
-            result.append(ThinkingParagraph(id: result.count, text: tail))
+            result.append(ThinkingChunk(id: result.count, text: tail))
         }
         return result
     }
@@ -61,22 +80,27 @@ private enum IncrementalThinkingSplitter {
         }
         let checkIdx = text.utf8.index(text.utf8.startIndex, offsetBy: cachedStableByteCount - 1)
         let prefixLastIdx = cachedSourcePrefix.utf8.index(before: cachedSourcePrefix.utf8.endIndex)
-        return text.utf8.first == cachedSourcePrefix.utf8.first && text.utf8[checkIdx] == cachedSourcePrefix.utf8[prefixLastIdx]
+        return text.utf8.first == cachedSourcePrefix.utf8.first
+            && text.utf8[checkIdx] == cachedSourcePrefix.utf8[prefixLastIdx]
     }
 }
 
-private struct ThinkingParagraphRow: View, Equatable {
+private struct ThinkingChunkRow: View, Equatable {
     let text: String
+    let selectable: Bool
 
     var body: some View {
-        if text.trimmingCharacters(in: .whitespaces).isEmpty {
-            Color.clear.frame(height: 6)
+        if selectable {
+            Text(text)
+                .font(.callout)
+                .foregroundStyle(Theme.textSecondary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             Text(text)
                 .font(.callout)
                 .foregroundStyle(Theme.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -134,52 +158,31 @@ struct ThinkingDisclosure: View {
         VStack(alignment: .leading, spacing: Theme.Space.xs) {
             header
             if isExpanded {
-                Group {
-                    if phase == .thinking {
-                        let paragraphs = IncrementalThinkingSplitter.split(reasoning)
-                        VStack(alignment: .leading, spacing: 2) {
-                            ForEach(paragraphs) { paragraph in
-                                ThinkingParagraphRow(text: paragraph.text)
-                                    .equatable()
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.leading, Theme.Space.md)
-                        .overlay(alignment: .leading) {
-                            Capsule().fill(Theme.accentSoft).frame(width: 2)
-                        }
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel("Assistant reasoning")
-                        .accessibilityIdentifier("assistant.reasoning")
-                    } else {
-                        Text(reasoning)
-                            .font(.callout)
-                            .foregroundStyle(Theme.textSecondary)
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.leading, Theme.Space.md)
-                            .overlay(alignment: .leading) {
-                                Capsule().fill(Theme.accentSoft).frame(width: 2)
-                            }
-                            // Expose the unformatted reasoning as one coherent value. Besides improving
-                            // VoiceOver, this gives physical-device tests a stable raw trace instead of a set of
-                            // renderer-dependent text fragments.
-                            .accessibilityElement(children: .ignore)
-                            .accessibilityLabel("Assistant reasoning")
-                            .accessibilityValue(reasoning)
-                            .accessibilityIdentifier("assistant.reasoning")
+                let chunks = IncrementalThinkingSplitter.split(reasoning)
+                let isDone = phase != .thinking
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(chunks) { chunk in
+                        ThinkingChunkRow(text: chunk.text, selectable: isDone)
+                            .equatable()
                     }
                 }
-                .transition(reduceMotion
-                    ? .opacity
-                    : .move(edge: .top).combined(with: .opacity))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, Theme.Space.md)
+                .overlay(alignment: .leading) {
+                    Capsule().fill(Theme.accentSoft).frame(width: 2)
+                }
+                // Expose the unformatted reasoning as one coherent value once completed. Besides improving
+                // VoiceOver, this gives physical-device tests a stable raw trace instead of a set of
+                // renderer-dependent text fragments.
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Assistant reasoning")
+                .accessibilityValue(isDone ? reasoning : "")
+                .accessibilityIdentifier("assistant.reasoning")
             }
         }
         .padding(Theme.Space.md)
         .background(Theme.surface2.opacity(0.5),
                     in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
-        .animation(Motion.spring, value: isExpanded)
     }
 
     private var header: some View {
@@ -190,7 +193,6 @@ struct ThinkingDisclosure: View {
                 Image(systemName: "brain")
                     .font(.caption)
                     .foregroundStyle(Theme.accent)
-                    .symbolEffect(.pulse, isActive: phase == .thinking)
                 Text(timeline.label)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(Theme.textSecondary)
@@ -232,23 +234,7 @@ struct ThinkingDisclosure: View {
             timeline = updated
         }
     }
-
-    private var reduceMotion: Bool {
-        #if os(iOS)
-        UIAccessibility.isReduceMotionEnabled
-        #elseif os(macOS)
-        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        #else
-        false
-        #endif
-    }
 }
-
-#if os(iOS)
-import UIKit
-#elseif os(macOS)
-import AppKit
-#endif
 
 #if DEBUG
 #Preview("Thinking — collapsed") {
