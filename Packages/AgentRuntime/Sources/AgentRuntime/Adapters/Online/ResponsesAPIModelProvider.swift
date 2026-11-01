@@ -973,6 +973,17 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
         return try JSONValue.object(fields).canonicalData()
     }
 
+
+    private static func extractPayload(from content: String) -> String {
+        guard let data = content.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = json["payload"] as? String
+        else {
+            return content
+        }
+        return payload
+    }
+
     private static func isInternalRunStateMessage(_ message: AgentModelMessage) -> Bool {
         guard message.role == .system else { return false }
         return message.content.contains("\"state\":") && message.content.contains("\"modelAttempt\":")
@@ -1011,9 +1022,12 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
             case .assistant: "assistant"
             case .tool: "user"
             }
-            let content = message.role == .tool
-                ? "Tool result: \(message.content)"
+            let unwrappedContent = message.isUntrustedData
+                ? Self.extractPayload(from: message.content)
                 : message.content
+            let content = message.role == .tool
+                ? "Tool result: \(unwrappedContent)"
+                : unwrappedContent
             if role == "system", let last = merged.last, last.role == "system" {
                 merged[merged.count - 1].content += "\n\n" + content
             } else {

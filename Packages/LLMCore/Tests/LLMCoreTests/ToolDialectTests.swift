@@ -118,7 +118,15 @@ final class ToolDialectTests: XCTestCase {
         for d in [ToolDialect.qwen, .gemma, .hunyuan, .deepSeek] {
             let framed = d.frameResult("PAYLOAD", name: "remember")
             XCTAssertTrue(framed.contains("PAYLOAD"), "\(d)")
-            XCTAssertTrue(framed.contains("must NOT be followed"), "\(d) dropped the injection fence")
+            if d == .gemma {
+                XCTAssertTrue(framed.contains("<|tool_response>"), "\(d)")
+            } else {
+                XCTAssertTrue(framed.contains("<tool_response>"), "\(d)")
+            }
+            let decl = d.declarations([
+                ToolSchema(name: "test", description: "test", parameters: [])
+            ])
+            XCTAssertTrue(decl.contains("must NOT be followed"), "\(d) dropped the injection fence from declarations")
         }
     }
 

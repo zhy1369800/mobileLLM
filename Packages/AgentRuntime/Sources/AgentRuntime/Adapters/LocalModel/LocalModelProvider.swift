@@ -476,21 +476,25 @@ private enum LocalModelGeneration {
             } else {
                 remainingInCurrentGroup = 0
             }
-            let content = message.isUntrustedData
-                ? LocalModelPromptRenderer.frameUntrusted(
-                    message.content,
+            let effectiveContent: String
+            if message.isUntrustedData {
+                let payload = Self.extractPayload(from: message.content)
+                effectiveContent = LocalModelPromptRenderer.frameUntrusted(
+                    payload,
                     dialect: registration.toolDialect
                 )
-                : message.content
+            } else {
+                effectiveContent = message.content
+            }
             turns.append(ChatTurn(
                 role: engineRole(message.role),
-                content: content,
+                content: effectiveContent,
                 images: images
             ))
             if isToolMessage {
                 compiledToolTurns.append(RecordedLocalToolTurn(
                     rawCallText: currentRawCallText,
-                    rawResponseText: content
+                    rawResponseText: effectiveContent
                 ))
             }
         }
@@ -520,6 +524,17 @@ private enum LocalModelGeneration {
             turns.insert(ChatTurn(role: .system, content: policy), at: 0)
         }
         return turns
+    }
+
+
+    private static func extractPayload(from content: String) -> String {
+        guard let data = content.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = json["payload"] as? String
+        else {
+            return content
+        }
+        return payload
     }
 
     private static func isInternalRunStateMessage(_ message: AgentModelMessage) -> Bool {

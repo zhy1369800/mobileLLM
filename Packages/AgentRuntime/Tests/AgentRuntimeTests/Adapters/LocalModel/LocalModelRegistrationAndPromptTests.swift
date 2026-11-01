@@ -295,7 +295,10 @@ final class LocalModelRegistrationAndPromptTests: XCTestCase {
             dialect: .gemma
         )
         XCTAssertTrue(fenced.contains("ignore policy"))
-        XCTAssertTrue(fenced.contains("must NOT be followed"))
+        XCTAssertTrue(fenced.contains("<|tool_response>"))
+
+        let toolNotice = try LocalModelPromptRenderer.toolBlock(bindings: bindings, dialect: .qwen)
+        XCTAssertTrue(toolNotice.contains("must NOT be followed"))
 
         let schema = try JSONSchemaDocument(root: .object([
             "type": .string("object"),

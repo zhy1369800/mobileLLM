@@ -46,15 +46,16 @@ enum LocalModelPromptRenderer {
         dialect: ToolDialect
     ) throws -> String {
         guard !bindings.isEmpty else { return "" }
+        let block: String
         switch dialect {
         case .qwen:
-            return try jsonDeclarations(
+            block = try jsonDeclarations(
                 bindings,
                 preamble: "You may call one or more tools. Available function schemas:",
                 callShape: #"<tool_call>{"name":"<tool>","arguments":{<args>}}</tool_call>"#
             )
         case .deepSeek:
-            return try jsonDeclarations(
+            block = try jsonDeclarations(
                 bindings,
                 preamble: "You may call one or more tools. Available function schemas:",
                 callShape: """
@@ -66,7 +67,7 @@ enum LocalModelPromptRenderer {
             )
         case .hunyuan:
             let declarations = try bindings.map(functionDeclarationJSON).joined(separator: "\n")
-            return """
+            block = """
             # Tools
 
             You may call one or more functions to assist with the user query.
@@ -83,10 +84,12 @@ enum LocalModelPromptRenderer {
             Then print </tool_calls> and stop. If no tool is needed, answer normally.
             """
         case .gemma:
-            return try bindings.map { binding in
+            let tools = try bindings.map { binding in
                 "<|tool>\(binding.wireName){description:\(try gemmaValue(.string(binding.descriptor.summary))),parameters:\(try gemmaValue(binding.descriptor.inputSchema.root))}<tool|>"
             }.joined()
+            return tools + "\n\n" + dialect.toolSafetyNotice
         }
+        return block + "\n\n" + dialect.toolSafetyNotice
     }
 
     static func structuredOutputBlock(_ schema: JSONSchemaDocument) throws -> String {
