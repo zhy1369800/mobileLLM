@@ -1313,24 +1313,40 @@ public final class ChatStore {
     ) {
         let store = self.store
         let imageRefs = user.attachments ?? []
-        let prepared: PreparedAgentRunStart
-        do {
-            prepared = try agentRuns.prepareStart(
-                conversationID: conversationID,
-                userMessageID: user.id,
-                assistantMessageID: assistant.id,
-                text: text,
-                imageRefs: imageRefs
-            )
-        } catch {
-            agentLastSendError = "\(error)"
-            finalizeAgentRun(
-                conversationID: conversationID,
-                assistantMessageID: assistant.id,
-                failed: true,
-                errorMessage: error.localizedDescription
-            )
-            return
+        // A due auto-compaction needs an LLM call first, and the run snapshot freezes the conversation's
+        // summary + cutoff — so in that case the capture moves after the summary. With no compaction due
+        // (always the case when the feature is off) the capture stays synchronous exactly as before.
+        let compaction = compactionPlanIfNeeded(
+            conversationID: conversationID,
+            excluding: [user.id, assistant.id],
+            currentText: text
+        )
+        let prepareRun: @MainActor () -> PreparedAgentRunStart? = { [weak self] in
+            do {
+                return try agentRuns.prepareStart(
+                    conversationID: conversationID,
+                    userMessageID: user.id,
+                    assistantMessageID: assistant.id,
+                    text: text,
+                    imageRefs: imageRefs
+                )
+            } catch {
+                self?.agentLastSendError = "\(error)"
+                self?.finalizeAgentRun(
+                    conversationID: conversationID,
+                    assistantMessageID: assistant.id,
+                    failed: true,
+                    errorMessage: error.localizedDescription
+                )
+                return nil
+            }
+        }
+        let early: PreparedAgentRunStart?
+        if compaction == nil {
+            guard let captured = prepareRun() else { return }
+            early = captured
+        } else {
+            early = nil
         }
         streamingMessageID = assistant.id
         streaming = StreamingState(messageID: assistant.id)
@@ -1366,6 +1382,17 @@ public final class ChatStore {
                     )
                     return
                 }
+                if let compaction {
+                    await self?.runCompaction(compaction, conversationID: conversationID)
+                    try Task.checkCancellation()
+                }
+                let prepared: PreparedAgentRunStart
+                if let early {
+                    prepared = early
+                } else {
+                    guard let captured = prepareRun() else { return }
+                    prepared = captured
+                }
                 _ = try await agentRuns.start(prepared)
             } catch is CancellationError {
                 self?.agentLastSendError = "agent send cancelled before start"
@@ -1385,6 +1412,89 @@ public final class ChatStore {
                 )
             }
         }
+    }
+
+    /// Conversations whose last compaction attempt failed this session; skipped so a broken summarizer
+    /// does not add a failing model call to every send.
+    private var compactionFailedConversations: Set<UUID> = []
+
+    /// The compaction this send needs, if any: on-device models only, feature on, prompt past the trigger.
+    private func compactionPlanIfNeeded(
+        conversationID: UUID,
+        excluding turnIDs: Set<UUID>,
+        currentText: String
+    ) -> ContextCompactor.Plan? {
+        guard settings.autoCompactionEnabled, !isOnlineActive, !isShortcutsActive,
+              !compactionFailedConversations.contains(conversationID),
+              let ci = conversations.firstIndex(where: { $0.id == conversationID }),
+              let model = activeModel?.model else { return nil }
+        // Edit / regenerate replace message ids. A cutoff that no longer exists means the summary describes
+        // history that is gone, so drop it before planning.
+        if let cutoff = conversations[ci].compactionCutoffMessageID,
+           !conversations[ci].messages.contains(where: { $0.id == cutoff }) {
+            conversations[ci].compactionSummary = nil
+            conversations[ci].compactionCutoffMessageID = nil
+            persist(conversations[ci])
+        }
+        let history = conversations[ci].messages.filter { !turnIDs.contains($0.id) }
+        let fixedTokens = TokenEstimate.tokens(in: settings.systemPrompt)
+            + TokenEstimate.tokens(in: currentText)
+            + ContextCompactor.reservedOutputTokens
+        return ContextCompactor.plan(
+            history: history,
+            cutoffID: conversations[ci].compactionCutoffMessageID,
+            summary: conversations[ci].compactionSummary,
+            fixedTokens: fixedTokens,
+            contextLength: effectiveSampling(for: model).contextTokenCap
+        )
+    }
+
+    /// Asks the resident model to summarize the aged-out messages, then moves the cutoff. Runs before the
+    /// run starts, so it never overlaps the run's own use of the engine. Any failure leaves the conversation
+    /// untouched: the turn proceeds with the runtime's normal truncation.
+    private func runCompaction(_ plan: ContextCompactor.Plan, conversationID: UUID) async {
+        guard let model = activeModel?.model,
+              let ci = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+        let note = "Compacting conversation…"
+        streaming?.warmingNote = note
+        defer { if streaming?.warmingNote == note { streaming?.warmingNote = nil } }
+
+        var params = effectiveSampling(for: model)
+        let contextLength = params.contextTokenCap
+        params.thinking = false
+        params.temperature = 0.2
+        params.maxTokens = ContextCompactor.summaryTokenBudget(contextLength: contextLength)
+        let turns = ContextCompactor.summarizerTurns(
+            previousSummary: conversations[ci].compactionSummary,
+            messages: plan.toSummarize,
+            inputTokenBudget: ContextCompactor.inputTokenBudget(contextLength: contextLength)
+        )
+
+        var raw = ""
+        do {
+            for try await delta in engine.generate(messages: turns, params: params) {
+                try Task.checkCancellation()
+                if case .answer(let piece) = delta { raw += piece }
+                if case .done = delta { break }
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            compactionFailedConversations.insert(conversationID)
+            return
+        }
+
+        guard let summary = ContextCompactor.cleanedSummary(raw),
+              let idx = conversations.firstIndex(where: { $0.id == conversationID }),
+              conversations[idx].messages.contains(where: { $0.id == plan.newCutoffID })
+        else {
+            compactionFailedConversations.insert(conversationID)
+            return
+        }
+        conversations[idx].compactionSummary = summary
+        conversations[idx].compactionCutoffMessageID = plan.newCutoffID
+        persist(conversations[idx])
+        showToast(Toast("Compacted earlier messages to keep replies fast", autoDismiss: 3))
     }
 
     /// Starts a message-anchored workflow. The app-assembled launcher creates the reserved parent

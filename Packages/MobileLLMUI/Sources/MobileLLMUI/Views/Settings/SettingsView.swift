@@ -187,6 +187,17 @@ struct SettingsView: View {
             .tint(Theme.accent)
             manageToolsRow
             Divider().background(Theme.hairline)
+            Toggle(isOn: $settings.autoCompactionEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Auto-compact conversations").font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    Text("On-device models only. When a chat nears the context limit, the model summarizes older "
+                         + "messages once and keeps the recent ones, so following replies reuse the cache and stay fast. "
+                         + "The summary costs one extra model pass when it runs.")
+                        .font(.caption).foregroundStyle(Theme.textTertiary)
+                }
+            }
+            .tint(Theme.accent)
+            Divider().background(Theme.hairline)
             Toggle(isOn: $settings.localModelLoggingEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Record local model logs")

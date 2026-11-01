@@ -207,6 +207,13 @@ public struct Conversation: Identifiable, Codable, Sendable, Equatable {
     /// Pure tag grouping for this conversation (spec §20 "Project"): a conversation may belong to any
     /// number of tags, and tags are shared across conversations. Optional → old records decode as nil.
     public var projectTags: [String]?
+    /// Persistent summary generated when the conversation was compacted to fit within context (OGAM-style).
+    /// Kept to preserve KV-cache prefix reuse across turns and sessions. Optional → old records decode as nil.
+    public var compactionSummary: String?
+    /// The last message folded into `compactionSummary`: it and everything before it no longer reach the
+    /// model. Set together with the summary; if this message disappears (edit / regenerate) the summary is
+    /// stale and ignored. Optional → old records decode as nil.
+    public var compactionCutoffMessageID: UUID?
 
     public init(id: UUID = UUID(), title: String = "New Chat", createdAt: Date = Date(),
                 updatedAt: Date = Date(), systemPromptID: String? = nil, modelID: String,
@@ -216,7 +223,9 @@ public struct Conversation: Identifiable, Codable, Sendable, Equatable {
                 sampling: ConversationSampling? = nil,
                 approvalMode: AgentApprovalMode? = nil,
                 reasoningEffort: ReasoningEffort? = nil,
-                projectTags: [String]? = nil) {
+                projectTags: [String]? = nil,
+                compactionSummary: String? = nil,
+                compactionCutoffMessageID: UUID? = nil) {
         self.id = id
         self.title = title
         self.createdAt = createdAt
@@ -234,6 +243,8 @@ public struct Conversation: Identifiable, Codable, Sendable, Equatable {
         self.approvalMode = approvalMode
         self.reasoningEffort = reasoningEffort
         self.projectTags = projectTags
+        self.compactionSummary = compactionSummary
+        self.compactionCutoffMessageID = compactionCutoffMessageID
     }
 
     /// The conversation's project tags (empty when none are stored).

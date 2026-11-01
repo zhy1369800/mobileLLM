@@ -75,6 +75,9 @@ public final class AppSettings {
     /// Keep all enabled tools exposed to the model across all turns (OGAM-style),
     /// bypassing keyword-based on-demand tool routing.
     public var alwaysExposeTools: Bool { didSet { persist() } }
+    /// Summarize older messages once a local-model chat nears its context limit (OGAM-style), so the prompt
+    /// prefix stays stable between compactions and the KV cache keeps hitting. Off by default.
+    public var autoCompactionEnabled: Bool { didSet { persist() } }
     /// Dictation language as a locale identifier (`nil` = follow the system). One recognizer = one
     /// language, so code-switching users pick explicitly via the mic's long-press menu.
     public var dictationLocale: String? { didSet { persist() } }
@@ -364,6 +367,7 @@ public final class AppSettings {
         thinkingDisplay = snap?.thinkingDisplay ?? .autoCollapse
         toolsEnabled = snap?.toolsEnabled ?? false
         alwaysExposeTools = snap?.alwaysExposeTools ?? false
+        autoCompactionEnabled = snap?.autoCompactionEnabled ?? false
         dictationLocale = snap?.dictationLocale ?? nil
         let (servers, migrated) = Self.loadMCPServers(from: snap, keychain: keychain)
         mcpServers = servers
@@ -563,6 +567,7 @@ public final class AppSettings {
         var thinkingDisplay: ThinkingDisplayMode
         var toolsEnabled: Bool? = false   // optional → old snapshots decode
         var alwaysExposeTools: Bool? = false
+        var autoCompactionEnabled: Bool? = false
         var dictationLocale: String? = nil
         var mcpServers: [MCPServer]? = []
         /// Ids of servers whose bearer token lives in the Keychain (A2.9). Absent in pre-migration
@@ -614,6 +619,7 @@ public final class AppSettings {
                             thinkingDefault: thinkingDefault, thinkingDisplay: thinkingDisplay,
                             toolsEnabled: toolsEnabled,
                             alwaysExposeTools: alwaysExposeTools,
+                            autoCompactionEnabled: autoCompactionEnabled,
                             dictationLocale: dictationLocale,
                             mcpServers: scrubbed, mcpTokenMarkers: markers,
                             disabledBuiltInTools: disabledBuiltInTools, searchEngines: searchEngines,
@@ -667,6 +673,7 @@ public final class AppSettings {
         thinkingDisplay = .autoCollapse
         toolsEnabled = false
         alwaysExposeTools = false
+        autoCompactionEnabled = false
         dictationLocale = nil
         mcpServers = []
         onlineServices = []

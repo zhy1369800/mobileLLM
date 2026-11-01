@@ -391,4 +391,27 @@ final class SettingsPersistenceTests: XCTestCase {
         let settings = AppSettings(defaults: defaults)
         XCTAssertFalse(settings.keepScreenAwake)
     }
+
+    /// Compaction costs an extra model pass, so it is opt-in: a fresh install and every pre-existing
+    /// snapshot (which has no such key) must start with it off.
+    func testAutoCompactionDefaultsToOffAndRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertFalse(settings.autoCompactionEnabled)
+
+        settings.autoCompactionEnabled = true
+        XCTAssertTrue(AppSettings(defaults: defaults).autoCompactionEnabled)
+
+        settings.autoCompactionEnabled = false
+        XCTAssertFalse(AppSettings(defaults: defaults).autoCompactionEnabled)
+    }
+
+    func testLegacySnapshotDecodesWithAutoCompactionOff() {
+        write(#"""
+        {"defaultModelID":"bonsai-8b","systemPrompt":"keep me","systemPromptSeeded":true,
+         "thinkingDefault":true,"thinkingDisplay":"autoCollapse","toolsEnabled":false,
+         "temperature":0.7,"topP":0.95,"topK":20,"repetitionPenalty":1.05,"maxTokens":1024,
+         "contextLength":8192,"kvBits":4,"appearance":"system"}
+        """#)
+        XCTAssertFalse(AppSettings(defaults: defaults).autoCompactionEnabled)
+    }
 }

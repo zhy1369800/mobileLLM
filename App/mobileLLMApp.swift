@@ -809,13 +809,25 @@ func makeAgentSnapshot(
     } else {
         localToolNames = container.settings.builtInToolConfig.enabled.map(\.rawValue).sorted()
     }
+    // Auto-compaction (local runs only): messages up to the persisted cutoff are replaced by their summary
+    // in the system prompt. Disabled, online, or a stale cutoff leaves history exactly as it was.
+    var historyMessages = conversation.messages
+    var systemPrompt = container.settings.systemPrompt
+    if container.settings.autoCompactionEnabled, onlineParts == nil,
+       let summary = conversation.compactionSummary, !summary.isEmpty,
+       let cutoff = conversation.compactionCutoffMessageID,
+       let active = ContextCompactor.activeMessages(conversation.messages, cutoffID: cutoff)
+    {
+        historyMessages = active
+        systemPrompt += "\n\n" + ContextCompactor.summaryBlock(summary)
+    }
     return AgentRunRequestSnapshot(
         conversationID: conversationID,
         userTurnID: userTurnID,
         text: text,
         imageRefs: imageRefs,
-        messages: conversation.messages,
-        systemPrompt: container.settings.systemPrompt,
+        messages: historyMessages,
+        systemPrompt: systemPrompt,
         memoryFacts: container.chat.memoryBook?.facts ?? [],
         activeSkill: conversation.skillID.flatMap { container.chat.skillStore?.skill(id: $0) },
         model: identity.model,
