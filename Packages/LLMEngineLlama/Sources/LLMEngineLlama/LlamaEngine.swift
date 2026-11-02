@@ -322,15 +322,13 @@ public actor LlamaEngine: LLMEngine {
                                                    tokens: promptTokens,
                                                    turns: turnsCopy)
         trimCheckpoints()
-        Task.detached(priority: .background) { [context] in
-            let written = filePath.withCString { cPath in
-                tokensCopy.withUnsafeBufferPointer { buf in
-                    llama_state_seq_save_file(context, cPath, 0, buf.baseAddress, buf.count)
-                }
+        let written = filePath.withCString { cPath in
+            tokensCopy.withUnsafeBufferPointer { buf in
+                llama_state_seq_save_file(context, cPath, 0, buf.baseAddress, buf.count)
             }
-            if written == 0 {
-                NSLog("[LlamaEngine] Checkpoint background save failed (turn=%d)", Int32(turnCount))
-            }
+        }
+        if written == 0 {
+            NSLog("[LlamaEngine] Checkpoint save failed (turn=%d)", Int32(turnCount))
         }
     }
 
@@ -778,8 +776,8 @@ public actor LlamaEngine: LLMEngine {
                 let isFullPromptMatch = isHistoricalPrefixTurn || (commonCount >= promptTokens.count)
 
                 // 确定安全的回滚点与所需解码的后缀：
-                let effectiveCommon: Int
-                let totalPromptCountForStats: Int
+                var effectiveCommon: Int
+                var totalPromptCountForStats: Int
 
                 if let knownEnd = knownPromptEndPos, knownEnd > 1, knownEnd <= sessionCache.tokens.count {
                     // 精确重发最优路径：Prompt 在显存中完整存在，回滚 1 个 token 刷新 logits，达成 99.9% 复用率
@@ -837,10 +835,11 @@ public actor LlamaEngine: LLMEngine {
                             promptTokenCount = suffixTokens.count
                             cachedRollbackTokensCount = effectiveCommon
                             rollbackSucceeded = true
+                            let hitRateText = String(format: "%.1f%%", hitRatePct)
                             if isFullPromptMatch {
-                                rollbackDiagnosticMessage = "前缀回滚命中(重发): 复用 \(effectiveCommon) tok (\(String(format: "%.1f%%", hitRatePct))), 仅刷新末尾Token"
+                                rollbackDiagnosticMessage = "前缀回滚命中(重发): 复用 \(effectiveCommon) tok (\(hitRateText)), 仅刷新末尾Token"
                             } else {
-                                rollbackDiagnosticMessage = "前缀回滚命中: 复用 \(effectiveCommon) tok (\(String(format: "%.1f%%", hitRatePct))), 解码后缀 \(suffixTokens.count) tok"
+                                rollbackDiagnosticMessage = "前缀回滚命中: 复用 \(effectiveCommon) tok (\(hitRateText)), 解码后缀 \(suffixTokens.count) tok"
                             }
                         } else {
                             rollbackDiagnosticMessage = "回滚失败: 后缀Token解码失败 (llama_decode error)"
