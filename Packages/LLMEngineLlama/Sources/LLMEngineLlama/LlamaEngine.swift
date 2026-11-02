@@ -126,6 +126,7 @@ public actor LlamaEngine: LLMEngine {
         GenerationGovernance()
     }) {
         self.governanceFactory = governanceFactory
+        Self.cleanupResidualCheckpoints()
     }
     public var isLoaded: Bool { model != nil }
 
@@ -296,6 +297,16 @@ public actor LlamaEngine: LLMEngine {
         if let dir = checkpointDirectory {
             try? FileManager.default.removeItem(at: dir)
             checkpointDirectory = nil
+        }
+    }
+
+    /// Clean up any leftover checkpoint directories from previous runs. Safe to call at startup or teardown.
+    public static func cleanupResidualCheckpoints() {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("llama-checkpoints", isDirectory: true)
+        if FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.removeItem(at: dir)
+            NSLog("[LlamaEngine] Residual checkpoint directory cleaned up: %@", dir.path)
         }
     }
 

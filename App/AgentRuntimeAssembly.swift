@@ -762,12 +762,10 @@ public final class AgentRuntimeAssembly {
                 configuration: try LocalModelAdapterConfiguration(
                     currentKVBits: {
                         if let data = UserDefaults.standard.data(forKey: AppConfigurationKeys.settingsStorageKey),
-                           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                           let bits = json["kvBits"] as? Int,
-                           (bits == 0 || bits == 4 || bits == 6 || bits == 8) {
-                            return bits
+                           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                            return Sampling.resolveKVBits(json["kvBits"] as? Int)
                         }
-                        return 4
+                        return Sampling.defaultKVBits
                     },
                     currentSpeculativeMode: {
                         if let data = UserDefaults.standard.data(forKey: AppConfigurationKeys.settingsStorageKey),

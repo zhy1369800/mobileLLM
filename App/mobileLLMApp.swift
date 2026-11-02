@@ -292,6 +292,9 @@ struct MobileLLMApp: App {
     #endif
 
     init() {
+        // Clean up any stale KV checkpoint files left behind by unexpected termination (e.g. Jetsam).
+        LlamaEngine.cleanupResidualCheckpoints()
+
         // Device-test harness opt-out for cooperative thermal pacing (production never sets this).
         if ProcessInfo.processInfo.environment["MOBILELLM_DISABLE_THERMAL"] == "1" {
             ThermalGovernor.isPacingEnabled = false

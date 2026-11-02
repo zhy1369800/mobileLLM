@@ -107,3 +107,19 @@ public struct Sampling: Sendable, Equatable, Codable {
     }
 }
 
+extension Sampling {
+    /// Permitted KV cache bit depths across engines: 0 (Full/f16), 4 (Q4_0), 6 (K Q4_0 + V Q8_0), 8 (Q8_0).
+    public static let validKVBits: Set<Int> = [0, 4, 6, 8]
+
+    /// Default KV cache bit depth across the application (8-bit Q8_0 preserves attention accuracy with low memory footprint).
+    public static let defaultKVBits: Int = 8
+
+    /// Resolves and validates a candidate KV bit depth against permitted options, falling back to `defaultKVBits`.
+    public static func resolveKVBits(_ candidate: Int?) -> Int {
+        guard let candidate, validKVBits.contains(candidate) else {
+            return defaultKVBits
+        }
+        return candidate
+    }
+}
+
