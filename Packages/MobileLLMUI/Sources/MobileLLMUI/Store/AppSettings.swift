@@ -306,6 +306,9 @@ public final class AppSettings {
     public var appearance: AppearanceMode { didSet { persist() } }
 
     /// Keep the screen awake while the app is in the foreground (iOS only).
+    /// Whether KV snapshot checkpoints on disk are enabled for edit-resend caching.
+    public var kvCheckpointsEnabled: Bool { didSet { persist() } }
+
     public var keepScreenAwake: Bool {
         didSet {
             applyIdleTimer()
@@ -441,6 +444,7 @@ public final class AppSettings {
         localModelLoggingEnabled = snap?.localModelLoggingEnabled ?? false
         appearance = snap?.appearance ?? .system
         keepScreenAwake = snap?.keepScreenAwake ?? false
+        kvCheckpointsEnabled = snap?.kvCheckpointsEnabled ?? false
         let initialMirror = snap?.useHuggingFaceMirror ?? (UserDefaults.standard.object(forKey: HuggingFaceEndpoint.userDefaultsKey) as? Bool ?? true)
         useHuggingFaceMirror = initialMirror
         UserDefaults.standard.set(initialMirror, forKey: HuggingFaceEndpoint.userDefaultsKey)
@@ -502,7 +506,8 @@ public final class AppSettings {
                  contextTokenCap: effectiveContext(for: model), kvBits: kvBits,
                  speculativeMode: speculativeMode,
                  thinkingBudget: thinkingBudget,
-                 prefillBatchSize: prefillBatchSize)
+                 prefillBatchSize: prefillBatchSize,
+                 kvCheckpointsEnabled: kvCheckpointsEnabled)
     }
 
     /// The context the engine really gets for a model — the setting, clamped by the model's native ceiling.
@@ -605,6 +610,7 @@ public final class AppSettings {
         var appearance: AppearanceMode
         var keepScreenAwake: Bool? = false
         var useHuggingFaceMirror: Bool? = nil
+        var kvCheckpointsEnabled: Bool? = false
     }
 
     private func persist() {
@@ -645,7 +651,8 @@ public final class AppSettings {
                             localModelLoggingEnabled: localModelLoggingEnabled,
                             appearance: appearance,
                             keepScreenAwake: keepScreenAwake,
-                            useHuggingFaceMirror: useHuggingFaceMirror)
+                            useHuggingFaceMirror: useHuggingFaceMirror,
+                            kvCheckpointsEnabled: kvCheckpointsEnabled)
         if let data = try? JSONEncoder().encode(snap) { defaults.set(data, forKey: key) }
     }
 
@@ -696,6 +703,7 @@ public final class AppSettings {
         localModelLoggingEnabled = false
         appearance = .system
         keepScreenAwake = false
+        kvCheckpointsEnabled = false
         useHuggingFaceMirror = true
         UserDefaults.standard.set(true, forKey: HuggingFaceEndpoint.userDefaultsKey)
         loading = false

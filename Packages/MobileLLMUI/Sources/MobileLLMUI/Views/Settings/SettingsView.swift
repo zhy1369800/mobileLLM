@@ -574,6 +574,11 @@ struct SettingsView: View {
                     }
                     Text("Controls llama.cpp n_batch and n_ubatch during prompt prefill. Larger values speed up first-turn prefill at the cost of higher peak compute buffer memory (512 default).")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
+                    Toggle(isOn: $settings.kvCheckpointsEnabled) {
+                        Text("KV Checkpoints").font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    }
+                    Text("Saves per-turn KV snapshots to temporary disk for long conversations (>1024 tok). Allows instant prefix reuse when editing earlier questions with hybrid/SSM models (e.g. Qwen 3.5), at the cost of background disk writes.")
+                        .font(.caption).foregroundStyle(Theme.textTertiary)
                 }
                 .padding(.top, Theme.Space.xs)
             }

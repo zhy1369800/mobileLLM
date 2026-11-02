@@ -49,6 +49,8 @@ public struct Sampling: Sendable, Equatable, Codable {
     public var thinkingBudget: Int
     /// Prefill batch size (`n_batch` and `n_ubatch` in llama.cpp).
     public var prefillBatchSize: Int
+    /// Whether to save and restore per-turn KV checkpoints on disk for edit-resend reuse (off by default).
+    public var kvCheckpointsEnabled: Bool
 
     public init(temperature: Double = 0.7,
                 topP: Double = 0.95,
@@ -62,7 +64,8 @@ public struct Sampling: Sendable, Equatable, Codable {
                 seed: UInt64? = nil,
                 speculativeMode: SpeculativeMode = .off,
                 thinkingBudget: Int = 512,
-                prefillBatchSize: Int = 512) {
+                prefillBatchSize: Int = 512,
+                kvCheckpointsEnabled: Bool = false) {
         self.temperature = temperature
         self.topP = topP
         self.topK = topK
@@ -76,12 +79,13 @@ public struct Sampling: Sendable, Equatable, Codable {
         self.speculativeMode = speculativeMode
         self.thinkingBudget = thinkingBudget
         self.prefillBatchSize = prefillBatchSize
+        self.kvCheckpointsEnabled = kvCheckpointsEnabled
     }
 
     private enum CodingKeys: String, CodingKey {
         case temperature, topP, topK, repetitionPenalty, maxTokens, thinking
         case contextTokenCap, kvBits, quantizedKVStart, seed, speculativeMode
-        case thinkingBudget, prefillBatchSize
+        case thinkingBudget, prefillBatchSize, kvCheckpointsEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -99,6 +103,7 @@ public struct Sampling: Sendable, Equatable, Codable {
         self.speculativeMode = try container.decodeIfPresent(SpeculativeMode.self, forKey: .speculativeMode) ?? .off
         self.thinkingBudget = try container.decodeIfPresent(Int.self, forKey: .thinkingBudget) ?? 512
         self.prefillBatchSize = try container.decodeIfPresent(Int.self, forKey: .prefillBatchSize) ?? 512
+        self.kvCheckpointsEnabled = try container.decodeIfPresent(Bool.self, forKey: .kvCheckpointsEnabled) ?? false
     }
 }
 

@@ -724,7 +724,7 @@ public actor LlamaEngine: LLMEngine {
                 // Save a checkpoint for this turn boundary so an edit-resend can reuse the full
                 // resident KV state even when seq_rm is rejected. The complete prompt token list
                 // is the cache's existing tokens plus the newly decoded suffix.
-                if !sessionCache.hasImages {
+                if params.kvCheckpointsEnabled && !sessionCache.hasImages {
                     let fullPromptTokens = sessionCache.tokens + suffixTokens
                     saveCheckpoint(turnCount: kept.count, promptTokens: fullPromptTokens, turns: kept, context: context)
                 }
@@ -853,7 +853,7 @@ public actor LlamaEngine: LLMEngine {
                     }
                 }
 
-                if !rollbackSucceeded {
+                if !rollbackSucceeded, params.kvCheckpointsEnabled {
                     // Edit-resend fallback #2: whole-sequence checkpoint restore. Serves architectures
                     // where llama_memory_seq_rm is rejected (Qwen 3.5 hybrid Gated DeltaNet / recurrent
                     // state) — instead of a full recompute we reload the saved "prompt fully prefilled"
@@ -922,7 +922,7 @@ public actor LlamaEngine: LLMEngine {
             // so that a later edit-resend that seq_rm cannot serve (Qwen 3.5 hybrid recurrent state)
             // can restore it instead of recomputing. The write is offloaded to a background task and
             // skipped for short contexts (≤ 1024 tok) where full-prefill is already fast enough.
-            if !hasImages, let pt = prefilledPromptTokens, !pt.isEmpty {
+            if params.kvCheckpointsEnabled && !hasImages, let pt = prefilledPromptTokens, !pt.isEmpty {
                 saveCheckpoint(turnCount: kept.count, promptTokens: pt, turns: kept, context: context)
             }
             let promptSecs = max(Date().timeIntervalSince(prefillStart), 0.0001)
