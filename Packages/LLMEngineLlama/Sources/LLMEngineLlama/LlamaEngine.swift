@@ -90,14 +90,16 @@ public actor LlamaEngine: LLMEngine {
     private var checkpoints: [Int: SessionCheckpoint] = [:]
     /// Insertion order of checkpoint keys (oldest first), used for LRU eviction.
     private var checkpointOrder: [Int] = []
-    private static let checkpointMaxSlots = 4
+    /// LRU cap: keep the 2 most recent per-turn snapshots. Covers "edit last or second-to-last turn"
+    /// (the vast majority of real edits) while bounding tmp-directory size to ~2 × 130–300 MiB.
+    private static let checkpointMaxSlots = 2
     /// Recurrent-state rollback snapshots (`n_rs_seq`) for hybrid architectures (Qwen 3.5 Gated
     /// DeltaNet). Lets `llama_memory_seq_rm` rewind up to this many tokens without recompute — covers
     /// Regenerate (1-token refresh) and near-edit resends on the fast path; deeper edits still fall
-    /// back to the file checkpoint. Cost: recurrent S memory ×(1+n_rs_seq) — Qwen3.5-4B adds 24 MiB
-    /// per slot. Attention-only architectures are clamped to 0 inside llama.cpp, so this is safe for
-    /// every model.
-    private static let rsRollbackSlots: UInt32 = 4
+    /// back to the file checkpoint. Cost: recurrent S memory ×(1+n_rs_seq) — Qwen3.5-4B adds ~24 MiB
+    /// per slot, so 2 slots = ~48 MiB (acceptable); larger models (7B+) scale proportionally.
+    /// Attention-only architectures are clamped to 0 inside llama.cpp, so this is safe for every model.
+    private static let rsRollbackSlots: UInt32 = 2
     private var checkpointDirectory: URL? = nil
     private var loadedID: String?
     private var thinkingCapable = true
@@ -299,28 +301,37 @@ public actor LlamaEngine: LLMEngine {
 
     /// Save a "prompt fully prefilled" checkpoint for `turnCount`. Failures are never fatal — a
     /// checkpoint is a pure optimization; without one edit-resend simply falls back to full recompute.
+    ///
+    /// Short contexts (≤ 1024 tokens) are skipped: full-prefill takes < 0.5 s and the checkpoint
+    /// overhead is not worth it. The C-layer write (~100–300 ms for an 8K Q8_0 snapshot) is offloaded
+    /// to a background task so it never blocks the actor or adds latency to the first generated token.
     private func saveCheckpoint(turnCount: Int, promptTokens: [llama_token], turns: [ChatTurn], context: OpaquePointer) {
         guard !promptTokens.isEmpty, !turns.isEmpty else { return }
+        // Short-context skip: full recompute is fast enough, not worth the disk write.
+        guard promptTokens.count > 1024 else { return }
         // Same-turn boundary with identical prompt: already saved, skip the (potentially 100+ MB) write.
         if let existing = checkpoints[turnCount], existing.tokens == promptTokens { return }
         guard let dir = checkpointDirectoryURL() else { return }
         let filePath = dir.appendingPathComponent("ckpt-\(turnCount).bin").path
-        let written = filePath.withCString { cPath in
-            promptTokens.withUnsafeBufferPointer { buf in
-                llama_state_seq_save_file(context, cPath, 0, buf.baseAddress, buf.count)
-            }
-        }
-        guard written > 0 else {
-            NSLog("[LlamaEngine] Checkpoint save failed (turn=%d)", Int32(turnCount))
-            return
-        }
+        let tokensCopy = promptTokens
+        let turnsCopy = turns
         if checkpoints[turnCount] == nil { checkpointOrder.append(turnCount) }
         checkpoints[turnCount] = SessionCheckpoint(turnCount: turnCount,
                                                    promptEndPos: promptTokens.count,
                                                    filePath: filePath,
                                                    tokens: promptTokens,
-                                                   turns: turns)
+                                                   turns: turnsCopy)
         trimCheckpoints()
+        Task.detached(priority: .background) { [context] in
+            let written = filePath.withCString { cPath in
+                tokensCopy.withUnsafeBufferPointer { buf in
+                    llama_state_seq_save_file(context, cPath, 0, buf.baseAddress, buf.count)
+                }
+            }
+            if written == 0 {
+                NSLog("[LlamaEngine] Checkpoint background save failed (turn=%d)", Int32(turnCount))
+            }
+        }
     }
 
     /// LRU eviction: keep only the most recently saved `checkpointMaxSlots` snapshots.
@@ -349,7 +360,9 @@ public actor LlamaEngine: LLMEngine {
             guard prefix == cp.tokens else { continue }
 
             // Load and verify the file round-trips to the same token list (defensive: file may be stale).
-            var loaded = [llama_token](repeating: 0, count: max(cp.tokens.count, 1))
+            // Buffer is sized to the larger of the checkpoint token count and the new prompt, plus a
+            // 16-token guard — prevents a stale/corrupted file from writing past the array bounds.
+            var loaded = [llama_token](repeating: 0, count: max(cp.tokens.count, newPromptTokens.count) + 16)
             var loadedCount = 0
             let nread = cp.filePath.withCString { cPath in
                 loaded.withUnsafeMutableBufferPointer { buf in
@@ -491,6 +504,7 @@ public actor LlamaEngine: LLMEngine {
                 safeCp.n_ubatch = UInt32(safeBatch)
                 safeCp.n_threads = nThreads
                 safeCp.n_threads_batch = nThreads
+                safeCp.n_rs_seq = Self.rsRollbackSlots  // B1 fix: must match Attempt 1/2
                 #if !targetEnvironment(simulator)
                 safeCp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO
                 #endif
@@ -707,6 +721,13 @@ public actor LlamaEngine: LLMEngine {
                     guard self.context == context else { throw CancellationError() }
                 }
                 promptTokenCount = suffixTokens.count
+                // Save a checkpoint for this turn boundary so an edit-resend can reuse the full
+                // resident KV state even when seq_rm is rejected. The complete prompt token list
+                // is the cache's existing tokens plus the newly decoded suffix.
+                if !sessionCache.hasImages {
+                    let fullPromptTokens = sessionCache.tokens + suffixTokens
+                    saveCheckpoint(turnCount: kept.count, promptTokens: fullPromptTokens, turns: kept, context: context)
+                }
                 // Note: conversationTokens for speculative n-gram lookup is built lazily below,
                 // only when speculative mode is active and prompt lookup is actually in use.
             } else if hasImages {
@@ -897,12 +918,10 @@ public actor LlamaEngine: LLMEngine {
                     promptTokenCount = promptTokens.count
                 }
             }
-            // Save a "prompt fully prefilled" checkpoint for this turn boundary (pure-text only), so a
-            // later edit-resend that seq_rm cannot serve (Qwen 3.5 hybrid recurrent state) can restore
-            // it instead of recomputing. Written BEFORE generation, so it captures exactly the prompt
-            // state — the same boundary turnPromptEndPositions records for the seq_rm regenerate path.
-            // The synchronous file write (~100-300 ms for a Q8_0 8K snapshot) is a deliberate TTFT cost:
-            // it trades ~2-4 s of full-prefill on every edited resend for one cheap write per turn.
+            // Save a "prompt fully prefilled" checkpoint for this turn boundary (prefix-rollback path),
+            // so that a later edit-resend that seq_rm cannot serve (Qwen 3.5 hybrid recurrent state)
+            // can restore it instead of recomputing. The write is offloaded to a background task and
+            // skipped for short contexts (≤ 1024 tok) where full-prefill is already fast enough.
             if !hasImages, let pt = prefilledPromptTokens, !pt.isEmpty {
                 saveCheckpoint(turnCount: kept.count, promptTokens: pt, turns: kept, context: context)
             }
