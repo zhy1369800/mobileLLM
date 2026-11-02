@@ -83,6 +83,22 @@ public actor LlamaEngine: LLMEngine {
     private var contextBatchSize: Int = 0    // the actual effective n_batch / n_ubatch the live context was built with
     private var contextRequestedBatchSize: Int = 0
     private var sessionCache = SessionCacheState()
+    /// Saved "prompt fully prefilled" checkpoints (via llama_state_seq_save_file), keyed by logical
+    /// turn count at save time. Lets edit-resend reuse a whole-sequence state even when seq_rm is
+    /// rejected (Qwen 3.5 hybrid Gated DeltaNet / recurrent state). LRU-capped and cleared whenever
+    /// the context is rebuilt (KV layout / dtype no longer matches the saved files).
+    private var checkpoints: [Int: SessionCheckpoint] = [:]
+    /// Insertion order of checkpoint keys (oldest first), used for LRU eviction.
+    private var checkpointOrder: [Int] = []
+    private static let checkpointMaxSlots = 4
+    /// Recurrent-state rollback snapshots (`n_rs_seq`) for hybrid architectures (Qwen 3.5 Gated
+    /// DeltaNet). Lets `llama_memory_seq_rm` rewind up to this many tokens without recompute — covers
+    /// Regenerate (1-token refresh) and near-edit resends on the fast path; deeper edits still fall
+    /// back to the file checkpoint. Cost: recurrent S memory ×(1+n_rs_seq) — Qwen3.5-4B adds 24 MiB
+    /// per slot. Attention-only architectures are clamped to 0 inside llama.cpp, so this is safe for
+    /// every model.
+    private static let rsRollbackSlots: UInt32 = 4
+    private var checkpointDirectory: URL? = nil
     private var loadedID: String?
     private var thinkingCapable = true
     private var eosText = "<|im_end|>"
@@ -243,12 +259,153 @@ public actor LlamaEngine: LLMEngine {
         hasMtpSupport = false
         supportsPartialTrim = true
         sessionCache.reset()
+        clearCheckpoints()
+    }
+
+    // MARK: - Session checkpoints (edit-resend whole-sequence reuse)
+
+    /// A saved "prompt fully prefilled" snapshot for one logical turn boundary. Written by
+    /// `llama_state_seq_save_file` right after prefill and BEFORE generation starts, so it captures
+    /// exactly the prompt state (no generated tokens) — the same boundary `turnPromptEndPositions`
+    /// records for the seq_rm regenerate path. On restore the KV / recurrent state is reloaded and only
+    /// the tokens after the edit point are decoded.
+    private struct SessionCheckpoint {
+        let turnCount: Int           // kept.count at save time
+        let promptEndPos: Int        // physical KV position where the prompt ended == tokens.count
+        let filePath: String
+        let tokens: [llama_token]    // full prompt tokens, for prefix validation against the new prompt
+        let turns: [ChatTurn]        // kept turns at save time, to rebuild sessionCache.turns on restore
+    }
+
+    private func checkpointDirectoryURL() -> URL? {
+        if let checkpointDirectory { return checkpointDirectory }
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("llama-checkpoints", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        checkpointDirectory = dir
+        return dir
+    }
+
+    /// Remove all checkpoint files and the in-memory index. Called on model unload and whenever the
+    /// context is rebuilt — the saved KV layout / dtype no longer matches a rebuilt context.
+    private func clearCheckpoints() {
+        checkpoints.removeAll()
+        checkpointOrder.removeAll()
+        if let dir = checkpointDirectory {
+            try? FileManager.default.removeItem(at: dir)
+            checkpointDirectory = nil
+        }
+    }
+
+    /// Save a "prompt fully prefilled" checkpoint for `turnCount`. Failures are never fatal — a
+    /// checkpoint is a pure optimization; without one edit-resend simply falls back to full recompute.
+    private func saveCheckpoint(turnCount: Int, promptTokens: [llama_token], turns: [ChatTurn], context: OpaquePointer) {
+        guard !promptTokens.isEmpty, !turns.isEmpty else { return }
+        // Same-turn boundary with identical prompt: already saved, skip the (potentially 100+ MB) write.
+        if let existing = checkpoints[turnCount], existing.tokens == promptTokens { return }
+        guard let dir = checkpointDirectoryURL() else { return }
+        let filePath = dir.appendingPathComponent("ckpt-\(turnCount).bin").path
+        let written = filePath.withCString { cPath in
+            promptTokens.withUnsafeBufferPointer { buf in
+                llama_state_seq_save_file(context, cPath, 0, buf.baseAddress, buf.count)
+            }
+        }
+        guard written > 0 else {
+            NSLog("[LlamaEngine] Checkpoint save failed (turn=%d)", Int32(turnCount))
+            return
+        }
+        if checkpoints[turnCount] == nil { checkpointOrder.append(turnCount) }
+        checkpoints[turnCount] = SessionCheckpoint(turnCount: turnCount,
+                                                   promptEndPos: promptTokens.count,
+                                                   filePath: filePath,
+                                                   tokens: promptTokens,
+                                                   turns: turns)
+        trimCheckpoints()
+    }
+
+    /// LRU eviction: keep only the most recently saved `checkpointMaxSlots` snapshots.
+    private func trimCheckpoints() {
+        while checkpointOrder.count > Self.checkpointMaxSlots {
+            let oldest = checkpointOrder.removeFirst()
+            if let old = checkpoints.removeValue(forKey: oldest) {
+                try? FileManager.default.removeItem(atPath: old.filePath)
+            }
+        }
+    }
+
+    /// Attempt to restore the best matching checkpoint for an edit-resend. A checkpoint matches when the
+    /// saved prompt tokens are a prefix of the NEW prompt tokens (the user edited strictly after that
+    /// turn boundary); the newest/longest match is preferred for maximum reuse. On success the session
+    /// cache is rolled back to the checkpoint state and the physical prompt-end position is returned
+    /// (caller then decodes `newPromptTokens[promptEndPos...]`). Returns nil when nothing usable exists.
+    private func restoreCheckpoint(newPromptTokens: [llama_token],
+                                   minCommon: Int,
+                                   context: OpaquePointer) -> (pos: Int, suffix: ArraySlice<llama_token>)? {
+        let candidates = checkpoints.values.sorted { $0.promptEndPos > $1.promptEndPos }
+        for cp in candidates {
+            guard cp.promptEndPos >= minCommon, cp.promptEndPos <= newPromptTokens.count else { continue }
+            // Prefix validation: the saved prompt must equal the head of the new prompt.
+            let prefix = Array(newPromptTokens.prefix(cp.promptEndPos))
+            guard prefix == cp.tokens else { continue }
+
+            // Load and verify the file round-trips to the same token list (defensive: file may be stale).
+            var loaded = [llama_token](repeating: 0, count: max(cp.tokens.count, 1))
+            var loadedCount = 0
+            let nread = cp.filePath.withCString { cPath in
+                loaded.withUnsafeMutableBufferPointer { buf in
+                    llama_state_seq_load_file(context, cPath, 0, buf.baseAddress, buf.count, &loadedCount)
+                }
+            }
+            guard nread > 0, loadedCount == cp.promptEndPos else { continue }
+            guard Array(loaded.prefix(loadedCount)) == cp.tokens else { continue }
+
+            // Roll the session cache back to the restored boundary so subsequent commits line up.
+            sessionCache.rollbackToCheckpoint(turns: cp.turns, tokens: cp.tokens, count: cp.promptEndPos,
+                                              turnCount: cp.turnCount, promptEndPos: cp.promptEndPos)
+
+            let suffix = newPromptTokens[cp.promptEndPos...]
+            NSLog("[LlamaEngine] Checkpoint restored: turn=%d, promptEndPos=%d, suffix=%d tok",
+                  Int32(cp.turnCount), Int32(cp.promptEndPos), Int32(suffix.count))
+            return (cp.promptEndPos, suffix)
+        }
+        return nil
+    }
+
+    /// Decode `suffixTokens` starting at physical KV position `startPos` in batches, requesting logits
+    /// on the final token. Returns false when a chunk fails to decode (caller falls back); throws on
+    /// cancellation or context teardown — mirroring the inline decode loops in `run`.
+    private func decodeSuffix(_ suffixTokens: [llama_token], from startPos: Int,
+                              nBatch: Int, context: OpaquePointer,
+                              governance: GenerationGovernance) async throws -> Bool {
+        guard !suffixTokens.isEmpty else { return true }
+        let batchCap = Int32(max(1, min(nBatch, suffixTokens.count)))
+        var batch = llama_batch_init(batchCap, 0, 1)
+        defer { llama_batch_free(batch) }
+        var i = 0
+        while i < suffixTokens.count {
+            try await governance.checkpoint()
+            guard self.context == context else { throw CancellationError() }
+            let end = min(i + nBatch, suffixTokens.count)
+            let chunkCount = end - i
+            for offset in 0..<chunkCount {
+                let tok = suffixTokens[i + offset]
+                let isLast = (i + offset == suffixTokens.count - 1)
+                Self.setBatchItem(&batch, at: offset, maxCapacity: batchCap,
+                                  token: tok, pos: Int32(startPos + i + offset), logits: isLast)
+            }
+            batch.n_tokens = Int32(chunkCount)
+            if llama_decode(context, batch) != 0 { return false }
+            i = end
+            if Task.isCancelled || governance.isCancelled { throw CancellationError() }
+            guard self.context == context else { throw CancellationError() }
+        }
+        return true
     }
 
     /// (Re)create the decode context sized to `cap` tokens with the requested KV-cache width. Kept separate
     /// from `load` because n_ctx (and the KV-cache dtype) is fixed at context-creation on llama.cpp, while
     /// both are per-generation levers. `kvBits` mirrors `Sampling.kvBits`: 0 = f16 (default), 4 = Q4_0,
-    /// 8 = Q8_0. Rebuilds when EITHER the size or the KV width changes.
+    /// 6 = K Q4_0 + V Q8_0 (split), 8 = Q8_0. Rebuilds when EITHER the size or the KV width changes.
     private func ensureContext(cap: Int, kvBits: Int, batchSize: Int = 512) throws {
         let target = max(512, cap)
         let targetBatch = max(128, min(batchSize, target))
@@ -257,6 +414,7 @@ public actor LlamaEngine: LLMEngine {
             return
         }
         sessionCache.reset()
+        clearCheckpoints()
         if let context { llama_free(context) }
         // Reset BEFORE the fallible init below: if llama_init_from_model throws out of this function,
         // `context` must not keep pointing at the freed allocation (a retry would double-free, and the
@@ -269,13 +427,20 @@ public actor LlamaEngine: LLMEngine {
         cp.n_ubatch = UInt32(targetBatch)
         cp.n_threads = nThreads
         cp.n_threads_batch = nThreads
+        // Recurrent-state rollback snapshots for hybrid architectures (Qwen 3.5). Attention-only
+        // architectures clamp this to 0 inside llama.cpp, so it is safe to request for every model.
+        cp.n_rs_seq = Self.rsRollbackSlots
         // KV-cache quantization and Flash Attention.
         // Aligned with OGAM: use AUTO across Metal backends so llama.cpp enables Flash Attention
         // on all supported layers while gracefully handling hybrid/multimodal layers,
         // keeping attention computation constant-time and preventing 2 tok/s slowdown.
+        // kvBits: 0 = f16 (default), 4 = Q4_0, 8 = Q8_0, 6 = K Q4_0 + V Q8_0 (split: V is most
+        // quality-sensitive, K tolerates more quantization — ~23% smaller than full Q8_0).
         switch kvBits {
         case 4:
             cp.type_k = GGML_TYPE_Q4_0; cp.type_v = GGML_TYPE_Q4_0
+        case 6:
+            cp.type_k = GGML_TYPE_Q4_0; cp.type_v = GGML_TYPE_Q8_0
         case 8:
             cp.type_k = GGML_TYPE_Q8_0; cp.type_v = GGML_TYPE_Q8_0
         default:
@@ -300,6 +465,7 @@ public actor LlamaEngine: LLMEngine {
             fallbackCp.n_ubatch = UInt32(targetBatch)
             fallbackCp.n_threads = nThreads
             fallbackCp.n_threads_batch = nThreads
+            fallbackCp.n_rs_seq = Self.rsRollbackSlots
             #if !targetEnvironment(simulator)
             fallbackCp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_AUTO
             #endif
@@ -307,6 +473,8 @@ public actor LlamaEngine: LLMEngine {
             switch kvBits {
             case 4:
                 fallbackCp.type_k = GGML_TYPE_Q4_0; fallbackCp.type_v = GGML_TYPE_Q4_0
+            case 6:
+                fallbackCp.type_k = GGML_TYPE_Q4_0; fallbackCp.type_v = GGML_TYPE_Q8_0
             case 8:
                 fallbackCp.type_k = GGML_TYPE_Q8_0; fallbackCp.type_v = GGML_TYPE_Q8_0
             default:
@@ -643,34 +811,8 @@ public actor LlamaEngine: LLMEngine {
                         NSLog("[LlamaEngine] Prefix rollback matched! Common prefix: %d tokens (hit %.1f%%), suffix: %d tokens (fullMatch=%@)",
                               Int32(effectiveCommon), hitRatePct, Int32(suffixTokens.count), isFullPromptMatch ? "true" : "false")
 
-                        let batchCap = Int32(max(1, min(nBatch, suffixTokens.count)))
-                        var batch = llama_batch_init(batchCap, 0, 1)
-                        defer { llama_batch_free(batch) }
-
-                        var i = 0
-                        var decodeError: Error? = nil
-                        while i < suffixTokens.count {
-                            try await governance.checkpoint()
-                            guard self.context == context else { throw CancellationError() }
-                            let end = min(i + nBatch, suffixTokens.count)
-                            let chunkCount = end - i
-                            for offset in 0..<chunkCount {
-                                let tok = suffixTokens[i + offset]
-                                let isLast = (i + offset == suffixTokens.count - 1)
-                                Self.setBatchItem(&batch, at: offset, maxCapacity: batchCap,
-                                                  token: tok, pos: Int32(effectiveCommon + i + offset), logits: isLast)
-                            }
-                            batch.n_tokens = Int32(chunkCount)
-                            let decodeRes = llama_decode(context, batch)
-                            if decodeRes != 0 {
-                                decodeError = EngineError.decodeFailed
-                                break
-                            }
-                            i = end
-                            if Task.isCancelled || governance.isCancelled { throw CancellationError() }
-                            guard self.context == context else { throw CancellationError() }
-                        }
-                        if decodeError == nil {
+                        if try await decodeSuffix(suffixTokens, from: effectiveCommon,
+                                                  nBatch: nBatch, context: context, governance: governance) {
                             promptTokenCount = suffixTokens.count
                             cachedRollbackTokensCount = effectiveCommon
                             rollbackSucceeded = true
@@ -687,6 +829,42 @@ public actor LlamaEngine: LLMEngine {
                         supportsPartialTrim = false
                         rollbackDiagnosticMessage = "回滚跳过: 显存不支持局部截断 (如Qwen3.5等混合SSM/Recurrent架构隐状态在数学上不可逆)，已安全全量重新预填充"
                         NSLog("[LlamaEngine] Prefix rollback llama_memory_seq_rm rejected partial sequence trim (likely hybrid/recurrent architecture like Qwen 3.5), safely falling back to clean slate")
+                    }
+                }
+
+                if !rollbackSucceeded {
+                    // Edit-resend fallback #2: whole-sequence checkpoint restore. Serves architectures
+                    // where llama_memory_seq_rm is rejected (Qwen 3.5 hybrid Gated DeltaNet / recurrent
+                    // state) — instead of a full recompute we reload the saved "prompt fully prefilled"
+                    // state file for the matching turn boundary and decode only the tokens after the edit
+                    // point. Pure-text sessions only; vision turns keep the clean-slate path.
+                    if !residentHadImages, !sessionCache.tokens.isEmpty,
+                       let restored = restoreCheckpoint(newPromptTokens: promptTokens,
+                                                        minCommon: 16,
+                                                        context: context) {
+                        let suffixTokens: [llama_token]
+                        if restored.suffix.isEmpty {
+                            // Exact same prompt as the checkpoint: replay the last token to refresh logits
+                            // (mirrors the isFullPromptMatch regenerate path). restored.pos >= 16 here.
+                            suffixTokens = [promptTokens[restored.pos - 1]]
+                        } else {
+                            suffixTokens = Array(restored.suffix)
+                        }
+                        effectiveCommon = restored.pos
+                        suffixTokensToDecode = suffixTokens
+                        totalPromptCountForStats = promptTokens.count
+                        if try await decodeSuffix(suffixTokens, from: effectiveCommon,
+                                                  nBatch: nBatch, context: context, governance: governance) {
+                            promptTokenCount = suffixTokens.count
+                            cachedRollbackTokensCount = effectiveCommon
+                            rollbackSucceeded = true
+                            rollbackDiagnosticMessage = "检查点恢复: 复用 \(effectiveCommon) tok, 解码后缀 \(suffixTokens.count) tok"
+                            NSLog("[LlamaEngine] Checkpoint restore matched: reused %d prompt tokens, suffix %d tok",
+                                  Int32(effectiveCommon), Int32(suffixTokens.count))
+                        } else {
+                            rollbackDiagnosticMessage = "检查点恢复失败: 后缀Token解码错误, 回退全量重算"
+                            NSLog("[LlamaEngine] Checkpoint restore decode failed, falling back to clean slate")
+                        }
                     }
                 }
 
@@ -718,6 +896,15 @@ public actor LlamaEngine: LLMEngine {
                     }
                     promptTokenCount = promptTokens.count
                 }
+            }
+            // Save a "prompt fully prefilled" checkpoint for this turn boundary (pure-text only), so a
+            // later edit-resend that seq_rm cannot serve (Qwen 3.5 hybrid recurrent state) can restore
+            // it instead of recomputing. Written BEFORE generation, so it captures exactly the prompt
+            // state — the same boundary turnPromptEndPositions records for the seq_rm regenerate path.
+            // The synchronous file write (~100-300 ms for a Q8_0 8K snapshot) is a deliberate TTFT cost:
+            // it trades ~2-4 s of full-prefill on every edited resend for one cheap write per turn.
+            if !hasImages, let pt = prefilledPromptTokens, !pt.isEmpty {
+                saveCheckpoint(turnCount: kept.count, promptTokens: pt, turns: kept, context: context)
             }
             let promptSecs = max(Date().timeIntervalSince(prefillStart), 0.0001)
             let cachedPromptTokensCount: Int = isIncrementalContinuation ? sessionCache.tokenCount : cachedRollbackTokensCount
@@ -1694,6 +1881,18 @@ public actor LlamaEngine: LLMEngine {
             self.turns = turns
             self.tokens.removeAll()
             self.tokenCount = count
+        }
+
+        /// Roll the logical cache state back to a whole-sequence checkpoint boundary, used right after
+        /// `llama_state_seq_load_file` restored the physical KV / recurrent state. Replaces the token
+        /// map with the checkpoint snapshot and keeps only turn boundaries up to `turnCount`.
+        mutating func rollbackToCheckpoint(turns: [ChatTurn], tokens: [llama_token], count: Int,
+                                           turnCount: Int, promptEndPos: Int) {
+            self.turns = turns
+            self.tokens = tokens
+            self.tokenCount = count
+            self.turnPromptEndPositions = self.turnPromptEndPositions.filter { $0.key <= turnCount }
+            self.turnPromptEndPositions[turnCount] = promptEndPos
         }
     }
 

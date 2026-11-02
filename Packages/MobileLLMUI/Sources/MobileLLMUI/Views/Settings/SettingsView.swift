@@ -525,15 +525,20 @@ struct SettingsView: View {
                         Menu {
                             Button("Full (unquantized)") { settings.kvBits = 0 }
                             Button("4-bit") { settings.kvBits = 4 }
+                            Button("6-bit (K4+V8)") { settings.kvBits = 6 }
                             Button("8-bit") { settings.kvBits = 8 }
                         } label: {
-                            Text(settings.kvBits == 0 ? "Full" : "\(settings.kvBits)-bit")
+                            Text(settings.kvBits == 0 ? "Full"
+                                 : settings.kvBits == 6 ? "6-bit (K4+V8)"
+                                 : "\(settings.kvBits)-bit")
                                 .font(.subheadline).foregroundStyle(Theme.accent)
                         }
                         .fixedSize()
                     }
                     Text("8-bit KV preserves high attention accuracy with low memory footprint (default). "
-                         + "4-bit reduces RAM further, while Full provides unquantized precision. Takes effect from your next message.")
+                         + "4-bit reduces RAM further, 6-bit splits K to 4-bit while keeping V at 8-bit (V is most "
+                         + "quality-sensitive) for a ~20% smaller snapshot than 8-bit, and Full provides unquantized "
+                         + "precision. Takes effect from your next message.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                     HStack {
                         Text("Speculative decoding").font(.subheadline).foregroundStyle(Theme.textSecondary)

@@ -155,9 +155,12 @@ public actor MLXLLMEngine: LLMEngine {
             // Every sampling knob the app exposes must reach the model — history is not the only thing
             // that used to be dropped. `kvBits == 0` means "unquantized" here but `nil` upstream; a
             // repetition penalty of exactly 1 is a no-op, so skip building the processor for it.
+            // `kvBits == 6` (K Q4_0 + V Q8_0 split) is a llama.cpp-only dtype combination; MLX has no
+            // split tier, so normalize to 4-bit rather than forwarding an unsupported value.
+            let mlxKvBits = params.kvBits == 6 ? 4 : params.kvBits
             let gp = GenerateParameters(
                 maxTokens: params.maxTokens,
-                kvBits: params.kvBits > 0 ? params.kvBits : nil,
+                kvBits: mlxKvBits > 0 ? mlxKvBits : nil,
                 quantizedKVStart: params.quantizedKVStart,
                 temperature: Float(params.temperature),
                 topP: Float(params.topP),

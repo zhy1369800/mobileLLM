@@ -569,7 +569,7 @@ private enum LocalModelGeneration {
         }
         if let data = UserDefaults.standard.data(forKey: AppConfigurationKeys.settingsStorageKey),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let bits = json["kvBits"] as? Int, bits == 4 || bits == 8 || bits == 0 {
+           let bits = json["kvBits"] as? Int, bits == 4 || bits == 6 || bits == 8 || bits == 0 {
             return bits
         }
         return 4
