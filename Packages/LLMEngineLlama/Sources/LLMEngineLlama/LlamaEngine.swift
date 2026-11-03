@@ -282,9 +282,18 @@ public actor LlamaEngine: LLMEngine {
 
     private func checkpointDirectoryURL() -> URL? {
         if let checkpointDirectory { return checkpointDirectory }
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("llama-checkpoints", isDirectory: true)
+        // Documents/Checkpoints (not tmp) so the files show up in Files → On My iPhone → mobileLLM.
+        // UIFileSharingEnabled is already on in Info.plist, so anything under Documents is visible.
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Checkpoints", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // No in-memory index yet means any files already on disk are orphans from a previous
+        // process/session (e.g. app was killed) — sweep them so Files only shows live checkpoints.
+        if let stale = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+            for url in stale where url.lastPathComponent.hasPrefix("ckpt-") {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
         checkpointDirectory = dir
         return dir
     }
@@ -302,8 +311,9 @@ public actor LlamaEngine: LLMEngine {
 
     /// Clean up any leftover checkpoint directories from previous runs. Safe to call at startup or teardown.
     public static func cleanupResidualCheckpoints() {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("llama-checkpoints", isDirectory: true)
+        // Must match checkpointDirectoryURL(): Documents/Checkpoints (visible in Files app).
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Checkpoints", isDirectory: true)
         if FileManager.default.fileExists(atPath: dir.path) {
             try? FileManager.default.removeItem(at: dir)
             NSLog("[LlamaEngine] Residual checkpoint directory cleaned up: %@", dir.path)
@@ -684,7 +694,7 @@ public actor LlamaEngine: LLMEngine {
                 if !tokens.isEmpty && sessionCache.tokenCount + tokens.count + incrementalReserve <= contextCap {
                     incrementalSuffixTokens = tokens
                 } else {
-                    NSLog("[LlamaEngine] Incremental continuation skipped: KV cache headroom exceeded or empty tokens (used=%d, suffix=%d, reserve=%d, cap=%d). Falling back to full evaluation.",
+                    NSLog("[LlamaEngine][CacheMiss] Incremental continuation skipped: KV cache headroom exceeded or empty tokens (used=%d, suffix=%d, reserve=%d, cap=%d). Falling back to full evaluation.",
                           Int32(sessionCache.tokenCount), Int32(tokens.count), Int32(incrementalReserve), Int32(contextCap))
                 }
             } else if previousCount > 0 {
@@ -705,8 +715,8 @@ public actor LlamaEngine: LLMEngine {
                 // in the KV cache with the assistant turn cleanly closed by EOG. Decode ONLY the suffix
                 // of the new user query — completely skipping mtmd re-evaluation and saving ~3-5 seconds
                 // of image ViT compute!
-                NSLog("[LlamaEngine] Incremental continuation matched! Suffix tokens: %d (skipped image/history recompute)",
-                      Int32(suffixTokens.count))
+                NSLog("[LlamaEngine][CacheHit] incremental continuation: reused %d cached tokens, decoded suffix %d tok (skipped history recompute)",
+                      Int32(sessionCache.tokenCount), Int32(suffixTokens.count))
                 let batchCap = Int32(max(1, min(nBatch, suffixTokens.count)))
                 var batch = llama_batch_init(batchCap, 0, 1)
                 defer { llama_batch_free(batch) }
@@ -838,7 +848,7 @@ public actor LlamaEngine: LLMEngine {
                     if rmSuccess {
                         let suffixTokens = suffixTokensToDecode
                         let hitRatePct = (Double(effectiveCommon) / Double(totalPromptCountForStats)) * 100.0
-                        NSLog("[LlamaEngine] Prefix rollback matched! Common prefix: %d tokens (hit %.1f%%), suffix: %d tokens (fullMatch=%@)",
+                        NSLog("[LlamaEngine][CacheHit] seq_rm rollback: reused %d tokens (hit %.1f%%), decoded suffix %d tok (fullMatch=%@)",
                               Int32(effectiveCommon), hitRatePct, Int32(suffixTokens.count), isFullPromptMatch ? "true" : "false")
 
                         if try await decodeSuffix(suffixTokens, from: effectiveCommon,
@@ -854,12 +864,12 @@ public actor LlamaEngine: LLMEngine {
                             }
                         } else {
                             rollbackDiagnosticMessage = "回滚失败: 后缀Token解码失败 (llama_decode error)"
-                            NSLog("[LlamaEngine] Prefix rollback decode failed, falling back to clean slate")
+                            NSLog("[LlamaEngine][CacheMiss] Prefix rollback decode failed, falling back to clean slate")
                         }
                     } else {
                         supportsPartialTrim = false
                         rollbackDiagnosticMessage = "回滚跳过: 显存不支持局部截断 (如Qwen3.5等混合SSM/Recurrent架构隐状态在数学上不可逆)，已安全全量重新预填充"
-                        NSLog("[LlamaEngine] Prefix rollback llama_memory_seq_rm rejected partial sequence trim (likely hybrid/recurrent architecture like Qwen 3.5), safely falling back to clean slate")
+                        NSLog("[LlamaEngine][CacheMiss] Prefix rollback llama_memory_seq_rm rejected partial sequence trim (likely hybrid/recurrent architecture like Qwen 3.5), safely falling back to clean slate")
                     }
                 }
 
@@ -890,17 +900,19 @@ public actor LlamaEngine: LLMEngine {
                             cachedRollbackTokensCount = effectiveCommon
                             rollbackSucceeded = true
                             rollbackDiagnosticMessage = "检查点恢复: 复用 \(effectiveCommon) tok, 解码后缀 \(suffixTokens.count) tok"
-                            NSLog("[LlamaEngine] Checkpoint restore matched: reused %d prompt tokens, suffix %d tok",
+                            NSLog("[LlamaEngine][CacheHit] checkpoint restore: reused %d prompt tokens, decoded suffix %d tok",
                                   Int32(effectiveCommon), Int32(suffixTokens.count))
                         } else {
                             rollbackDiagnosticMessage = "检查点恢复失败: 后缀Token解码错误, 回退全量重算"
-                            NSLog("[LlamaEngine] Checkpoint restore decode failed, falling back to clean slate")
+                            NSLog("[LlamaEngine][CacheMiss] Checkpoint restore decode failed, falling back to clean slate")
                         }
                     }
                 }
 
                 if !rollbackSucceeded {
                     // Clean slate fallback: clean slate to ensure 100% position alignment
+                    NSLog("[LlamaEngine][CacheMiss] full recompute: prompt %d tok (rollback unavailable or restore failed)",
+                          Int32(promptTokens.count))
                     sessionCache.reset(context: context)
 
                     let batchCap = Int32(max(1, min(nBatch, promptTokens.count)))
