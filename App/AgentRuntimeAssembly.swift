@@ -794,6 +794,14 @@ public final class AgentRuntimeAssembly {
                         }
                         return 512
                     },
+                    currentKVCheckpointsEnabled: {
+                        if let data = UserDefaults.standard.data(forKey: AppConfigurationKeys.settingsStorageKey),
+                           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                           let enabled = json["kvCheckpointsEnabled"] as? Bool {
+                            return enabled
+                        }
+                        return false
+                    },
                     recordDiagnostic: { code, metadata in
                         await diagnosticLogger.record(code: code, metadata: metadata)
                     }

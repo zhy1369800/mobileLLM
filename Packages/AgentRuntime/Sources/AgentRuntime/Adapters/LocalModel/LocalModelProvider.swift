@@ -21,6 +21,8 @@ public struct LocalModelAdapterConfiguration: Sendable {
     public let currentThinkingBudget: (@Sendable () -> Int)?
     /// Dynamic accessor for the user's configured prefill batch size. Defaults to reading AppSettings snapshot if unprovided.
     public let currentPrefillBatchSize: (@Sendable () -> Int)?
+    /// Dynamic accessor for whether KV snapshot checkpoints on disk are enabled. Defaults to reading AppSettings snapshot if unprovided.
+    public let currentKVCheckpointsEnabled: (@Sendable () -> Bool)?
 
     public init(
         maximumImageBytes: UInt64 = 32 * 1_024 * 1_024,
@@ -33,6 +35,7 @@ public struct LocalModelAdapterConfiguration: Sendable {
         currentSpeculativeMode: (@Sendable () -> SpeculativeMode)? = nil,
         currentThinkingBudget: (@Sendable () -> Int)? = nil,
         currentPrefillBatchSize: (@Sendable () -> Int)? = nil,
+        currentKVCheckpointsEnabled: (@Sendable () -> Bool)? = nil,
         recordDiagnostic: @escaping @Sendable (String, [String: String]) async -> Void = { _, _ in }
     ) throws {
         guard maximumImageBytes > 0,
@@ -47,6 +50,7 @@ public struct LocalModelAdapterConfiguration: Sendable {
         self.currentSpeculativeMode = currentSpeculativeMode
         self.currentThinkingBudget = currentThinkingBudget
         self.currentPrefillBatchSize = currentPrefillBatchSize
+        self.currentKVCheckpointsEnabled = currentKVCheckpointsEnabled
         self.recordDiagnostic = recordDiagnostic
     }
 }
@@ -611,6 +615,18 @@ private enum LocalModelGeneration {
         return 512
     }
 
+    private static func resolvedKVCheckpointsEnabled(configuration: LocalModelAdapterConfiguration) -> Bool {
+        if let custom = configuration.currentKVCheckpointsEnabled {
+            return custom()
+        }
+        if let data = UserDefaults.standard.data(forKey: AppConfigurationKeys.settingsStorageKey),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let enabled = json["kvCheckpointsEnabled"] as? Bool {
+            return enabled
+        }
+        return false
+    }
+
     private static func samplingParameters(
         _ parameters: AgentModelGenerationParameters,
         registration: LocalModelRegistration,
@@ -634,7 +650,8 @@ private enum LocalModelGeneration {
             seed: parameters.seed,
             speculativeMode: resolvedSpeculativeMode(configuration: configuration),
             thinkingBudget: resolvedThinkingBudget(configuration: configuration),
-            prefillBatchSize: resolvedPrefillBatchSize(configuration: configuration)
+            prefillBatchSize: resolvedPrefillBatchSize(configuration: configuration),
+            kvCheckpointsEnabled: resolvedKVCheckpointsEnabled(configuration: configuration)
         )
     }
 

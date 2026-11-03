@@ -331,6 +331,7 @@ struct LocalModelLogDetailView: View {
                 let batchText = actBatch == reqBatch ? "\(actBatch)" : "\(actBatch) (回退自 \(reqBatch))"
                 metricRow("Prefill Batch", value: batchText)
                 metricRow("Speculative Mode", value: entry.sampling.speculativeMode.displayName)
+                metricRow("KV Checkpoints", value: entry.sampling.kvCheckpointsEnabled ? "Enabled" : "Disabled")
                 if let stats = entry.stats {
                     Divider().background(Theme.hairline)
                     let backendName = stats.backend ?? (entry.modelID.lowercased().contains("mlx") ? "MLX GPU" : (stats.promptTPS > 150 ? "Metal GPU" : "CPU"))

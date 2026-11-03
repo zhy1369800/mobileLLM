@@ -355,12 +355,24 @@ public actor LlamaEngine: LLMEngine {
     /// write off the actor (snapshot state to memory first, then write from a background task) if the
     /// TTFT impact matters.
     private func saveCheckpoint(turnCount: Int, promptTokens: [llama_token], turns: [ChatTurn], context: OpaquePointer) {
-        guard !promptTokens.isEmpty, !turns.isEmpty else { return }
+        guard !promptTokens.isEmpty, !turns.isEmpty else {
+            NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: empty tokens or turns")
+            return
+        }
         // Short-context skip: full recompute is fast enough, not worth the disk write.
-        guard promptTokens.count > 1024 else { return }
+        guard promptTokens.count > 1024 else {
+            NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: tokens=%d <= 1024", Int32(promptTokens.count))
+            return
+        }
         // Same-turn boundary with identical prompt: already saved, skip the (potentially 100+ MB) write.
-        if let existing = checkpoints[turnCount], existing.tokens == promptTokens { return }
-        guard let dir = checkpointDirectoryURL() else { return }
+        if let existing = checkpoints[turnCount], existing.tokens == promptTokens {
+            NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: turn %d identical to existing checkpoint", Int32(turnCount))
+            return
+        }
+        guard let dir = checkpointDirectoryURL() else {
+            NSLog("[LlamaEngine][Checkpoint] saveCheckpoint failed: cannot resolve directory")
+            return
+        }
         let filePath = dir.appendingPathComponent("\(checkpointFilePrefix)\(turnCount).bin").path
         let tokensCopy = promptTokens
         let turnsCopy = turns
@@ -377,8 +389,9 @@ public actor LlamaEngine: LLMEngine {
             }
         }
         if written == 0 {
-            NSLog("[LlamaEngine] Checkpoint save failed (turn=%d)", Int32(turnCount))
+            NSLog("[LlamaEngine][Checkpoint] Checkpoint save failed (turn=%d, tokens=%d, path=%@)", Int32(turnCount), Int32(promptTokens.count), filePath)
         } else {
+            NSLog("[LlamaEngine][Checkpoint] Checkpoint save succeeded (turn=%d, tokens=%d, bytes=%zu, path=%@)", Int32(turnCount), Int32(promptTokens.count), written, filePath)
             // New files do not inherit the directory's isExcludedFromBackup attribute; mark this one
             // so the fresh snapshot stays out of iCloud backup.
             var fileURL = URL(fileURLWithPath: filePath)
