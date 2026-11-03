@@ -67,6 +67,15 @@ public struct SpeculativeStats: Sendable, Equatable, Codable {
     }
 }
 
+/// Which KV-cache reuse path served this generation. Lets the logs UI distinguish
+/// a seq_rm rollback from a checkpoint restore at a glance.
+public enum CachePath: String, Sendable, Equatable, Codable {
+    case incremental    // 增量续写：仅解码新增 turn 的 suffix，历史全部驻留
+    case seqRollback    // seq_rm 前缀回滚（n_rs_seq recurrent 快照 / attention KV 截断）
+    case checkpoint     // 检查点文件恢复（任意深度回滚兜底）
+    case none           // 未命中，全量预填充
+}
+
 /// End-of-generation statistics (DESIGN §2.2).
 public struct Stats: Sendable, Equatable, Codable {
     public var promptTokens: Int
@@ -80,6 +89,8 @@ public struct Stats: Sendable, Equatable, Codable {
     public var ttftSeconds: Double?
     /// Tokens matched and reused from the KV cache without recomputation.
     public var cachedPromptTokens: Int?
+    /// Which KV-cache reuse path served this generation (nil when no cache was consulted).
+    public var cachePath: CachePath?
     /// Number of transformer layers offloaded to GPU accelerator (nil when unmeasured).
     public var gpuLayers: Int?
     /// Execution backend/device name (e.g. "Metal GPU", "CPU").
@@ -101,6 +112,7 @@ public struct Stats: Sendable, Equatable, Codable {
                 speculativeStats: SpeculativeStats? = nil,
                 ttftSeconds: Double? = nil,
                 cachedPromptTokens: Int? = nil,
+                cachePath: CachePath? = nil,
                 gpuLayers: Int? = nil,
                 backend: String? = nil,
                 rollbackDiagnostic: String? = nil,
@@ -114,6 +126,7 @@ public struct Stats: Sendable, Equatable, Codable {
         self.speculativeStats = speculativeStats
         self.ttftSeconds = ttftSeconds
         self.cachedPromptTokens = cachedPromptTokens
+        self.cachePath = cachePath
         self.gpuLayers = gpuLayers
         self.backend = backend
         self.rollbackDiagnostic = rollbackDiagnostic
@@ -122,7 +135,7 @@ public struct Stats: Sendable, Equatable, Codable {
 
     enum CodingKeys: String, CodingKey {
         case promptTokens, genTokens, promptTPS, tokensPerSecond, peakMemoryBytes, stopReason, speculativeStats
-        case ttftSeconds, cachedPromptTokens, gpuLayers, backend, rollbackDiagnostic, effectiveBatchSize
+        case ttftSeconds, cachedPromptTokens, cachePath, gpuLayers, backend, rollbackDiagnostic, effectiveBatchSize
     }
 
     public init(from decoder: Decoder) throws {
@@ -136,6 +149,7 @@ public struct Stats: Sendable, Equatable, Codable {
         speculativeStats = try container.decodeIfPresent(SpeculativeStats.self, forKey: .speculativeStats)
         ttftSeconds = try container.decodeIfPresent(Double.self, forKey: .ttftSeconds)
         cachedPromptTokens = try container.decodeIfPresent(Int.self, forKey: .cachedPromptTokens)
+        cachePath = try container.decodeIfPresent(CachePath.self, forKey: .cachePath)
         gpuLayers = try container.decodeIfPresent(Int.self, forKey: .gpuLayers)
         backend = try container.decodeIfPresent(String.self, forKey: .backend)
         rollbackDiagnostic = try container.decodeIfPresent(String.self, forKey: .rollbackDiagnostic)
@@ -153,6 +167,7 @@ public struct Stats: Sendable, Equatable, Codable {
         try container.encodeIfPresent(speculativeStats, forKey: .speculativeStats)
         try container.encodeIfPresent(ttftSeconds, forKey: .ttftSeconds)
         try container.encodeIfPresent(cachedPromptTokens, forKey: .cachedPromptTokens)
+        try container.encodeIfPresent(cachePath, forKey: .cachePath)
         try container.encodeIfPresent(gpuLayers, forKey: .gpuLayers)
         try container.encodeIfPresent(backend, forKey: .backend)
         try container.encodeIfPresent(rollbackDiagnostic, forKey: .rollbackDiagnostic)

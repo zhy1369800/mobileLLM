@@ -162,9 +162,16 @@ struct LocalModelLogsView: View {
 
                         if let cached = stats.cachedPromptTokens, cached > 0 {
                             let pct = Int(round(stats.cacheHitRate * 100))
+                            let pathLabel: String
+                            switch stats.cachePath {
+                            case .checkpoint: pathLabel = "Checkpoint"
+                            case .seqRollback: pathLabel = "Rollback"
+                            case .incremental: pathLabel = "Incremental"
+                            default: pathLabel = "Hit"
+                            }
                             HStack(spacing: 2) {
                                 Image(systemName: "sparkles")
-                                Text("Hit \(pct)%")
+                                Text("\(pathLabel) \(pct)%")
                             }
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
@@ -336,7 +343,14 @@ struct LocalModelLogDetailView: View {
                     if let cached = stats.cachedPromptTokens {
                         if cached > 0 {
                             let pct = String(format: "%.1f%%", stats.cacheHitRate * 100)
-                            metricRow("Prompt Cache Hit", value: "\(pct) (\(cached) / \(cached + stats.promptTokens) tok)")
+                            let pathText: String
+                            switch stats.cachePath {
+                            case .checkpoint: pathText = "检查点恢复"
+                            case .seqRollback: pathText = "seq_rm 回滚"
+                            case .incremental: pathText = "增量续写"
+                            default: pathText = "—"
+                            }
+                            metricRow("Prompt Cache Hit", value: "\(pct) (\(cached) / \(cached + stats.promptTokens) tok) · \(pathText)")
                         } else {
                             metricRow("Prompt Cache Hit", value: "0% (全量预填充)")
                         }

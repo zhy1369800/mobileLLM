@@ -649,6 +649,7 @@ public actor LlamaEngine: LLMEngine {
             var promptTokenCount: Int = 0
             var cachedRollbackTokensCount: Int = 0
             var rollbackDiagnosticMessage: String? = nil
+            var cachePathResult: CachePath? = nil
             var suffixTokensToDecode: [llama_token] = []
             var rollbackSucceeded = false
             hasImages = kept.contains { !$0.images.isEmpty }
@@ -717,6 +718,7 @@ public actor LlamaEngine: LLMEngine {
                 // of image ViT compute!
                 NSLog("[LlamaEngine][CacheHit] incremental continuation: reused %d cached tokens, decoded suffix %d tok (skipped history recompute)",
                       Int32(sessionCache.tokenCount), Int32(suffixTokens.count))
+                cachePathResult = .incremental
                 let batchCap = Int32(max(1, min(nBatch, suffixTokens.count)))
                 var batch = llama_batch_init(batchCap, 0, 1)
                 defer { llama_batch_free(batch) }
@@ -856,6 +858,7 @@ public actor LlamaEngine: LLMEngine {
                             promptTokenCount = suffixTokens.count
                             cachedRollbackTokensCount = effectiveCommon
                             rollbackSucceeded = true
+                            cachePathResult = .seqRollback
                             let hitRateText = String(format: "%.1f%%", hitRatePct)
                             if isFullPromptMatch {
                                 rollbackDiagnosticMessage = "前缀回滚命中(重发): 复用 \(effectiveCommon) tok (\(hitRateText)), 仅刷新末尾Token"
@@ -899,6 +902,7 @@ public actor LlamaEngine: LLMEngine {
                             promptTokenCount = suffixTokens.count
                             cachedRollbackTokensCount = effectiveCommon
                             rollbackSucceeded = true
+                            cachePathResult = .checkpoint
                             rollbackDiagnosticMessage = "检查点恢复: 复用 \(effectiveCommon) tok, 解码后缀 \(suffixTokens.count) tok"
                             NSLog("[LlamaEngine][CacheHit] checkpoint restore: reused %d prompt tokens, decoded suffix %d tok",
                                   Int32(effectiveCommon), Int32(suffixTokens.count))
@@ -1350,6 +1354,7 @@ public actor LlamaEngine: LLMEngine {
                 speculativeStats: speculativeStatsResult,
                 ttftSeconds: ttftSeconds,
                 cachedPromptTokens: cachedPromptTokensCount,
+                cachePath: cachePathResult,
                 gpuLayers: Int(loadedGpuLayers),
                 backend: loadedGpuLayers > 0 ? "Metal GPU" : "CPU",
                 rollbackDiagnostic: rollbackDiagnosticMessage,
