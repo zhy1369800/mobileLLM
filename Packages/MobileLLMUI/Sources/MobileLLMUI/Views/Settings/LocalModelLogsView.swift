@@ -162,12 +162,11 @@ struct LocalModelLogsView: View {
 
                         if let cached = stats.cachedPromptTokens, cached > 0 {
                             let pct = Int(round(stats.cacheHitRate * 100))
-                            let pathLabel: String
-                            switch stats.cachePath {
-                            case .checkpoint: pathLabel = "Checkpoint"
-                            case .seqRollback: pathLabel = "Rollback"
-                            case .incremental: pathLabel = "Incremental"
-                            default: pathLabel = "Hit"
+                            let pathLabel: String = switch stats.cachePath {
+                            case .checkpoint: "Checkpoint"
+                            case .seqRollback: "Rollback"
+                            case .incremental: "Incremental"
+                            default: "Hit"
                             }
                             HStack(spacing: 2) {
                                 Image(systemName: "sparkles")
@@ -343,12 +342,11 @@ struct LocalModelLogDetailView: View {
                     if let cached = stats.cachedPromptTokens {
                         if cached > 0 {
                             let pct = String(format: "%.1f%%", stats.cacheHitRate * 100)
-                            let pathText: String
-                            switch stats.cachePath {
-                            case .checkpoint: pathText = "检查点恢复"
-                            case .seqRollback: pathText = "seq_rm 回滚"
-                            case .incremental: pathText = "增量续写"
-                            default: pathText = "—"
+                            let pathText: String = switch stats.cachePath {
+                            case .checkpoint: "检查点恢复"
+                            case .seqRollback: "seq_rm 回滚"
+                            case .incremental: "增量续写"
+                            default: "—"
                             }
                             metricRow("Prompt Cache Hit", value: "\(pct) (\(cached) / \(cached + stats.promptTokens) tok) · \(pathText)")
                         } else {
