@@ -101,6 +101,16 @@ public actor LlamaEngine: LLMEngine {
     /// Attention-only architectures are clamped to 0 inside llama.cpp, so this is safe for every model.
     private static let rsRollbackSlots: UInt32 = 2
     private var checkpointDirectory: URL? = nil
+    /// Filesystem-safe per-model prefix for checkpoint files. The model id (e.g. "mlx-community/…")
+    /// may contain path separators and spaces, so it is scrubbed and length-bounded; scoping files per
+    /// model keeps two engines (or two models over time) from clobbering each other's snapshots.
+    private var checkpointFilePrefix: String {
+        guard let loadedID else { return "ckpt-unknown-" }
+        let scrubbed = loadedID.map { ch in
+            ch.isLetter || ch.isNumber || ch == "." || ch == "-" || ch == "_" ? ch : "_"
+        }
+        return "ckpt-\(String(scrubbed.prefix(48)))-"
+    }
     private var loadedID: String?
     private var thinkingCapable = true
     private var eosText = "<|im_end|>"
@@ -126,7 +136,9 @@ public actor LlamaEngine: LLMEngine {
         GenerationGovernance()
     }) {
         self.governanceFactory = governanceFactory
-        Self.cleanupResidualCheckpoints()
+        // Residual-checkpoint cleanup deliberately does NOT run here: engine construction must not
+        // delete shared on-disk state, or a second instance would wipe the first one's snapshots.
+        // The startup sweep lives on the App launch path (mobileLLMApp.swift) before engines exist.
     }
     public var isLoaded: Bool { model != nil }
 
@@ -287,11 +299,23 @@ public actor LlamaEngine: LLMEngine {
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Checkpoints", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        // No in-memory index yet means any files already on disk are orphans from a previous
-        // process/session (e.g. app was killed) — sweep them so Files only shows live checkpoints.
+        // Exclude from iCloud backup: snapshots are engine-internal caches (≈96–280 MiB each at 8K
+        // context), regenerated on demand — backing them up wastes iCloud quota. Mirrors the
+        // Documents/models exclusion in mobileLLMApp.setupModelStorageBase. saveCheckpoint() also
+        // marks each newly written file, since new files do not inherit the directory's attribute.
+        var resourceValues = URLResourceValues()
+        resourceValues.isExcludedFromBackup = true
+        var mutableDir = dir
+        try? mutableDir.setResourceValues(resourceValues)
+        // Sweep stale checkpoint files that cannot belong to the currently loaded model (e.g. a
+        // previous model/session left them when the app was killed). Files sharing our per-model
+        // prefix are kept: another live context (e.g. a second engine instance on the same model)
+        // may still own them, and deleting them here would silently zero its cache-hit rate.
         if let stale = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
             for url in stale where url.lastPathComponent.hasPrefix("ckpt-") {
-                try? FileManager.default.removeItem(at: url)
+                if !url.lastPathComponent.hasPrefix(checkpointFilePrefix) {
+                    try? FileManager.default.removeItem(at: url)
+                }
             }
         }
         checkpointDirectory = dir
@@ -324,8 +348,12 @@ public actor LlamaEngine: LLMEngine {
     /// checkpoint is a pure optimization; without one edit-resend simply falls back to full recompute.
     ///
     /// Short contexts (≤ 1024 tokens) are skipped: full-prefill takes < 0.5 s and the checkpoint
-    /// overhead is not worth it. The C-layer write (~100–300 ms for an 8K Q8_0 snapshot) is offloaded
-    /// to a background task so it never blocks the actor or adds latency to the first generated token.
+    /// overhead is not worth it.
+    /// NOTE: the C-layer write (~100–300 ms for an 8K Q8_0 snapshot) currently runs SYNCHRONOUSLY on
+    /// the actor — callers invoke this right after prefill and before the first decode, so the write
+    /// adds to TTFT and blocks other actor calls (unload/cancel) while it is in flight. TODO: move the
+    /// write off the actor (snapshot state to memory first, then write from a background task) if the
+    /// TTFT impact matters.
     private func saveCheckpoint(turnCount: Int, promptTokens: [llama_token], turns: [ChatTurn], context: OpaquePointer) {
         guard !promptTokens.isEmpty, !turns.isEmpty else { return }
         // Short-context skip: full recompute is fast enough, not worth the disk write.
@@ -333,7 +361,7 @@ public actor LlamaEngine: LLMEngine {
         // Same-turn boundary with identical prompt: already saved, skip the (potentially 100+ MB) write.
         if let existing = checkpoints[turnCount], existing.tokens == promptTokens { return }
         guard let dir = checkpointDirectoryURL() else { return }
-        let filePath = dir.appendingPathComponent("ckpt-\(turnCount).bin").path
+        let filePath = dir.appendingPathComponent("\(checkpointFilePrefix)\(turnCount).bin").path
         let tokensCopy = promptTokens
         let turnsCopy = turns
         if checkpoints[turnCount] == nil { checkpointOrder.append(turnCount) }
@@ -350,6 +378,13 @@ public actor LlamaEngine: LLMEngine {
         }
         if written == 0 {
             NSLog("[LlamaEngine] Checkpoint save failed (turn=%d)", Int32(turnCount))
+        } else {
+            // New files do not inherit the directory's isExcludedFromBackup attribute; mark this one
+            // so the fresh snapshot stays out of iCloud backup.
+            var fileURL = URL(fileURLWithPath: filePath)
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try? fileURL.setResourceValues(values)
         }
     }
 
@@ -377,6 +412,10 @@ public actor LlamaEngine: LLMEngine {
             reason = "无已保存检查点 (checkpoints 为空)"
             return nil
         }
+        // Record the FIRST candidate that matched the prefix but failed to load — the one the user
+        // most wants to know about. First-wins: a later, older candidate's failure must not overwrite
+        // the newest match's reason in the logs UI.
+        var loadFailureReason: String? = nil
         let candidates = checkpoints.values.sorted { $0.promptEndPos > $1.promptEndPos }
         for cp in candidates {
             guard cp.promptEndPos >= minCommon, cp.promptEndPos <= newPromptTokens.count else { continue }
@@ -395,11 +434,15 @@ public actor LlamaEngine: LLMEngine {
                 }
             }
             guard nread > 0, loadedCount == cp.promptEndPos else {
-                reason = "检查点文件缺失或未完成写入 (ckpt-\(cp.turnCount).bin)"
+                if loadFailureReason == nil {
+                    loadFailureReason = "检查点文件缺失或未完成写入 (turn=\(cp.turnCount))"
+                }
                 continue
             }
             guard Array(loaded.prefix(loadedCount)) == cp.tokens else {
-                reason = "检查点文件内容校验失败 (ckpt-\(cp.turnCount).bin)"
+                if loadFailureReason == nil {
+                    loadFailureReason = "检查点文件内容校验失败 (turn=\(cp.turnCount))"
+                }
                 continue
             }
 
@@ -412,7 +455,9 @@ public actor LlamaEngine: LLMEngine {
                   Int32(cp.turnCount), Int32(cp.promptEndPos), Int32(suffix.count))
             return (cp.promptEndPos, suffix)
         }
-        if reason.isEmpty {
+        if let loadFailureReason {
+            reason = loadFailureReason
+        } else {
             reason = "无前缀匹配的检查点 (编辑点早于所有已保存边界或前缀不符)"
         }
         return nil
@@ -973,8 +1018,9 @@ public actor LlamaEngine: LLMEngine {
             }
             // Save a "prompt fully prefilled" checkpoint for this turn boundary (prefix-rollback path),
             // so that a later edit-resend that seq_rm cannot serve (Qwen 3.5 hybrid recurrent state)
-            // can restore it instead of recomputing. The write is offloaded to a background task and
-            // skipped for short contexts (≤ 1024 tok) where full-prefill is already fast enough.
+            // can restore it instead of recomputing. The write is SYNCHRONOUS on the actor (see
+            // saveCheckpoint) and skipped for short contexts (≤ 1024 tok) where full-prefill is
+            // already fast enough.
             if params.kvCheckpointsEnabled && !hasImages, let pt = prefilledPromptTokens, !pt.isEmpty {
                 saveCheckpoint(turnCount: kept.count, promptTokens: pt, turns: kept, context: context)
             }
