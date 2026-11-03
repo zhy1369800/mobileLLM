@@ -367,10 +367,16 @@ public actor LlamaEngine: LLMEngine {
     /// saved prompt tokens are a prefix of the NEW prompt tokens (the user edited strictly after that
     /// turn boundary); the newest/longest match is preferred for maximum reuse. On success the session
     /// cache is rolled back to the checkpoint state and the physical prompt-end position is returned
-    /// (caller then decodes `newPromptTokens[promptEndPos...]`). Returns nil when nothing usable exists.
+    /// (caller then decodes `newPromptTokens[promptEndPos...]`). Returns nil when nothing usable exists;
+    /// `reason` (in-out) carries why, so the caller can surface the miss in the logs UI.
     private func restoreCheckpoint(newPromptTokens: [llama_token],
                                    minCommon: Int,
-                                   context: OpaquePointer) -> (pos: Int, suffix: ArraySlice<llama_token>)? {
+                                   context: OpaquePointer,
+                                   reason: inout String) -> (pos: Int, suffix: ArraySlice<llama_token>)? {
+        guard !checkpoints.isEmpty else {
+            reason = "无已保存检查点 (checkpoints 为空)"
+            return nil
+        }
         let candidates = checkpoints.values.sorted { $0.promptEndPos > $1.promptEndPos }
         for cp in candidates {
             guard cp.promptEndPos >= minCommon, cp.promptEndPos <= newPromptTokens.count else { continue }
@@ -388,8 +394,14 @@ public actor LlamaEngine: LLMEngine {
                     llama_state_seq_load_file(context, cPath, 0, buf.baseAddress, buf.count, &loadedCount)
                 }
             }
-            guard nread > 0, loadedCount == cp.promptEndPos else { continue }
-            guard Array(loaded.prefix(loadedCount)) == cp.tokens else { continue }
+            guard nread > 0, loadedCount == cp.promptEndPos else {
+                reason = "检查点文件缺失或未完成写入 (ckpt-\(cp.turnCount).bin)"
+                continue
+            }
+            guard Array(loaded.prefix(loadedCount)) == cp.tokens else {
+                reason = "检查点文件内容校验失败 (ckpt-\(cp.turnCount).bin)"
+                continue
+            }
 
             // Roll the session cache back to the restored boundary so subsequent commits line up.
             sessionCache.rollbackToCheckpoint(turns: cp.turns, tokens: cp.tokens, count: cp.promptEndPos,
@@ -399,6 +411,9 @@ public actor LlamaEngine: LLMEngine {
             NSLog("[LlamaEngine] Checkpoint restored: turn=%d, promptEndPos=%d, suffix=%d tok",
                   Int32(cp.turnCount), Int32(cp.promptEndPos), Int32(suffix.count))
             return (cp.promptEndPos, suffix)
+        }
+        if reason.isEmpty {
+            reason = "无前缀匹配的检查点 (编辑点早于所有已保存边界或前缀不符)"
         }
         return nil
     }
@@ -882,33 +897,45 @@ public actor LlamaEngine: LLMEngine {
                     // state) — instead of a full recompute we reload the saved "prompt fully prefilled"
                     // state file for the matching turn boundary and decode only the tokens after the edit
                     // point. Pure-text sessions only; vision turns keep the clean-slate path.
-                    if !residentHadImages, !sessionCache.tokens.isEmpty,
-                       let restored = restoreCheckpoint(newPromptTokens: promptTokens,
-                                                        minCommon: 16,
-                                                        context: context) {
-                        let suffixTokens: [llama_token]
-                        if restored.suffix.isEmpty {
-                            // Exact same prompt as the checkpoint: replay the last token to refresh logits
-                            // (mirrors the isFullPromptMatch regenerate path). restored.pos >= 16 here.
-                            suffixTokens = [promptTokens[restored.pos - 1]]
+                    if residentHadImages {
+                        rollbackDiagnosticMessage = "检查点恢复跳过: 会话含多模态图片"
+                        NSLog("[LlamaEngine][CacheMiss] Checkpoint restore skipped: session has images")
+                    } else if sessionCache.tokens.isEmpty {
+                        rollbackDiagnosticMessage = "检查点恢复跳过: 会话无历史Token"
+                        NSLog("[LlamaEngine][CacheMiss] Checkpoint restore skipped: no resident history")
+                    } else {
+                        var restoreReason = ""
+                        if let restored = restoreCheckpoint(newPromptTokens: promptTokens,
+                                                            minCommon: 16,
+                                                            context: context,
+                                                            reason: &restoreReason) {
+                            let suffixTokens: [llama_token]
+                            if restored.suffix.isEmpty {
+                                // Exact same prompt as the checkpoint: replay the last token to refresh logits
+                                // (mirrors the isFullPromptMatch regenerate path). restored.pos >= 16 here.
+                                suffixTokens = [promptTokens[restored.pos - 1]]
+                            } else {
+                                suffixTokens = Array(restored.suffix)
+                            }
+                            effectiveCommon = restored.pos
+                            suffixTokensToDecode = suffixTokens
+                            totalPromptCountForStats = promptTokens.count
+                            if try await decodeSuffix(suffixTokens, from: effectiveCommon,
+                                                      nBatch: nBatch, context: context, governance: governance) {
+                                promptTokenCount = suffixTokens.count
+                                cachedRollbackTokensCount = effectiveCommon
+                                rollbackSucceeded = true
+                                cachePathResult = .checkpoint
+                                rollbackDiagnosticMessage = "检查点恢复: 复用 \(effectiveCommon) tok, 解码后缀 \(suffixTokens.count) tok"
+                                NSLog("[LlamaEngine][CacheHit] checkpoint restore: reused %d prompt tokens, decoded suffix %d tok",
+                                      Int32(effectiveCommon), Int32(suffixTokens.count))
+                            } else {
+                                rollbackDiagnosticMessage = "检查点恢复失败: 后缀Token解码错误, 回退全量重算"
+                                NSLog("[LlamaEngine][CacheMiss] Checkpoint restore decode failed, falling back to clean slate")
+                            }
                         } else {
-                            suffixTokens = Array(restored.suffix)
-                        }
-                        effectiveCommon = restored.pos
-                        suffixTokensToDecode = suffixTokens
-                        totalPromptCountForStats = promptTokens.count
-                        if try await decodeSuffix(suffixTokens, from: effectiveCommon,
-                                                  nBatch: nBatch, context: context, governance: governance) {
-                            promptTokenCount = suffixTokens.count
-                            cachedRollbackTokensCount = effectiveCommon
-                            rollbackSucceeded = true
-                            cachePathResult = .checkpoint
-                            rollbackDiagnosticMessage = "检查点恢复: 复用 \(effectiveCommon) tok, 解码后缀 \(suffixTokens.count) tok"
-                            NSLog("[LlamaEngine][CacheHit] checkpoint restore: reused %d prompt tokens, decoded suffix %d tok",
-                                  Int32(effectiveCommon), Int32(suffixTokens.count))
-                        } else {
-                            rollbackDiagnosticMessage = "检查点恢复失败: 后缀Token解码错误, 回退全量重算"
-                            NSLog("[LlamaEngine][CacheMiss] Checkpoint restore decode failed, falling back to clean slate")
+                            rollbackDiagnosticMessage = "检查点恢复未命中: \(restoreReason)，回退全量重算"
+                            NSLog("[LlamaEngine][CacheMiss] Checkpoint restore missed: %@", restoreReason)
                         }
                     }
                 }
