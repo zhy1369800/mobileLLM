@@ -46,6 +46,12 @@ public final class LoggingConfiguration: @unchecked Sendable {
     }
 }
 
+public enum CompactionModelTarget: Codable, Equatable, Hashable, Sendable {
+    case followCurrent
+    case shortcut(id: String)
+    case online(serviceID: String)
+}
+
 /// User preferences (DESIGN §4 Settings): the default model, chat behavior, sampling, and appearance.
 /// `@Observable` so SwiftUI bindings drive it directly; changes persist to `UserDefaults` as one small
 /// Codable snapshot (chat data itself lives in files — DESIGN §2.4).
@@ -78,6 +84,8 @@ public final class AppSettings {
     /// Summarize older messages once a local-model chat nears its context limit (OGAM-style), so the prompt
     /// prefix stays stable between compactions and the KV cache keeps hitting. Off by default.
     public var autoCompactionEnabled: Bool { didSet { persist() } }
+    /// Target model to perform context compaction summaries: follow active, or a specific shortcuts/online model.
+    public var compactionModelTarget: CompactionModelTarget { didSet { persist() } }
     /// Dictation language as a locale identifier (`nil` = follow the system). One recognizer = one
     /// language, so code-switching users pick explicitly via the mic's long-press menu.
     public var dictationLocale: String? { didSet { persist() } }
@@ -371,6 +379,7 @@ public final class AppSettings {
         toolsEnabled = snap?.toolsEnabled ?? false
         alwaysExposeTools = snap?.alwaysExposeTools ?? false
         autoCompactionEnabled = snap?.autoCompactionEnabled ?? false
+        compactionModelTarget = snap?.compactionModelTarget ?? .followCurrent
         dictationLocale = snap?.dictationLocale ?? nil
         let (servers, migrated) = Self.loadMCPServers(from: snap, keychain: keychain)
         mcpServers = servers
@@ -573,6 +582,7 @@ public final class AppSettings {
         var toolsEnabled: Bool? = false   // optional → old snapshots decode
         var alwaysExposeTools: Bool? = false
         var autoCompactionEnabled: Bool? = false
+        var compactionModelTarget: CompactionModelTarget? = .followCurrent
         var dictationLocale: String? = nil
         var mcpServers: [MCPServer]? = []
         /// Ids of servers whose bearer token lives in the Keychain (A2.9). Absent in pre-migration
@@ -626,6 +636,7 @@ public final class AppSettings {
                             toolsEnabled: toolsEnabled,
                             alwaysExposeTools: alwaysExposeTools,
                             autoCompactionEnabled: autoCompactionEnabled,
+                            compactionModelTarget: compactionModelTarget,
                             dictationLocale: dictationLocale,
                             mcpServers: scrubbed, mcpTokenMarkers: markers,
                             disabledBuiltInTools: disabledBuiltInTools, searchEngines: searchEngines,
@@ -681,6 +692,7 @@ public final class AppSettings {
         toolsEnabled = false
         alwaysExposeTools = false
         autoCompactionEnabled = false
+        compactionModelTarget = .followCurrent
         dictationLocale = nil
         mcpServers = []
         onlineServices = []

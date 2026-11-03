@@ -148,6 +148,7 @@ public final class ChatStore {
     private let eventStore: (any EventStoring)?
     private let locationProvider: (any LocationProviding)?
     private let shortcutExecutor: (any ShortcutAutomationExecuting)?
+    private let openAICredentials: (any OpenAICredentialStoring)?
     /// What the assistant remembers about the user. Read on every send to compose the memory block into the
     /// system prompt — the automatic recall that makes memory work with a 2B model that never thinks to
     /// call `recall` — and unwrapped to its durable store when the memory tools are assembled. Public so
@@ -213,7 +214,8 @@ public final class ChatStore {
                 shortcutExecutor: (any ShortcutAutomationExecuting)? = nil,
                 skillStore: SkillStore? = nil,
                 agentRuns: AgentRunStore? = nil,
-                workflowStore: WorkflowStore? = nil) {
+                workflowStore: WorkflowStore? = nil,
+                openAICredentials: (any OpenAICredentialStoring)? = nil) {
         self.engine = engine
         self.store = store
         self.settings = settings
@@ -225,6 +227,7 @@ public final class ChatStore {
         self.skillStore = skillStore
         self.agentRuns = agentRuns
         self.workflowStore = workflowStore
+        self.openAICredentials = openAICredentials
         self.thinkingEnabled = settings.thinkingDefault
         if let agentRuns {
             attachAgentRuntime(agentRuns)
@@ -1418,16 +1421,25 @@ public final class ChatStore {
     /// does not add a failing model call to every send.
     private var compactionFailedConversations: Set<UUID> = []
 
-    /// The compaction this send needs, if any: on-device models only, feature on, prompt past the trigger.
+    /// The compaction this send needs, if any: feature on, prompt past the trigger.
     private func compactionPlanIfNeeded(
         conversationID: UUID,
         excluding turnIDs: Set<UUID>,
         currentText: String
     ) -> ContextCompactor.Plan? {
-        guard settings.autoCompactionEnabled, !isOnlineActive, !isShortcutsActive,
+        guard settings.autoCompactionEnabled,
               !compactionFailedConversations.contains(conversationID),
-              let ci = conversations.firstIndex(where: { $0.id == conversationID }),
-              let model = activeModel?.model else { return nil }
+              let ci = conversations.firstIndex(where: { $0.id == conversationID }) else { return nil }
+
+        let cap: Int
+        if let model = activeModel?.model {
+            cap = effectiveSampling(for: model).contextTokenCap
+        } else if isOnlineActive {
+            cap = min(onlineContextRequest, OnlineModelIdentity.maximumContextTokens)
+        } else {
+            cap = settings.contextLength
+        }
+
         // Edit / regenerate replace message ids. A cutoff that no longer exists means the summary describes
         // history that is gone, so drop it before planning.
         if let cutoff = conversations[ci].compactionCutoffMessageID,
@@ -1445,43 +1457,50 @@ public final class ChatStore {
             cutoffID: conversations[ci].compactionCutoffMessageID,
             summary: conversations[ci].compactionSummary,
             fixedTokens: fixedTokens,
-            contextLength: effectiveSampling(for: model).contextTokenCap
+            contextLength: cap
         )
     }
 
-    /// Asks the resident model to summarize the aged-out messages, then moves the cutoff. Runs before the
-    /// run starts, so it never overlaps the run's own use of the engine. Any failure leaves the conversation
-    /// untouched: the turn proceeds with the runtime's normal truncation.
+    /// Asks the chosen compaction model (shortcuts, online, or resident) to summarize the aged-out messages,
+    /// then moves the cutoff. Runs before the run starts, so it never overlaps the run's own use of the engine.
+    /// Any failure leaves the conversation untouched: the turn proceeds with normal truncation.
     private func runCompaction(_ plan: ContextCompactor.Plan, conversationID: UUID) async {
-        guard let model = activeModel?.model,
-              let ci = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+        guard let ci = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
         let note = "Compacting conversation…"
         streaming?.warmingNote = note
         defer { if streaming?.warmingNote == note { streaming?.warmingNote = nil } }
 
-        var params = effectiveSampling(for: model)
-        let contextLength = params.contextTokenCap
-        params.thinking = false
-        params.temperature = 0.2
-        params.maxTokens = ContextCompactor.summaryTokenBudget(contextLength: contextLength)
-        let turns = ContextCompactor.summarizerTurns(
-            previousSummary: conversations[ci].compactionSummary,
-            messages: plan.toSummarize,
-            inputTokenBudget: ContextCompactor.inputTokenBudget(contextLength: contextLength)
-        )
-
         var raw = ""
+        let target = settings.compactionModelTarget
+
         do {
-            for try await delta in engine.generate(messages: turns, params: params) {
-                try Task.checkCancellation()
-                if case .answer(let piece) = delta { raw += piece }
-                if case .done = delta { break }
+            switch target {
+            case .shortcut(let id):
+                if let svc = settings.shortcutsServices.first(where: { $0.id == id }),
+                   let executor = shortcutExecutor {
+                    raw = try await runShortcutCompaction(plan: plan, service: svc, executor: executor, previousSummary: conversations[ci].compactionSummary)
+                } else {
+                    raw = try await runResidentCompaction(plan: plan, conversationIndex: ci)
+                }
+            case .online(let serviceID):
+                if let svc = settings.onlineServices.first(where: { $0.id == serviceID }) {
+                    raw = try await runOnlineCompaction(plan: plan, service: svc, previousSummary: conversations[ci].compactionSummary)
+                } else {
+                    raw = try await runResidentCompaction(plan: plan, conversationIndex: ci)
+                }
+            case .followCurrent:
+                raw = try await runResidentCompaction(plan: plan, conversationIndex: ci)
             }
         } catch is CancellationError {
             return
         } catch {
-            compactionFailedConversations.insert(conversationID)
-            return
+            // If custom target failed, try resident fallback as last resort before giving up
+            if target != .followCurrent, let fallbackRaw = try? await runResidentCompaction(plan: plan, conversationIndex: ci) {
+                raw = fallbackRaw
+            } else {
+                compactionFailedConversations.insert(conversationID)
+                return
+            }
         }
 
         guard let summary = ContextCompactor.cleanedSummary(raw),
@@ -1495,6 +1514,103 @@ public final class ChatStore {
         conversations[idx].compactionCutoffMessageID = plan.newCutoffID
         persist(conversations[idx])
         showToast(Toast("Compacted earlier messages to keep replies fast", autoDismiss: 3))
+    }
+
+    private func runResidentCompaction(plan: ContextCompactor.Plan, conversationIndex ci: Int) async throws -> String {
+        guard let model = activeModel?.model else { throw CancellationError() }
+        var params = effectiveSampling(for: model)
+        let contextLength = params.contextTokenCap
+        params.thinking = false
+        params.temperature = 0.2
+        params.maxTokens = ContextCompactor.summaryTokenBudget(contextLength: contextLength)
+        let turns = ContextCompactor.summarizerTurns(
+            previousSummary: conversations[ci].compactionSummary,
+            messages: plan.toSummarize,
+            inputTokenBudget: ContextCompactor.inputTokenBudget(contextLength: contextLength)
+        )
+        var raw = ""
+        for try await delta in engine.generate(messages: turns, params: params) {
+            try Task.checkCancellation()
+            if case .answer(let piece) = delta { raw += piece }
+            if case .done = delta { break }
+        }
+        return raw
+    }
+
+    private func runShortcutCompaction(
+        plan: ContextCompactor.Plan,
+        service: ShortcutsService,
+        executor: any ShortcutAutomationExecuting,
+        previousSummary: String?
+    ) async throws -> String {
+        let promptText = ContextCompactor.summarizerTurns(
+            previousSummary: previousSummary,
+            messages: plan.toSummarize,
+            inputTokenBudget: 8192
+        ).map { "\($0.role == .user ? "User" : "Assistant"): \($0.content)" }.joined(separator: "\n\n")
+
+        let fullPrompt = "\(ContextCompactor.summarizerSystemPrompt)\n\nConversation to summarize:\n\(promptText)"
+        let paramsDict = ShortcutsModelPromptBuilder.buildParams(msg: fullPrompt)
+        let paramsData = (try? JSONSerialization.data(withJSONObject: paramsDict, options: [])) ?? Data()
+        let paramsString = String(data: paramsData, encoding: .utf8) ?? "{}"
+        let taskId = UUID().uuidString
+
+        let rawResult = try await executor.executeTask(
+            action: "exec",
+            shortcut: service.shortcutName,
+            params: paramsString,
+            taskId: taskId,
+            timeoutSeconds: 30
+        )
+        return ShortcutsModelPromptBuilder.extractResultContent(from: rawResult)
+    }
+
+    private func runOnlineCompaction(
+        plan: ContextCompactor.Plan,
+        service: OnlineService,
+        previousSummary: String?
+    ) async throws -> String {
+        let baseURL = service.baseURL ?? OpenAIServiceConfiguration.defaultBaseURL
+        guard let url = URL(string: "\(baseURL)/chat/completions") else {
+            throw CancellationError()
+        }
+        let apiKey = (try? openAICredentials?.loadAPIKey(serviceID: service.id)) ?? ""
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        let turns = ContextCompactor.summarizerTurns(
+            previousSummary: previousSummary,
+            messages: plan.toSummarize,
+            inputTokenBudget: 8192
+        )
+        let messagesPayload = turns.map { turn in
+            ["role": turn.role.rawValue, "content": turn.content]
+        }
+
+        let body: [String: Any] = [
+            "model": service.modelID ?? "gpt-4o-mini",
+            "messages": messagesPayload,
+            "temperature": 0.2,
+            "max_tokens": 512
+        ]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.timeoutInterval = 30
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let firstChoice = choices.first,
+              let message = firstChoice["message"] as? [String: Any],
+              let content = message["content"] as? String
+        else {
+            throw CancellationError()
+        }
+        return content
     }
 
     /// Starts a message-anchored workflow. The app-assembled launcher creates the reserved parent

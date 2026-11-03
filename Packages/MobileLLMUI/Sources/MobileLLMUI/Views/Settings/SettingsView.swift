@@ -190,13 +190,15 @@ struct SettingsView: View {
             Toggle(isOn: $settings.autoCompactionEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Auto-compact conversations").font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("On-device models only. When a chat nears the context limit, the model summarizes older "
-                         + "messages once and keeps the recent ones, so following replies reuse the cache and stay fast. "
-                         + "The summary costs one extra model pass when it runs.")
+                    Text("When a chat nears the context limit, older messages are summarized and compressed "
+                         + "to keep the prefix stable and fast.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                 }
             }
             .tint(Theme.accent)
+            if settings.autoCompactionEnabled {
+                compactionModelPickerRow
+            }
             Divider().background(Theme.hairline)
             Toggle(isOn: $settings.localModelLoggingEnabled) {
                 VStack(alignment: .leading, spacing: 2) {
@@ -438,6 +440,81 @@ struct SettingsView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    private var compactionModelLabel: String {
+        switch settings.compactionModelTarget {
+        case .followCurrent:
+            return "Follow active model"
+        case .shortcut(let id):
+            if let svc = settings.shortcutsServices.first(where: { $0.id == id }) {
+                return svc.name
+            }
+            return "Shortcuts"
+        case .online(let serviceID):
+            if let svc = settings.onlineServices.first(where: { $0.id == serviceID }) {
+                return svc.name.isEmpty ? (svc.modelID ?? "Online API") : svc.name
+            }
+            return "Online Service"
+        }
+    }
+
+    @ViewBuilder private var compactionModelPickerRow: some View {
+        HStack {
+            Text("Compaction model").font(.subheadline).foregroundStyle(Theme.textSecondary)
+            Spacer()
+            Menu {
+                Button {
+                    settings.compactionModelTarget = .followCurrent
+                } label: {
+                    if settings.compactionModelTarget == .followCurrent {
+                        Label("Follow active model", systemImage: "checkmark")
+                    } else {
+                        Text("Follow active model")
+                    }
+                }
+
+                if !settings.shortcutsServices.isEmpty {
+                    Divider()
+                    ForEach(settings.shortcutsServices) { service in
+                        Button {
+                            settings.compactionModelTarget = .shortcut(id: service.id)
+                        } label: {
+                            let isSelected = settings.compactionModelTarget == .shortcut(id: service.id)
+                            if isSelected {
+                                Label("Shortcut: \(service.name)", systemImage: "checkmark")
+                            } else {
+                                Text("Shortcut: \(service.name)")
+                            }
+                        }
+                    }
+                }
+
+                if !settings.onlineServices.isEmpty {
+                    Divider()
+                    ForEach(settings.onlineServices) { service in
+                        Button {
+                            settings.compactionModelTarget = .online(serviceID: service.id)
+                        } label: {
+                            let title = service.name.isEmpty ? (service.modelID ?? "Online") : service.name
+                            let isSelected = settings.compactionModelTarget == .online(serviceID: service.id)
+                            if isSelected {
+                                Label("Online: \(title)", systemImage: "checkmark")
+                            } else {
+                                Text("Online: \(title)")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text(compactionModelLabel)
+                    Image(systemName: "chevron.up.chevron.down").font(.caption2)
+                }
+                .foregroundStyle(Theme.accent)
+            }
+        }
+        .padding(.vertical, 2)
     }
 
     @ViewBuilder private var localModelLogsRow: some View {

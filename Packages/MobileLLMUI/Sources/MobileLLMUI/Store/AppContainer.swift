@@ -153,7 +153,8 @@ public final class AppContainer {
                               shortcutExecutor: shortcutExecutor,
                               skillStore: skillStore,
                               agentRuns: agentRuns,
-                              workflowStore: self.workflowStore)
+                              workflowStore: self.workflowStore,
+                              openAICredentials: self.openAICredentials)
         // Cold launch restores identity only, so the first turn is where the weights are actually loaded.
         // A false answer stops the turn instead of generating against an empty engine.
         chat.ensureModelReady = { [weak self] in
