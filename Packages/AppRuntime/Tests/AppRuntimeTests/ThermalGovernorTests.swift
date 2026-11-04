@@ -38,14 +38,30 @@ final class ThermalGovernorTests: XCTestCase {
         XCTAssertEqual(clears.value, 0)
     }
 
-    /// `.serious` → matching hardware-managed full throughput, inserts zero artificial sleep.
-    func testSeriousDoesNotSleep() async throws {
-        let sleeps = Counter(), clears = Counter()
+    /// `.serious` → inserts a lightweight micro-sleep (25ms–50ms) to pace the duty cycle, without clearing cache.
+    func testSeriousAppliesMicroSleepWithoutClearingCache() async throws {
+        var recordedSleepNanos: UInt64 = 0
+        let clears = Counter()
         let g = ThermalGovernor(thermalSource: { .serious },
-                                sleep: { _ in sleeps.inc() },
+                                sleep: { nanos in recordedSleepNanos = nanos },
                                 clearCache: { clears.inc() })
         try await g.throttleIfNeeded()
-        XCTAssertEqual(sleeps.value, 0)
+        XCTAssertGreaterThanOrEqual(recordedSleepNanos, 25_000_000, "must sleep at least 25ms")
+        XCTAssertLessThanOrEqual(recordedSleepNanos, 50_000_000, "must cap micro-sleep at 50ms")
+        XCTAssertEqual(clears.value, 0, "must never clear cache on serious thermal state")
+    }
+
+    func testSeriousBackoffCapsAt50ms() async throws {
+        var recorded: [UInt64] = []
+        let g = ThermalGovernor(thermalSource: { .serious },
+                                sleep: { nanos in recorded.append(nanos) },
+                                clearCache: {})
+        for _ in 0..<10 {
+            try await g.throttleIfNeeded()
+        }
+        XCTAssertEqual(recorded.count, 10)
+        XCTAssertEqual(recorded.first, 25_000_000)
+        XCTAssertEqual(recorded.last, 50_000_000)
     }
 
     /// `.critical` → pauses (emits the "cooling" callback + clears cache), then recovers once the

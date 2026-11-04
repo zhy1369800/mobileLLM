@@ -192,9 +192,14 @@ public final class ThermalGovernor: ThermalGoverning, @unchecked Sendable {
         if currentPressure() >= .warning { clearCache() }
 
         switch currentSeverity() {
-        case .nominal, .fair, .serious:
+        case .nominal, .fair:
             resetSeriousBackoff()
             return
+
+        case .serious:
+            // Lightweight pacing: insert a brief micro-sleep (25ms–50ms) to lower the duty cycle
+            // and avoid severe OS hardware throttling, without clearing any caches or stalling token stream.
+            try await sleepFn(seriousBackoffNanos())
 
         case .critical:
             try await pauseUntilCool(onCooling: onCooling)
@@ -202,6 +207,18 @@ public final class ThermalGovernor: ThermalGoverning, @unchecked Sendable {
     }
 
     // MARK: - Pacing logic
+
+    /// Backoff at `.serious`: brief micro-sleep (25 ms, stepping by 5 ms up to 50 ms).
+    /// Keeps token streaming fluid and visually unnoticeable while shedding sufficient SoC heat
+    /// to avoid severe OS-level hardware throttling.
+    private func seriousBackoffNanos() -> UInt64 {
+        lock.lock()
+        consecutiveSeriousThrottles = min(consecutiveSeriousThrottles + 1, 6)
+        let steps = consecutiveSeriousThrottles
+        lock.unlock()
+        let millis = 25 + 5 * (steps - 1)
+        return UInt64(min(millis, 50)) * 1_000_000
+    }
 
     private func resetSeriousBackoff() {
         lock.lock(); consecutiveSeriousThrottles = 0; lock.unlock()

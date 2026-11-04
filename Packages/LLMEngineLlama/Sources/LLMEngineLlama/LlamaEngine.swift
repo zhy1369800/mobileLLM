@@ -10,6 +10,9 @@ import ImageIO
 #if canImport(UniformTypeIdentifiers)
 import UniformTypeIdentifiers
 #endif
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// The llama.cpp on-device engine: loads a GGUF model (mmap'd) and streams tokens through Metal,
 /// routing the Bonsai `<think>` block to `.reasoning` and the rest to `.answer` via `ThinkSplitter`.
@@ -128,9 +131,30 @@ public actor LlamaEngine: LLMEngine {
     nonisolated private let generationLifecycle = GenerationLifecycle()
     nonisolated private let governanceFactory: GovernanceFactory
 
-    private let nThreads: Int32 = {
-        Int32(max(1, min(8, ProcessInfo.processInfo.activeProcessorCount - 2)))
-    }()
+    private static func computeOptimalThreads() -> Int32 {
+        #if canImport(Darwin)
+        var pCores: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        if sysctlbyname("hw.perflevel0.physicalcpu", &pCores, &size, nil, 0) == 0, pCores > 0 {
+            #if os(iOS)
+            // On iPhone/iPad, clamp strictly to physical performance cores (typically 2 on iPhone,
+            // up to 4 on iPad) so worker threads never spill onto efficiency cores and spin-wait.
+            return min(pCores, 4)
+            #else
+            return min(pCores, 8)
+            #endif
+        }
+        #endif
+
+        #if os(iOS)
+        // Baseline iOS fallback: limit to 2 threads (standard iPhone performance core count).
+        return min(2, max(1, Int32(ProcessInfo.processInfo.activeProcessorCount - 2)))
+        #else
+        return Int32(max(1, min(8, ProcessInfo.processInfo.activeProcessorCount - 2)))
+        #endif
+    }
+
+    private let nThreads: Int32 = computeOptimalThreads()
 
     /// llama.cpp's weights are mmap-backed, so there is no accelerator reuse cache to purge. The
     /// production governor still observes memory pressure and performs thermal pacing; tests inject a
