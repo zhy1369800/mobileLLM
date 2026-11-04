@@ -106,16 +106,57 @@ public enum OpenAIKeyEnvironment {
 
 /// Non-secret service configuration for the Responses API. The base URL may point at a gateway,
 /// proxy, or self-hosted endpoint; it is persisted in Settings (unlike the key, which stays in the
-/// Keychain). Only https is accepted.
+/// Keychain). Https is preferred, but http is accepted for local or private-network endpoints.
 public enum OpenAIServiceConfiguration {
     public static let defaultBaseURL = "https://api.openai.com/v1"
+
+    /// Returns true if the host is a local hostname or in a private / loopback IP range.
+    public static func isLocalOrPrivateHost(_ rawHost: String) -> Bool {
+        let host = rawHost.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        if host.isEmpty { return false }
+        if host == "localhost"
+            || host.hasSuffix(".localhost")
+            || host == "local"
+            || host.hasSuffix(".local")
+            || host == "home.arpa"
+            || host.hasSuffix(".home.arpa") {
+            return true
+        }
+
+        // IPv4 checks
+        let v4Parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        if v4Parts.count == 4,
+           let p0 = UInt8(v4Parts[0]), let p1 = UInt8(v4Parts[1]),
+           let _ = UInt8(v4Parts[2]), let _ = UInt8(v4Parts[3]) {
+            if p0 == 127 { return true }                                    // Loopback (127.0.0.0/8)
+            if p0 == 10 { return true }                                     // RFC 1918 (10.0.0.0/8)
+            if p0 == 172 && (16...31).contains(p1) { return true }          // RFC 1918 (172.16.0.0/12)
+            if p0 == 192 && p1 == 168 { return true }                       // RFC 1918 (192.168.0.0/16)
+            if p0 == 169 && p1 == 254 { return true }                       // Link-local (169.254.0.0/16)
+            return false
+        }
+
+        // IPv6 checks
+        if host == "::1" || host == "0:0:0:0:0:0:0:1" { return true }       // IPv6 Loopback
+        if host.hasPrefix("fe80:") { return true }                         // Link-local
+        if host.hasPrefix("fc") || host.hasPrefix("fd") { return true }     // Unique-local (fc00::/7)
+
+        return false
+    }
+
+    public static func isValidBaseURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(),
+              let host = url.host, !host.isEmpty else { return false }
+        if scheme == "https" { return true }
+        if scheme == "http" { return isLocalOrPrivateHost(host) }
+        return false
+    }
 
     public static func normalizedBaseURL(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               let url = URL(string: trimmed),
-              url.scheme?.lowercased() == "https",
-              url.host?.isEmpty == false
+              isValidBaseURL(url)
         else { return nil }
         return trimmed
     }

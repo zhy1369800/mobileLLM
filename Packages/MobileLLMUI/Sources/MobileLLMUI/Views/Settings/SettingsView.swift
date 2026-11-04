@@ -442,6 +442,10 @@ struct SettingsView: View {
         .buttonStyle(.plain)
     }
 
+    private var isCompactionTargetMissing: Bool {
+        !settings.isCompactionTargetAvailable
+    }
+
     private var compactionModelLabel: String {
         switch settings.compactionModelTarget {
         case .followCurrent:
@@ -450,12 +454,12 @@ struct SettingsView: View {
             if let svc = settings.shortcutsServices.first(where: { $0.id == id }) {
                 return svc.name
             }
-            return "Shortcuts"
+            return "Shortcut missing (reselect)"
         case .online(let serviceID):
             if let svc = settings.onlineServices.first(where: { $0.id == serviceID }) {
                 return svc.name.isEmpty ? (svc.modelID ?? "Online API") : svc.name
             }
-            return "Online Service"
+            return "Online service missing (reselect)"
         }
     }
 
@@ -464,6 +468,15 @@ struct SettingsView: View {
             Text("Compaction model").font(.subheadline).foregroundStyle(Theme.textSecondary)
             Spacer()
             Menu {
+                if isCompactionTargetMissing {
+                    Button(role: .destructive) {
+                        settings.compactionModelTarget = .followCurrent
+                    } label: {
+                        Label("Target unavailable — tap to reset", systemImage: "exclamationmark.triangle")
+                    }
+                    Divider()
+                }
+
                 Button {
                     settings.compactionModelTarget = .followCurrent
                 } label: {
@@ -508,10 +521,14 @@ struct SettingsView: View {
                 }
             } label: {
                 HStack(spacing: 4) {
+                    if isCompactionTargetMissing {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                    }
                     Text(compactionModelLabel)
                     Image(systemName: "chevron.up.chevron.down").font(.caption2)
                 }
-                .foregroundStyle(Theme.accent)
+                .foregroundStyle(isCompactionTargetMissing ? Color.orange : Theme.accent)
             }
         }
         .padding(.vertical, 2)

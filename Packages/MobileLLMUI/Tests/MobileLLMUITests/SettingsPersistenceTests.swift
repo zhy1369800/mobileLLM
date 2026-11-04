@@ -414,4 +414,25 @@ final class SettingsPersistenceTests: XCTestCase {
         """#)
         XCTAssertFalse(AppSettings(defaults: defaults).autoCompactionEnabled)
     }
+
+    func testCompactionTargetAvailability() {
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertTrue(settings.isCompactionTargetAvailable(.followCurrent))
+
+        // Missing shortcut / online target
+        XCTAssertFalse(settings.isCompactionTargetAvailable(.shortcut(id: "non-existent")))
+        XCTAssertFalse(settings.isCompactionTargetAvailable(.online(serviceID: "non-existent")))
+
+        // Active shortcut target
+        let svc = ShortcutsService(id: "sc-1", name: "Summarizer", shortcutName: "MyShortcut")
+        settings.shortcutsServices = [svc]
+        XCTAssertTrue(settings.isCompactionTargetAvailable(.shortcut(id: "sc-1")))
+        XCTAssertFalse(settings.isCompactionTargetAvailable(.shortcut(id: "sc-other")))
+
+        // Active online target
+        let online = OnlineService(id: "online-1", name: "Custom API", baseURL: "http://127.0.0.1:8000", isEnabled: true, modelID: "local-llama")
+        settings.addOnlineService(online)
+        XCTAssertTrue(settings.isCompactionTargetAvailable(.online(serviceID: "online-1")))
+        XCTAssertFalse(settings.isCompactionTargetAvailable(.online(serviceID: "online-2")))
+    }
 }

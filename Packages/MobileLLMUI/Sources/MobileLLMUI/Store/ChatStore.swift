@@ -1433,6 +1433,7 @@ public final class ChatStore {
     private enum CompactionError: Error {
         case serviceUnavailable
         case noLocalModel
+        case targetUnavailable
     }
 
     /// Negotiated online wire dialect per normalized service base URL — mirrors the app's
@@ -1504,18 +1505,16 @@ public final class ChatStore {
         do {
             switch target {
             case .shortcut(let id):
-                if let svc = settings.shortcutsServices.first(where: { $0.id == id }),
-                   let executor = shortcutExecutor {
-                    raw = try await runShortcutCompaction(plan: plan, service: svc, executor: executor, previousSummary: conversations[ci].compactionSummary)
-                } else {
-                    raw = try await runResidentCompaction(plan: plan, conversationIndex: ci)
+                guard let svc = settings.shortcutsServices.first(where: { $0.id == id }),
+                      let executor = shortcutExecutor else {
+                    throw CompactionError.targetUnavailable
                 }
+                raw = try await runShortcutCompaction(plan: plan, service: svc, executor: executor, previousSummary: conversations[ci].compactionSummary)
             case .online(let serviceID):
-                if let svc = settings.onlineServices.first(where: { $0.id == serviceID }) {
-                    raw = try await runOnlineCompaction(plan: plan, service: svc, previousSummary: conversations[ci].compactionSummary)
-                } else {
-                    raw = try await runResidentCompaction(plan: plan, conversationIndex: ci)
+                guard let svc = settings.onlineServices.first(where: { $0.id == serviceID }) else {
+                    throw CompactionError.targetUnavailable
                 }
+                raw = try await runOnlineCompaction(plan: plan, service: svc, previousSummary: conversations[ci].compactionSummary)
             case .followCurrent:
                 raw = try await runResidentCompaction(plan: plan, conversationIndex: ci)
             }
@@ -1527,15 +1526,17 @@ public final class ChatStore {
                 raw = fallbackRaw
             } else {
                 compactionFailedConversations[conversationID] = target
-                // Surface why compaction will not run: a model-less followCurrent is actionable
-                // (pick an online/shortcut target), everything else is a one-shot failure.
-                let noLocalModel = (error as? CompactionError) == .noLocalModel
-                showToast(Toast(
-                    noLocalModel
-                        ? "No local model loaded to compact — pick an online or shortcut compaction model in Settings."
-                        : "Compaction failed; skipping it for this conversation.",
-                    kind: .error, autoDismiss: 4
-                ))
+                let compactionError = error as? CompactionError
+                let message: String
+                switch compactionError {
+                case .targetUnavailable:
+                    message = "Selected compaction model is no longer available — please reselect in Settings."
+                case .noLocalModel:
+                    message = "No local model loaded to compact — pick an online or shortcut compaction model in Settings."
+                default:
+                    message = "Compaction failed; skipping it for this conversation."
+                }
+                showToast(Toast(message, kind: .error, autoDismiss: 4))
                 return
             }
         }
@@ -1624,8 +1625,7 @@ public final class ChatStore {
         // pipeline, which is overkill for a summarizer call. The negotiated dialect is cached per
         // base URL so a one-dialect gateway is not probed on every near-limit send.
         guard let base = URL(string: service.baseURL ?? OpenAIServiceConfiguration.defaultBaseURL),
-              base.scheme?.lowercased() == "https",
-              !(base.host?.isEmpty ?? true),
+              OpenAIServiceConfiguration.isValidBaseURL(base),
               let model = service.modelID, !model.isEmpty else {
             // Missing/invalid config: never guess a model name — fall back to resident and memoize
             // so we do not retry a broken target on every near-limit send.

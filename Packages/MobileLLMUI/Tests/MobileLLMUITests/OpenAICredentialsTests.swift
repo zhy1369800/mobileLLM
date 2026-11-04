@@ -48,7 +48,7 @@ final class OpenAICredentialsTests: XCTestCase {
                        "an empty env value must not overwrite an existing key")
     }
 
-    func testBaseURLNormalizationAcceptsHTTPSOnly() {
+    func testBaseURLNormalizationAcceptsHTTPSAndLocalHTTP() {
         XCTAssertEqual(
             OpenAIServiceConfiguration.normalizedBaseURL("https://api.openai.com/v1"),
             "https://api.openai.com/v1"
@@ -57,9 +57,32 @@ final class OpenAICredentialsTests: XCTestCase {
             OpenAIServiceConfiguration.normalizedBaseURL("  https://gateway.example.com/custom  "),
             "https://gateway.example.com/custom"
         )
+        // Public HTTP must be rejected
         XCTAssertNil(OpenAIServiceConfiguration.normalizedBaseURL("http://api.openai.com/v1"))
         XCTAssertNil(OpenAIServiceConfiguration.normalizedBaseURL("https://"))
         XCTAssertNil(OpenAIServiceConfiguration.normalizedBaseURL(""))
+
+        // Local and private HTTP must be accepted
+        XCTAssertEqual(
+            OpenAIServiceConfiguration.normalizedBaseURL("http://localhost:11434/v1"),
+            "http://localhost:11434/v1"
+        )
+        XCTAssertEqual(
+            OpenAIServiceConfiguration.normalizedBaseURL("http://127.0.0.1:8000/v1"),
+            "http://127.0.0.1:8000/v1"
+        )
+        XCTAssertEqual(
+            OpenAIServiceConfiguration.normalizedBaseURL("http://192.168.1.100:11434"),
+            "http://192.168.1.100:11434"
+        )
+        XCTAssertEqual(
+            OpenAIServiceConfiguration.normalizedBaseURL("http://10.0.0.5:8080/v1"),
+            "http://10.0.0.5:8080/v1"
+        )
+        XCTAssertEqual(
+            OpenAIServiceConfiguration.normalizedBaseURL("http://my-mac.local:11434"),
+            "http://my-mac.local:11434"
+        )
     }
 
     func testLocalConfigLoadAndEnvironmentOverrides() throws {

@@ -247,7 +247,7 @@ private struct OnlineServiceEditorView: View {
 
     private func save() {
         guard let normalized = OpenAIServiceConfiguration.normalizedBaseURL(baseURL) else {
-            status = "Base URL must be a valid https URL."
+            status = "Base URL must be a valid https URL, or http for local/private network hosts."
             return
         }
         let trimmedModel = modelID.trimmingCharacters(in: .whitespacesAndNewlines)

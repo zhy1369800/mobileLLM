@@ -86,6 +86,23 @@ public final class AppSettings {
     public var autoCompactionEnabled: Bool { didSet { persist() } }
     /// Target model to perform context compaction summaries: follow active, or a specific shortcuts/online model.
     public var compactionModelTarget: CompactionModelTarget { didSet { persist() } }
+
+    /// Checks whether the given compaction target is available (i.e. not pointing to a deleted service).
+    public func isCompactionTargetAvailable(_ target: CompactionModelTarget) -> Bool {
+        switch target {
+        case .followCurrent:
+            return true
+        case .shortcut(let id):
+            return shortcutsServices.contains(where: { $0.id == id })
+        case .online(let serviceID):
+            return onlineServices.contains(where: { $0.id == serviceID })
+        }
+    }
+
+    /// Whether the currently configured compaction target is valid and exists.
+    public var isCompactionTargetAvailable: Bool {
+        isCompactionTargetAvailable(compactionModelTarget)
+    }
     /// Dictation language as a locale identifier (`nil` = follow the system). One recognizer = one
     /// language, so code-switching users pick explicitly via the mic's long-press menu.
     public var dictationLocale: String? { didSet { persist() } }
