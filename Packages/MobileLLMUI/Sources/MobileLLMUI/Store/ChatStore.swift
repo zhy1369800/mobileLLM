@@ -74,6 +74,9 @@ public final class ChatStore {
     /// switched to before saying anything.
     public var activeModel: LoadedModel? {
         didSet {
+            // A (re)loaded local model makes followCurrent compaction viable again; drop only those
+            // failures — a broken online/shortcut target does not heal from a model load.
+            compactionFailedConversations = compactionFailedConversations.filter { $0.value != .followCurrent }
             guard !suppressEmptyConversationReseed else { return }
             guard let m = activeModel, let i = conversations.firstIndex(where: { $0.id == activeID }),
                   conversations[i].messages.isEmpty,
@@ -1417,9 +1420,11 @@ public final class ChatStore {
         }
     }
 
-    /// Conversations whose last compaction attempt failed this session; skipped so a broken summarizer
-    /// does not add a failing model call to every send.
-    private var compactionFailedConversations: Set<UUID> = []
+    /// Conversations whose last compaction attempt failed this session, keyed by the compaction
+    /// target in effect at failure time; skipped (so a broken summarizer does not add a failing model
+    /// call to every send) only while that target is unchanged. Changing the target or (re)loading a
+    /// local model under followCurrent lets the next near-limit send retry.
+    private var compactionFailedConversations: [UUID: CompactionModelTarget] = [:]
 
     /// Compaction failure that is NOT a user cancellation (service error, unusable response, bad
     /// config, or no local model for resident compaction). Distinct from CancellationError so a dead
@@ -1437,8 +1442,12 @@ public final class ChatStore {
         currentText: String
     ) -> ContextCompactor.Plan? {
         guard settings.autoCompactionEnabled,
-              !compactionFailedConversations.contains(conversationID),
               let ci = conversations.firstIndex(where: { $0.id == conversationID }) else { return nil }
+        // Skip only when the SAME target failed before; changing the target makes retry worthwhile.
+        if let failedTarget = compactionFailedConversations[conversationID],
+           failedTarget == settings.compactionModelTarget {
+            return nil
+        }
 
         let cap: Int
         if let model = activeModel?.model {
@@ -1507,7 +1516,7 @@ public final class ChatStore {
             if target != .followCurrent, let fallbackRaw = try? await runResidentCompaction(plan: plan, conversationIndex: ci) {
                 raw = fallbackRaw
             } else {
-                compactionFailedConversations.insert(conversationID)
+                compactionFailedConversations[conversationID] = target
                 // Surface why compaction will not run: a model-less followCurrent is actionable
                 // (pick an online/shortcut target), everything else is a one-shot failure.
                 let noLocalModel = (error as? CompactionError) == .noLocalModel
@@ -1525,12 +1534,14 @@ public final class ChatStore {
               let idx = conversations.firstIndex(where: { $0.id == conversationID }),
               conversations[idx].messages.contains(where: { $0.id == plan.newCutoffID })
         else {
-            compactionFailedConversations.insert(conversationID)
+            compactionFailedConversations[conversationID] = target
             return
         }
         conversations[idx].compactionSummary = summary
         conversations[idx].compactionCutoffMessageID = plan.newCutoffID
         persist(conversations[idx])
+        // A successful run proves the current target works — never let an older failure memo block it.
+        compactionFailedConversations[conversationID] = nil
         showToast(Toast("Compacted earlier messages to keep replies fast", autoDismiss: 3))
     }
 
