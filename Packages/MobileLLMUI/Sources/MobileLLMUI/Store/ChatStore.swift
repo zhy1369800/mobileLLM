@@ -1422,10 +1422,12 @@ public final class ChatStore {
     private var compactionFailedConversations: Set<UUID> = []
 
     /// Compaction failure that is NOT a user cancellation (service error, unusable response, bad
-    /// config). Distinct from CancellationError so a dead online/shortcut target drives the resident
-    /// fallback and one-shot failure memoization instead of being silently swallowed as "cancelled".
+    /// config, or no local model for resident compaction). Distinct from CancellationError so a dead
+    /// online/shortcut target or a model-less resident run drives the resident fallback and one-shot
+    /// failure memoization instead of being silently swallowed as "cancelled".
     private enum CompactionError: Error {
         case serviceUnavailable
+        case noLocalModel
     }
 
     /// The compaction this send needs, if any: feature on, prompt past the trigger.
@@ -1506,6 +1508,15 @@ public final class ChatStore {
                 raw = fallbackRaw
             } else {
                 compactionFailedConversations.insert(conversationID)
+                // Surface why compaction will not run: a model-less followCurrent is actionable
+                // (pick an online/shortcut target), everything else is a one-shot failure.
+                let noLocalModel = (error as? CompactionError) == .noLocalModel
+                showToast(Toast(
+                    noLocalModel
+                        ? "No local model loaded to compact — pick an online or shortcut compaction model in Settings."
+                        : "Compaction failed; skipping it for this conversation.",
+                    kind: .error, autoDismiss: 4
+                ))
                 return
             }
         }
@@ -1524,7 +1535,11 @@ public final class ChatStore {
     }
 
     private func runResidentCompaction(plan: ContextCompactor.Plan, conversationIndex ci: Int) async throws -> String {
-        guard let model = activeModel?.model else { throw CancellationError() }
+        guard let model = activeModel?.model else {
+            // No resident model to run the summarizer: a real failure (not a cancellation) so
+            // runCompaction memoizes it and surfaces a toast instead of silently skipping.
+            throw CompactionError.noLocalModel
+        }
         var params = effectiveSampling(for: model)
         // Internal summarizer pass: the turns are synthetic summary prompts, not user conversation
         // turns, so their turnCount would collide with (and clobber) real per-turn KV checkpoints on
