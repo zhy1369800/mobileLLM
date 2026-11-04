@@ -96,9 +96,11 @@ public actor LlamaEngine: LLMEngine {
     private static let checkpointMaxSlots = 2
     /// Recurrent-state rollback snapshots (`n_rs_seq`) for hybrid architectures (Qwen 3.5 Gated
     /// DeltaNet). Lets `llama_memory_seq_rm` rewind up to this many tokens without recompute — covers
-    /// Regenerate (1-token refresh) and near-edit resends on the fast path; deeper edits still fall
-    /// back to the file checkpoint. Cost: recurrent S memory ×(1+n_rs_seq) — Qwen3.5-4B adds ~24 MiB
-    /// per slot, so 2 slots = ~48 MiB (acceptable); larger models (7B+) scale proportionally.
+    /// single-token regenerates, but a message edit cuts hundreds+ tokens deep, which always exceeds
+    /// the depth budget, so edit-resend reuse is served by the file checkpoint instead of these slots.
+    /// Allocated only while speculative decoding is active (short draft-verification rollbacks); 0
+    /// during standard generation saves recurrent S memory ×(1+n_rs_seq) — Qwen3.5-4B adds ~24 MiB
+    /// per slot, so 2 slots = ~48 MiB; larger models (7B+) scale proportionally.
     /// Attention-only architectures are clamped to 0 inside llama.cpp, so this is safe for every model.
     private static let rsRollbackSlots: UInt32 = 2
     private var checkpointDirectory: URL? = nil
@@ -540,8 +542,11 @@ public actor LlamaEngine: LLMEngine {
         cp.n_threads = nThreads
         cp.n_threads_batch = nThreads
         // Recurrent-state rollback snapshots for hybrid architectures (Qwen 3.5).
-        // Only enabled when speculative decoding is active to support draft verification rollbacks;
-        // disabled (0) during standard generation to save significant recurrent state memory (~48–96+ MiB).
+        // NOTE: edit-resend rollback via llama_memory_seq_rm is depth-limited to n_rs_seq — a single
+        // reply is hundreds+ tokens deep, so message edits always exceed it and reuse falls through
+        // to the KV checkpoints (saveCheckpoint) instead. Slots are kept only while speculative
+        // decoding is active (short draft-verification rollbacks); 0 during standard generation
+        // saves ~48–96+ MiB of recurrent state memory.
         let rsSlots: UInt32 = isSpeculative ? Self.rsRollbackSlots : 0
         cp.n_rs_seq = rsSlots
         // KV-cache quantization and Flash Attention.

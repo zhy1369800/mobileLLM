@@ -1421,6 +1421,13 @@ public final class ChatStore {
     /// does not add a failing model call to every send.
     private var compactionFailedConversations: Set<UUID> = []
 
+    /// Compaction failure that is NOT a user cancellation (service error, unusable response, bad
+    /// config). Distinct from CancellationError so a dead online/shortcut target drives the resident
+    /// fallback and one-shot failure memoization instead of being silently swallowed as "cancelled".
+    private enum CompactionError: Error {
+        case serviceUnavailable
+    }
+
     /// The compaction this send needs, if any: feature on, prompt past the trigger.
     private func compactionPlanIfNeeded(
         conversationID: UUID,
@@ -1519,6 +1526,10 @@ public final class ChatStore {
     private func runResidentCompaction(plan: ContextCompactor.Plan, conversationIndex ci: Int) async throws -> String {
         guard let model = activeModel?.model else { throw CancellationError() }
         var params = effectiveSampling(for: model)
+        // Internal summarizer pass: the turns are synthetic summary prompts, not user conversation
+        // turns, so their turnCount would collide with (and clobber) real per-turn KV checkpoints on
+        // edit-resend. Skip checkpointing entirely for compaction.
+        params.kvCheckpointsEnabled = false
         let contextLength = params.contextTokenCap
         params.thinking = false
         params.temperature = 0.2
@@ -1572,7 +1583,9 @@ public final class ChatStore {
     ) async throws -> String {
         let baseURL = service.baseURL ?? OpenAIServiceConfiguration.defaultBaseURL
         guard let url = URL(string: "\(baseURL)/chat/completions") else {
-            throw CancellationError()
+            // Bad service config is a failure, not a user cancellation: fall back to resident and
+            // memoize so we do not retry a broken target on every near-limit send.
+            throw CompactionError.serviceUnavailable
         }
         let apiKey = (try? openAICredentials?.loadAPIKey(serviceID: service.id)) ?? ""
         var request = URLRequest(url: url)
@@ -1608,7 +1621,9 @@ public final class ChatStore {
               let message = firstChoice["message"] as? [String: Any],
               let content = message["content"] as? String
         else {
-            throw CancellationError()
+            // Non-2xx or unusable response from the online service: treat as a service failure (not
+            // cancellation) so runCompaction can fall back to resident and memoize the failure.
+            throw CompactionError.serviceUnavailable
         }
         return content
     }
