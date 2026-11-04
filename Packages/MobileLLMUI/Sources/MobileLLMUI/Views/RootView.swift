@@ -59,6 +59,13 @@ public struct RootView: View {
             // Keep the macOS 14 deployment target; the renamed visibility spelling starts in macOS 15.
             .toolbarBackground(.visible, for: .windowToolbar)
             #endif
+            #if os(iOS)
+            .background {
+                PiPAnchorView()
+                    .frame(width: 1, height: 1)
+                    .allowsHitTesting(false)
+            }
+            #endif
             .preferredColorScheme(container.settings.appearance.colorScheme)
             .bannerHost(container.chat)
             .task { await container.bootstrap() }
@@ -287,5 +294,19 @@ public struct RootView: View {
 #if DEBUG
 #Preview("Root") {
     RootView(container: AppContainer.preview())
+}
+#endif
+
+#if os(iOS)
+private struct PiPAnchorView: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        PiPCoordinator.shared.setup(with: view)
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {}
 }
 #endif

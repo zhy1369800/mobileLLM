@@ -315,6 +315,9 @@ final class AppNotificationDelegate: NSObject, UNUserNotificationCenterDelegate,
                     promptToSend = "请简要解析并总结以下内容：\n\n\(clip)"
                 } else {
                     QuickNotificationCoordinator.postEmptyClipboardNotification()
+                    if container.settings.pipWindowEnabled {
+                        PiPCoordinator.shared.update(status: .idle, text: "剪贴板未检测到文本内容，请先复制后再试。")
+                    }
                     completionHandler()
                     return
                 }
@@ -339,7 +342,12 @@ final class AppNotificationDelegate: NSObject, UNUserNotificationCenterDelegate,
                 completionHandler()
             }
 
-            QuickNotificationCoordinator.postThinkingNotification()
+            if container.settings.quickNotificationEnabled {
+                QuickNotificationCoordinator.postThinkingNotification()
+            }
+            if container.settings.pipWindowEnabled {
+                PiPCoordinator.shared.update(status: .thinking, text: "正在思考生成中，请稍候...")
+            }
 
             let previousHandler = container.chat.onGenerationFinished
             container.chat.onGenerationFinished = { [weak container] text in
@@ -698,9 +706,21 @@ struct MobileLLMApp: App {
         QuickNotificationCoordinator.registerCategory()
         _notificationDelegate = State(initialValue: notifDelegate)
 
+        container.chat.onGenerationStarted = { [weak container] in
+            guard let container else { return }
+            if container.settings.pipWindowEnabled {
+                PiPCoordinator.shared.update(status: .thinking, text: "正在思考生成中，请稍候...")
+            }
+        }
+
         container.chat.onGenerationFinished = { [weak container] fullText in
-            guard let container, container.settings.quickNotificationEnabled else { return }
-            QuickNotificationCoordinator.postResponseNotification(text: fullText)
+            guard let container else { return }
+            if container.settings.quickNotificationEnabled {
+                QuickNotificationCoordinator.postResponseNotification(text: fullText)
+            }
+            if container.settings.pipWindowEnabled {
+                PiPCoordinator.shared.update(status: .responding, text: fullText)
+            }
         }
         #endif
         #if DEBUG && os(macOS)
@@ -782,6 +802,12 @@ struct MobileLLMApp: App {
                         if container.settings.quickNotificationEnabled {
                             QuickNotificationCoordinator.postStandbyNotification()
                         }
+                        if container.settings.pipWindowEnabled {
+                            PiPCoordinator.shared.setEnabled(true)
+                            PiPCoordinator.shared.startPiP()
+                        } else {
+                            PiPCoordinator.shared.setEnabled(false)
+                        }
                     } else if phase == .active || phase == .inactive {
                         container.lifecycle.enterForeground()
                     }
@@ -791,6 +817,10 @@ struct MobileLLMApp: App {
                         container.settings.applyIdleTimer()
                         if container.settings.quickNotificationEnabled {
                             QuickNotificationCoordinator.dismissNotification()
+                        }
+                        if !container.settings.pipWindowEnabled {
+                            PiPCoordinator.shared.stopPiP()
+                            PiPCoordinator.shared.setEnabled(false)
                         }
                     }
                     #else

@@ -336,12 +336,14 @@ public final class AppSettings {
         didSet {
             persist()
             if quickNotificationEnabled {
-                Task { _ = await QuickNotificationCoordinator.shared.requestAuthorization() }
+                Task { _ = await QuickNotificationCoordinator.requestAuthorization() }
             } else {
-                QuickNotificationCoordinator.shared.dismissBanner()
+                QuickNotificationCoordinator.dismissNotification()
             }
         }
     }
+    /// Whether picture-in-picture floating window is enabled (iOS only).
+    public var pipWindowEnabled: Bool { didSet { persist() } }
     /// Whether KV snapshot checkpoints on disk are enabled for edit-resend caching.
     public var kvCheckpointsEnabled: Bool { didSet { persist() } }
 
@@ -482,6 +484,7 @@ public final class AppSettings {
         appearance = snap?.appearance ?? .system
         keepScreenAwake = snap?.keepScreenAwake ?? false
         quickNotificationEnabled = snap?.quickNotificationEnabled ?? false
+        pipWindowEnabled = snap?.pipWindowEnabled ?? false
         kvCheckpointsEnabled = snap?.kvCheckpointsEnabled ?? false
         let initialMirror = snap?.useHuggingFaceMirror ?? (UserDefaults.standard.object(forKey: HuggingFaceEndpoint.userDefaultsKey) as? Bool ?? true)
         useHuggingFaceMirror = initialMirror
@@ -649,6 +652,7 @@ public final class AppSettings {
         var appearance: AppearanceMode
         var keepScreenAwake: Bool? = false
         var quickNotificationEnabled: Bool? = false
+        var pipWindowEnabled: Bool? = false
         var useHuggingFaceMirror: Bool? = nil
         var kvCheckpointsEnabled: Bool? = false
     }
@@ -693,6 +697,7 @@ public final class AppSettings {
                             appearance: appearance,
                             keepScreenAwake: keepScreenAwake,
                             quickNotificationEnabled: quickNotificationEnabled,
+                            pipWindowEnabled: pipWindowEnabled,
                             useHuggingFaceMirror: useHuggingFaceMirror,
                             kvCheckpointsEnabled: kvCheckpointsEnabled)
         if let data = try? JSONEncoder().encode(snap) { defaults.set(data, forKey: key) }
@@ -747,6 +752,7 @@ public final class AppSettings {
         appearance = .system
         keepScreenAwake = false
         quickNotificationEnabled = false
+        pipWindowEnabled = false
         kvCheckpointsEnabled = false
         useHuggingFaceMirror = true
         UserDefaults.standard.set(true, forKey: HuggingFaceEndpoint.userDefaultsKey)

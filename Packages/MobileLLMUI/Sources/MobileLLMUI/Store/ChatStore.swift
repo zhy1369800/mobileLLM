@@ -163,6 +163,8 @@ public final class ChatStore {
     public let skillStore: SkillStore?
     /// Observer notified when generation completes with final response text.
     public var onGenerationFinished: (@MainActor (String) -> Void)?
+    /// Observer notified when generation starts.
+    public var onGenerationStarted: (@MainActor () -> Void)?
     private var genTask: Task<Void, Never>?
     @ObservationIgnored private var pendingStreamReasoning: String = ""
     @ObservationIgnored private var pendingStreamAnswer: String = ""
@@ -1165,6 +1167,12 @@ public final class ChatStore {
 
     // MARK: - Sending
 
+    /// Sends a prompt directly without manually updating the composer draft.
+    public func send(_ text: String) {
+        draft = text
+        send()
+    }
+
     /// Send the composer draft (text and/or staged images): append the user turn + an empty assistant
     /// turn, then stream a reply. An image-only turn (no text) is allowed for vision models.
     public func send() {
@@ -1209,6 +1217,7 @@ public final class ChatStore {
 
         draft = ""
         clearPendingImages()
+        onGenerationStarted?()
         guard let convo = activeConversation ?? newConversation(),
               let idx = conversations.firstIndex(where: { $0.id == convo.id }) else { return }
 

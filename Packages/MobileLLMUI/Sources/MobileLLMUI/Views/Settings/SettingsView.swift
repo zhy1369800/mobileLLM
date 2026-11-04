@@ -260,6 +260,16 @@ struct SettingsView: View {
                 }
             }
             .tint(Theme.accent)
+            Divider().background(Theme.hairline)
+            Toggle(isOn: $settings.pipWindowEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Picture-in-Picture floating window")
+                        .font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    Text("Presents a floating window on the home screen when backgrounded, showing live thinking states and model responses.")
+                        .font(.caption).foregroundStyle(Theme.textTertiary)
+                }
+            }
+            .tint(Theme.accent)
             #endif
             Divider().background(Theme.hairline)
             Toggle(isOn: $settings.useHuggingFaceMirror) {
