@@ -331,6 +331,17 @@ public final class AppSettings {
     public var appearance: AppearanceMode { didSet { persist() } }
 
     /// Keep the screen awake while the app is in the foreground (iOS only).
+    /// Whether quick notification assistant with text input is enabled.
+    public var quickNotificationEnabled: Bool {
+        didSet {
+            persist()
+            if quickNotificationEnabled {
+                Task { _ = await QuickNotificationCoordinator.shared.requestAuthorization() }
+            } else {
+                QuickNotificationCoordinator.shared.dismissBanner()
+            }
+        }
+    }
     /// Whether KV snapshot checkpoints on disk are enabled for edit-resend caching.
     public var kvCheckpointsEnabled: Bool { didSet { persist() } }
 
@@ -470,6 +481,7 @@ public final class AppSettings {
         localModelLoggingEnabled = snap?.localModelLoggingEnabled ?? false
         appearance = snap?.appearance ?? .system
         keepScreenAwake = snap?.keepScreenAwake ?? false
+        quickNotificationEnabled = snap?.quickNotificationEnabled ?? false
         kvCheckpointsEnabled = snap?.kvCheckpointsEnabled ?? false
         let initialMirror = snap?.useHuggingFaceMirror ?? (UserDefaults.standard.object(forKey: HuggingFaceEndpoint.userDefaultsKey) as? Bool ?? true)
         useHuggingFaceMirror = initialMirror
@@ -636,6 +648,7 @@ public final class AppSettings {
         var localModelLoggingEnabled: Bool? = nil
         var appearance: AppearanceMode
         var keepScreenAwake: Bool? = false
+        var quickNotificationEnabled: Bool? = false
         var useHuggingFaceMirror: Bool? = nil
         var kvCheckpointsEnabled: Bool? = false
     }
@@ -679,6 +692,7 @@ public final class AppSettings {
                             localModelLoggingEnabled: localModelLoggingEnabled,
                             appearance: appearance,
                             keepScreenAwake: keepScreenAwake,
+                            quickNotificationEnabled: quickNotificationEnabled,
                             useHuggingFaceMirror: useHuggingFaceMirror,
                             kvCheckpointsEnabled: kvCheckpointsEnabled)
         if let data = try? JSONEncoder().encode(snap) { defaults.set(data, forKey: key) }
@@ -732,6 +746,7 @@ public final class AppSettings {
         localModelLoggingEnabled = false
         appearance = .system
         keepScreenAwake = false
+        quickNotificationEnabled = false
         kvCheckpointsEnabled = false
         useHuggingFaceMirror = true
         UserDefaults.standard.set(true, forKey: HuggingFaceEndpoint.userDefaultsKey)

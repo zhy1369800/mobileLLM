@@ -161,6 +161,8 @@ public final class ChatStore {
     /// construct a `ChatStore` without one; then `activeSkill` is always nil and composition falls back to
     /// the base system prompt. Public so the composer's Skill menu + management sheet reach the same store.
     public let skillStore: SkillStore?
+    /// Observer notified when generation completes with final response text.
+    public var onGenerationFinished: (@MainActor (String) -> Void)?
     private var genTask: Task<Void, Never>?
     @ObservationIgnored private var pendingStreamReasoning: String = ""
     @ObservationIgnored private var pendingStreamAnswer: String = ""
@@ -1087,6 +1089,9 @@ public final class ChatStore {
         let convo = conversations[i]
         conversations.sort(by: Self.recency)
         persist(convo)
+        if !visibleAnswer.isEmpty && !failed && stopReason != .cancelled {
+            onGenerationFinished?(visibleAnswer)
+        }
     }
 
     /// Soft-delete with an Undo affordance (DESIGN §4 — irreversible loss gets undo, not just confirm).
@@ -1869,6 +1874,7 @@ public final class ChatStore {
         conversations[ci].messages[mi] = message
         conversations[ci].updatedAt = Date()
         persist(conversations[ci])
+        onGenerationFinished?(text)
         if streamingMessageID == assistantMessageID {
             resetStreamingBuffer()
             streaming = nil
@@ -2502,6 +2508,9 @@ public final class ChatStore {
         genTask = nil
         conversations.sort(by: Self.recency)
         persist(convo)
+        if !visibleAnswer.isEmpty && !failed && stopReason != .cancelled {
+            onGenerationFinished?(visibleAnswer)
+        }
     }
 
     /// Cooperative boundary-stop (DESIGN §2.3 critique D1): not instant — lands at the next token
@@ -2965,6 +2974,7 @@ public final class ChatStore {
         conversations[ci].messages[mi] = message
         conversations[ci].updatedAt = Date()
         persist(conversations[ci])
+        onGenerationFinished?(text)
         if streamingMessageID == assistantMessageID {
             resetStreamingBuffer()
             streaming = nil

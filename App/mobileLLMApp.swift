@@ -8,6 +8,10 @@ import LLMEngineMLX
 import LLMEngineLlama
 import LLMEngineApple
 import AgentRuntime
+#if os(iOS)
+import UserNotifications
+import UIKit
+#endif
 
 #if DEBUG
 /// Deterministic Responses API transport used only by the opt-in simulator UI test. It exercises
@@ -273,6 +277,75 @@ private enum MacScreenshotError: LocalizedError {
 }
 #endif
 
+#if os(iOS)
+final class AppNotificationDelegate: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
+    private weak var container: AppContainer?
+
+    init(container: AppContainer) {
+        self.container = container
+        super.init()
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        guard let textResponse = response as? UNTextInputNotificationResponse else {
+            completionHandler()
+            return
+        }
+
+        let userText = textResponse.userText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !userText.isEmpty else {
+            completionHandler()
+            return
+        }
+
+        var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "mobileLLM.quickReply") {
+            if backgroundTaskID != .invalid {
+                UIApplication.shared.endBackgroundTask(backgroundTaskID)
+                backgroundTaskID = .invalid
+            }
+            completionHandler()
+        }
+
+        Task { @MainActor [weak container] in
+            guard let container else {
+                if backgroundTaskID != .invalid {
+                    UIApplication.shared.endBackgroundTask(backgroundTaskID)
+                }
+                completionHandler()
+                return
+            }
+
+            QuickNotificationCoordinator.postThinkingNotification()
+
+            let previousHandler = container.chat.onGenerationFinished
+            container.chat.onGenerationFinished = { [weak container] text in
+                previousHandler?(text)
+                if backgroundTaskID != .invalid {
+                    UIApplication.shared.endBackgroundTask(backgroundTaskID)
+                    backgroundTaskID = .invalid
+                }
+                completionHandler()
+            }
+
+            container.chat.send(userText)
+        }
+    }
+}
+#endif
+
 /// App assembly: a `RoutingEngine` fronting the three concrete engines (MLX-fork, llama.cpp, and Apple's
 /// system model) and the resumable `ModelDownloader` are injected into the `AppContainer` composition root
 /// here; everywhere else runs against the `LLMEngine` protocol. The router loads each variant on the engine
@@ -283,6 +356,7 @@ struct MobileLLMApp: App {
     @Environment(\.scenePhase) private var scenePhase
     #if os(iOS)
     @State private var lifecycleMonitor: iOSSceneLifecycleMonitor?
+    @State private var notificationDelegate: AppNotificationDelegate?
     #endif
     #if DEBUG && os(macOS)
     private let macScreenshotRequest = MacScreenshotRequest.current()
@@ -608,6 +682,15 @@ struct MobileLLMApp: App {
         _container = State(initialValue: container)
         #if os(iOS)
         _lifecycleMonitor = State(initialValue: iOSSceneLifecycleMonitor(coordinator: container.lifecycle))
+        let notifDelegate = AppNotificationDelegate(container: container)
+        UNUserNotificationCenter.current().delegate = notifDelegate
+        QuickNotificationCoordinator.registerCategory()
+        _notificationDelegate = State(initialValue: notifDelegate)
+
+        container.chat.onGenerationFinished = { [weak container] fullText in
+            guard let container, container.settings.quickNotificationEnabled else { return }
+            QuickNotificationCoordinator.postResponseNotification(text: fullText)
+        }
         #endif
         #if DEBUG && os(macOS)
         // Keep screenshot automation independent of SwiftUI view identity. A view-scoped `.task` can be
@@ -685,6 +768,9 @@ struct MobileLLMApp: App {
                     // double call harmless.
                     if phase == .background {
                         container.lifecycle.enterBackground()
+                        if container.settings.quickNotificationEnabled {
+                            QuickNotificationCoordinator.postStandbyNotification()
+                        }
                     } else if phase == .active || phase == .inactive {
                         container.lifecycle.enterForeground()
                     }
@@ -692,6 +778,9 @@ struct MobileLLMApp: App {
                     // banner, lock screen) may have reset it — keeps "Keep screen awake" reliable.
                     if phase == .active {
                         container.settings.applyIdleTimer()
+                        if container.settings.quickNotificationEnabled {
+                            QuickNotificationCoordinator.dismissNotification()
+                        }
                     }
                     #else
                     // Free the resident model when the app leaves the foreground: it stops a 5 GB model

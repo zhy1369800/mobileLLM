@@ -239,6 +239,28 @@ struct SettingsView: View {
                     .foregroundStyle(continuedProcessingHasError ? Theme.danger : Theme.textTertiary)
             }
             #endif
+            #if os(iOS)
+            Divider().background(Theme.hairline)
+            Toggle(isOn: Binding(
+                get: { settings.quickNotificationEnabled },
+                set: { newValue in
+                    settings.quickNotificationEnabled = newValue
+                    if newValue {
+                        Task { await QuickNotificationCoordinator.requestAuthorization() }
+                    } else {
+                        QuickNotificationCoordinator.dismissNotification()
+                    }
+                }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Quick notification assistant")
+                        .font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    Text("Presents an actionable notification when backgrounded. Pull down to ask questions via keyboard and receive in-place multi-turn replies.")
+                        .font(.caption).foregroundStyle(Theme.textTertiary)
+                }
+            }
+            .tint(Theme.accent)
+            #endif
             Divider().background(Theme.hairline)
             Toggle(isOn: $settings.useHuggingFaceMirror) {
                 VStack(alignment: .leading, spacing: 2) {
