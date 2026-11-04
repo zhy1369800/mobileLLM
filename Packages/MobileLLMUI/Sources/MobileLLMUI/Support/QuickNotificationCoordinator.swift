@@ -11,6 +11,7 @@ import UserNotifications
 public enum QuickNotificationCoordinator {
     public static let categoryIdentifier = "mobilellm.quick_chat.category"
     public static let actionIdentifier = "mobilellm.quick_chat.reply"
+    public static let explainClipboardActionIdentifier = "mobilellm.quick_chat.explain_clipboard"
     public static let notificationIdentifier = "mobilellm.quick_chat.banner"
 
     /// Sets up notification action category with text input and registers with the system.
@@ -23,9 +24,14 @@ public enum QuickNotificationCoordinator {
             textInputButtonTitle: "发送",
             textInputPlaceholder: "问点什么..."
         )
+        let clipboardAction = UNNotificationAction(
+            identifier: explainClipboardActionIdentifier,
+            title: "📋 解释剪贴板",
+            options: []
+        )
         let category = UNNotificationCategory(
             identifier: categoryIdentifier,
-            actions: [replyAction],
+            actions: [replyAction, clipboardAction],
             intentIdentifiers: [],
             options: []
         )
@@ -64,6 +70,14 @@ public enum QuickNotificationCoordinator {
         postNotification(
             title: "mobileLLM 快捷助手",
             body: "正在思考中，请稍候..."
+        )
+    }
+
+    /// Updates the notification when clipboard is empty.
+    public static func postEmptyClipboardNotification() {
+        postNotification(
+            title: "mobileLLM 快捷助手",
+            body: "剪贴板未检测到文本内容，请先复制后再试。"
         )
     }
 

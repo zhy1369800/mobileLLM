@@ -299,33 +299,44 @@ final class AppNotificationDelegate: NSObject, UNUserNotificationCenterDelegate,
         didReceive response: UNNotificationResponse,
         withCompletionHandler completionHandler: @escaping () -> Void
     ) {
-        guard let textResponse = response as? UNTextInputNotificationResponse else {
-            completionHandler()
-            return
-        }
-
-        let userText = textResponse.userText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !userText.isEmpty else {
-            completionHandler()
-            return
-        }
-
-        var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
-        backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "mobileLLM.quickReply") {
-            if backgroundTaskID != .invalid {
-                UIApplication.shared.endBackgroundTask(backgroundTaskID)
-                backgroundTaskID = .invalid
-            }
-            completionHandler()
-        }
+        let actionID = response.actionIdentifier
+        let isClipboardAction = (actionID == QuickNotificationCoordinator.explainClipboardActionIdentifier)
+        let textInput = (response as? UNTextInputNotificationResponse)?.userText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         Task { @MainActor [weak container] in
             guard let container else {
-                if backgroundTaskID != .invalid {
-                    UIApplication.shared.endBackgroundTask(backgroundTaskID)
-                }
                 completionHandler()
                 return
+            }
+
+            let promptToSend: String?
+            if isClipboardAction {
+                if let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines), !clip.isEmpty {
+                    promptToSend = "请简要解析并总结以下内容：\n\n\(clip)"
+                } else {
+                    QuickNotificationCoordinator.postEmptyClipboardNotification()
+                    completionHandler()
+                    return
+                }
+            } else if let textInput, !textInput.isEmpty {
+                promptToSend = textInput
+            } else {
+                completionHandler()
+                return
+            }
+
+            guard let prompt = promptToSend else {
+                completionHandler()
+                return
+            }
+
+            var backgroundTaskID: UIBackgroundTaskIdentifier = .invalid
+            backgroundTaskID = UIApplication.shared.beginBackgroundTask(withName: "mobileLLM.quickReply") {
+                if backgroundTaskID != .invalid {
+                    UIApplication.shared.endBackgroundTask(backgroundTaskID)
+                    backgroundTaskID = .invalid
+                }
+                completionHandler()
             }
 
             QuickNotificationCoordinator.postThinkingNotification()
@@ -340,7 +351,7 @@ final class AppNotificationDelegate: NSObject, UNUserNotificationCenterDelegate,
                 completionHandler()
             }
 
-            container.chat.send(userText)
+            container.chat.send(prompt)
         }
     }
 }
