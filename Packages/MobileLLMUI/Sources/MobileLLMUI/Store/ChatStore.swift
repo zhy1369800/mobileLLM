@@ -1435,6 +1435,16 @@ public final class ChatStore {
         case noLocalModel
     }
 
+    /// Negotiated online wire dialect per normalized service base URL — mirrors the app's
+    /// ResponsesAPIModelProvider DialectCache so a gateway that only implements /chat/completions
+    /// is not probed on every near-limit send. Compaction runs serially on the main actor, so a
+    /// plain dictionary is safe.
+    private enum OnlineWireDialect: Equatable {
+        case responses
+        case chatCompletions
+    }
+    private var compactionWireDialects: [String: OnlineWireDialect] = [:]
+
     /// The compaction this send needs, if any: feature on, prompt past the trigger.
     private func compactionPlanIfNeeded(
         conversationID: UUID,
@@ -1607,51 +1617,88 @@ public final class ChatStore {
         service: OnlineService,
         previousSummary: String?
     ) async throws -> String {
-        let baseURL = service.baseURL ?? OpenAIServiceConfiguration.defaultBaseURL
-        guard let url = URL(string: "\(baseURL)/chat/completions") else {
-            // Bad service config is a failure, not a user cancellation: fall back to resident and
-            // memoize so we do not retry a broken target on every near-limit send.
+        // Reuse the app's online-path compatibility (ResponsesAPIModelProvider): /responses first,
+        // falling back to /chat/completions on 404/405 for gateways that only implement the legacy
+        // endpoint. Kept as a light local copy — the provider's negotiation is internal to the
+        // AgentRuntime package and its generate() runs the full agent authorization/accounting
+        // pipeline, which is overkill for a summarizer call. The negotiated dialect is cached per
+        // base URL so a one-dialect gateway is not probed on every near-limit send.
+        guard let base = URL(string: service.baseURL ?? OpenAIServiceConfiguration.defaultBaseURL),
+              base.scheme?.lowercased() == "https",
+              !(base.host?.isEmpty ?? true),
+              let model = service.modelID, !model.isEmpty else {
+            // Missing/invalid config: never guess a model name — fall back to resident and memoize
+            // so we do not retry a broken target on every near-limit send.
             throw CompactionError.serviceUnavailable
         }
         let apiKey = (try? openAICredentials?.loadAPIKey(serviceID: service.id)) ?? ""
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if !apiKey.isEmpty {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        }
-
         let turns = ContextCompactor.summarizerTurns(
             previousSummary: previousSummary,
             messages: plan.toSummarize,
             inputTokenBudget: 8192
         )
-        let messagesPayload = turns.map { turn in
-            ["role": turn.role.rawValue, "content": turn.content]
+        let messagesPayload = turns.map { ["role": $0.role.rawValue, "content": $0.content] }
+
+        // The request keeps the user's original base URL casing (paths may be case-sensitive);
+        // only the cache key is normalized.
+        let rawBase = base.absoluteString.hasSuffix("/") ? String(base.absoluteString.dropLast()) : base.absoluteString
+        let normalized = rawBase.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let startDialect = compactionWireDialects[normalized] ?? .responses
+
+        func makeRequest(_ dialect: OnlineWireDialect) throws -> URLRequest {
+            let suffix = dialect == .chatCompletions ? "/chat/completions" : "/responses"
+            guard let url = URL(string: rawBase + suffix) else { throw CompactionError.serviceUnavailable }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            if !apiKey.isEmpty {
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
+            request.timeoutInterval = 30
+            let body: [String: Any] = dialect == .responses
+                ? ["model": model, "input": messagesPayload, "temperature": 0.2, "max_output_tokens": 512]
+                : ["model": model, "messages": messagesPayload, "temperature": 0.2, "max_tokens": 512]
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+            return request
+        }
+        func extractText(_ data: Data, _ dialect: OnlineWireDialect) -> String? {
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+            if dialect == .responses {
+                // Responses API: simplified top-level "output_text", or structured output[].content[].text.
+                if let text = json["output_text"] as? String { return text }
+                guard let output = json["output"] as? [[String: Any]],
+                      let message = output.first(where: { ($0["type"] as? String) == "message" }),
+                      let content = message["content"] as? [[String: Any]] else { return nil }
+                return content.compactMap { $0["text"] as? String }.joined()
+            }
+            guard let choices = json["choices"] as? [[String: Any]],
+                  let first = choices.first,
+                  let message = first["message"] as? [String: Any],
+                  let content = message["content"] as? String else { return nil }
+            return content
         }
 
-        let body: [String: Any] = [
-            "model": service.modelID ?? "gpt-4o-mini",
-            "messages": messagesPayload,
-            "temperature": 0.2,
-            "max_tokens": 512
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        request.timeoutInterval = 30
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = json["choices"] as? [[String: Any]],
-              let firstChoice = choices.first,
-              let message = firstChoice["message"] as? [String: Any],
-              let content = message["content"] as? String
-        else {
-            // Non-2xx or unusable response from the online service: treat as a service failure (not
-            // cancellation) so runCompaction can fall back to resident and memoize the failure.
-            throw CompactionError.serviceUnavailable
+        var current = startDialect
+        for attempt in 0..<2 {
+            let (data, response) = try await URLSession.shared.data(for: try makeRequest(current))
+            if let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+               let content = extractText(data, current) {
+                compactionWireDialects[normalized] = current
+                return content
+            }
+            if let http = response as? HTTPURLResponse,
+               (http.statusCode == 404 || http.statusCode == 405),
+               current == .responses, attempt == 0 {
+                // One-dialect gateway: remember and retry once via the legacy endpoint.
+                compactionWireDialects[normalized] = .chatCompletions
+                current = .chatCompletions
+                continue
+            }
+            break
         }
-        return content
+        // Non-2xx or unusable response from the online service: treat as a service failure (not
+        // cancellation) so runCompaction can fall back to resident and memoize the failure.
+        throw CompactionError.serviceUnavailable
     }
 
     /// Starts a message-anchored workflow. The app-assembled launcher creates the reserved parent
