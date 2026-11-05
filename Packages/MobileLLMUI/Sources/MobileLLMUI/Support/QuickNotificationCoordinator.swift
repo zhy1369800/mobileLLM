@@ -19,14 +19,14 @@ public enum QuickNotificationCoordinator {
         #if canImport(UserNotifications)
         let replyAction = UNTextInputNotificationAction(
             identifier: actionIdentifier,
-            title: "快捷回复",
+            title: "快捷提问",
             options: [],
             textInputButtonTitle: "发送",
             textInputPlaceholder: "问点什么..."
         )
         let clipboardAction = UNNotificationAction(
             identifier: explainClipboardActionIdentifier,
-            title: "📋 解释剪贴板",
+            title: "解释粘贴",
             options: []
         )
         let category = UNNotificationCategory(
