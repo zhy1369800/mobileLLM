@@ -81,7 +81,7 @@ public struct PiPFloatingCardView: View {
 /// When enabled, iOS presents a floating window on the home screen displaying live AI thoughts and replies.
 /// When disabled, this coordinator is completely dormant with zero side-effects.
 @MainActor
-public final class PiPCoordinator: NSObject, AVPictureInPictureControllerDelegate {
+public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureControllerDelegate {
     public static let shared = PiPCoordinator()
 
     public private(set) var isSupported: Bool = false
@@ -178,16 +178,22 @@ public final class PiPCoordinator: NSObject, AVPictureInPictureControllerDelegat
 
     // MARK: - AVPictureInPictureControllerDelegate
 
-    public func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        isPiPActive = true
+    public nonisolated func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        Task { @MainActor in
+            PiPCoordinator.shared.isPiPActive = true
+        }
     }
 
-    public func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        isPiPActive = false
+    public nonisolated func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        Task { @MainActor in
+            PiPCoordinator.shared.isPiPActive = false
+        }
     }
 
-    public func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
-        isPiPActive = false
+    public nonisolated func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
+        Task { @MainActor in
+            PiPCoordinator.shared.isPiPActive = false
+        }
     }
 }
 #else

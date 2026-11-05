@@ -1091,9 +1091,6 @@ public final class ChatStore {
         let convo = conversations[i]
         conversations.sort(by: Self.recency)
         persist(convo)
-        if !visibleAnswer.isEmpty && !failed && stopReason != .cancelled {
-            onGenerationFinished?(visibleAnswer)
-        }
     }
 
     /// Soft-delete with an Undo affordance (DESIGN §4 — irreversible loss gets undo, not just confirm).
@@ -1638,7 +1635,8 @@ public final class ChatStore {
         // AgentRuntime package and its generate() runs the full agent authorization/accounting
         // pipeline, which is overkill for a summarizer call. The negotiated dialect is cached per
         // base URL so a one-dialect gateway is not probed on every near-limit send.
-        guard let base = URL(string: service.baseURL ?? OpenAIServiceConfiguration.defaultBaseURL),
+        let rawBaseURL = service.baseURL.isEmpty ? OpenAIServiceConfiguration.defaultBaseURL : service.baseURL
+        guard let base = URL(string: rawBaseURL),
               OpenAIServiceConfiguration.isValidBaseURL(base),
               let model = service.modelID, !model.isEmpty else {
             // Missing/invalid config: never guess a model name — fall back to resident and memoize
