@@ -17,17 +17,19 @@ public enum PiPDisplayStatus: Equatable, Sendable {
 public struct PiPFloatingCardView: View {
     public let status: PiPDisplayStatus
     public let text: String
+    public var onClose: (() -> Void)?
 
-    public init(status: PiPDisplayStatus, text: String) {
+    public init(status: PiPDisplayStatus, text: String, onClose: (() -> Void)? = nil) {
         self.status = status
         self.text = text
+        self.onClose = onClose
     }
 
     private var statusTitle: String {
         switch status {
         case .idle: return "mobileLLM 待命"
-        case .thinking: return "思考生成中..."
-        case .responding: return "最新回答"
+        case .thinking: return "正在思考..."
+        case .responding: return "AI 回复"
         }
     }
 
@@ -41,39 +43,57 @@ public struct PiPFloatingCardView: View {
 
     public var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
+            // Elegant frosted dark glass background instead of solid dead black
+            Color(red: 0.11, green: 0.11, blue: 0.13)
+                .ignoresSafeArea()
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 8) {
+                // Header with status indicator, title and quick-close button
+                HStack(alignment: .center, spacing: 6) {
                     Circle()
                         .fill(statusColor)
-                        .frame(width: 8, height: 8)
+                        .frame(width: 7, height: 7)
                     Text(statusTitle)
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(.white.opacity(0.95))
+
                     Spacer()
-                    Image(systemName: "bubble.left.and.bubble.right.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.white.opacity(0.6))
+
+                    // Explicit close button requested by user
+                    Button {
+                        onClose?()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 15))
+                            .foregroundStyle(.white.opacity(0.6))
+                    }
+                    .buttonStyle(.plain)
                 }
 
-                ScrollView(.vertical, showsIndicators: false) {
-                    Text(text.isEmpty ? "已就绪。下拉系统通知即可提问对话。" : text)
-                        .font(.system(size: 12))
+                // Scrollable response text content
+                ScrollView(.vertical, showsIndicators: true) {
+                    Text(text.isEmpty ? "等待提问输入..." : text)
+                        .font(.system(size: 12, weight: .regular))
+                        .lineSpacing(3)
                         .foregroundStyle(.white.opacity(0.92))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .multilineTextAlignment(.leading)
                 }
 
+                // Subtle footer hint
                 HStack {
                     Spacer()
-                    Text("下拉系统通知可继续追问")
+                    Text("下拉系统通知可继续提问")
                         .font(.system(size: 9))
-                        .foregroundStyle(.white.opacity(0.45))
+                        .foregroundStyle(.white.opacity(0.4))
                 }
             }
-            .padding(10)
+            .padding(EdgeInsets(top: 10, leading: 12, bottom: 8, trailing: 12))
         }
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 0.5)
+        )
     }
 }
 
@@ -105,20 +125,27 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
         guard isSupported else { return }
         guard pipController == nil else { return }
 
+        // Fully transparent anchor to eliminate the ugly black rectangle during transitions
         let containerView = UIView(frame: CGRect(x: 0, y: 0, width: 280, height: 180))
-        containerView.backgroundColor = .black
+        containerView.backgroundColor = .clear
+        containerView.isOpaque = false
         containerView.clipsToBounds = true
         containerView.layer.cornerRadius = 16
         parentView.addSubview(containerView)
-        // Hidden from visible UI, serves as the PiP source anchor
-        containerView.alpha = 0.001
+        containerView.alpha = 0
         containerView.isUserInteractionEnabled = false
         self.sourceView = containerView
 
         let pipVC = AVPictureInPictureVideoCallViewController()
         pipVC.preferredContentSize = CGSize(width: 280, height: 180)
 
-        let initialCard = PiPFloatingCardView(status: currentStatus, text: currentText)
+        let initialCard = PiPFloatingCardView(
+            status: currentStatus,
+            text: currentText,
+            onClose: { [weak self] in
+                self?.stopPiP()
+            }
+        )
         let host = UIHostingController(rootView: initialCard)
         host.view.frame = pipVC.view.bounds
         host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -161,7 +188,13 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
         guard isPiPActive || (pipController?.canStartPictureInPictureAutomaticallyFromInline == true) else { return }
         self.currentStatus = status
         self.currentText = text
-        hostingVC?.rootView = PiPFloatingCardView(status: status, text: text)
+        hostingVC?.rootView = PiPFloatingCardView(
+            status: status,
+            text: text,
+            onClose: { [weak self] in
+                self?.stopPiP()
+            }
+        )
     }
 
     /// Starts Picture-in-Picture explicitly if not already active.
@@ -193,6 +226,16 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
     public nonisolated func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
         Task { @MainActor in
             PiPCoordinator.shared.isPiPActive = false
+        }
+    }
+
+    public nonisolated func pictureInPictureController(
+        _ pictureInPictureController: AVPictureInPictureController,
+        restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
+    ) {
+        Task { @MainActor in
+            PiPCoordinator.shared.stopPiP()
+            completionHandler(true)
         }
     }
 }

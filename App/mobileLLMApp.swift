@@ -360,9 +360,6 @@ final class AppNotificationDelegate: NSObject, @preconcurrency UNUserNotificatio
                 promptToSend = "请简要解析并总结以下内容：\n\n\(clip)"
             } else {
                 QuickNotificationCoordinator.postEmptyClipboardNotification()
-                if container.settings.pipWindowEnabled {
-                    PiPCoordinator.shared.update(status: .idle, text: "剪贴板未检测到文本内容，请先复制后再试。")
-                }
                 completionHandler()
                 return
             }
@@ -384,7 +381,9 @@ final class AppNotificationDelegate: NSObject, @preconcurrency UNUserNotificatio
             QuickNotificationCoordinator.postThinkingNotification()
         }
         if container.settings.pipWindowEnabled {
+            PiPCoordinator.shared.setEnabled(true)
             PiPCoordinator.shared.update(status: .thinking, text: "正在思考生成中，请稍候...")
+            PiPCoordinator.shared.startPiP()
         }
 
         let previousHandler = container.chat.onGenerationFinished
@@ -843,12 +842,6 @@ struct MobileLLMApp: App {
                         if container.settings.quickNotificationEnabled {
                             QuickNotificationCoordinator.postStandbyNotification()
                         }
-                        if container.settings.pipWindowEnabled {
-                            PiPCoordinator.shared.setEnabled(true)
-                            PiPCoordinator.shared.startPiP()
-                        } else {
-                            PiPCoordinator.shared.setEnabled(false)
-                        }
                     } else if phase == .active || phase == .inactive {
                         container.lifecycle.enterForeground()
                     }
@@ -859,10 +852,8 @@ struct MobileLLMApp: App {
                         if container.settings.quickNotificationEnabled {
                             QuickNotificationCoordinator.dismissNotification()
                         }
-                        if !container.settings.pipWindowEnabled {
-                            PiPCoordinator.shared.stopPiP()
-                            PiPCoordinator.shared.setEnabled(false)
-                        }
+                        PiPCoordinator.shared.stopPiP()
+                        PiPCoordinator.shared.setEnabled(false)
                     }
                     #else
                     // Free the resident model when the app leaves the foreground: it stops a 5 GB model
