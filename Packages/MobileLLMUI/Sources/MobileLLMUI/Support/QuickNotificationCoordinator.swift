@@ -19,9 +19,6 @@ public enum QuickNotificationCoordinator {
     public static let explainClipboardActionIdentifier = "mobilellm.quick_chat.explain_clipboard"
     public static let notificationIdentifier = "mobilellm.quick_chat.banner"
 
-    /// Stores the latest generated response text for one-tap copying from the notification action menu.
-    public static var lastResponseText: String = ""
-
     /// Sets up notification action categories for both standby and response states.
     public static func registerCategory() {
         #if canImport(UserNotifications)
@@ -129,7 +126,6 @@ public enum QuickNotificationCoordinator {
     /// Updates the notification with the model's complete response and dynamic response actions.
     public static func postResponseNotification(text: String) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        lastResponseText = clean
         let body = clean.isEmpty ? "生成完毕。" : clean
         postNotification(
             title: "mobileLLM 回复",
@@ -139,10 +135,10 @@ public enum QuickNotificationCoordinator {
     }
 
     /// Updates the notification title to indicate that the response has been copied to the clipboard.
-    public static func postCopiedNotification() {
+    public static func postCopiedNotification(text: String) {
         postNotification(
             title: "mobileLLM 已复制到剪贴板 ✓",
-            body: lastResponseText.isEmpty ? "回复已成功复制。" : lastResponseText,
+            body: text,
             categoryIdentifier: responseCategoryIdentifier
         )
     }

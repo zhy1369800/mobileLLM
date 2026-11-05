@@ -356,10 +356,10 @@ final class AppNotificationDelegate: NSObject, @preconcurrency UNUserNotificatio
         let textInput = (response as? UNTextInputNotificationResponse)?.userText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if isCopyAction {
-            let textToCopy = QuickNotificationCoordinator.lastResponseText
+            let textToCopy = response.notification.request.content.body
             if !textToCopy.isEmpty {
                 UIPasteboard.general.string = textToCopy
-                QuickNotificationCoordinator.postCopiedNotification()
+                QuickNotificationCoordinator.postCopiedNotification(text: textToCopy)
             }
             completionHandler()
             return
