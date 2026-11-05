@@ -1165,7 +1165,11 @@ public final class ChatStore {
     // MARK: - Sending
 
     /// Sends a prompt directly without manually updating the composer draft.
+    /// Temporarily allows action admission so background notifications can dispatch turns.
     public func send(_ text: String) {
+        let previousAdmission = acceptingNewActions
+        acceptingNewActions = true
+        defer { acceptingNewActions = previousAdmission }
         draft = text
         send()
     }
@@ -1969,6 +1973,7 @@ public final class ChatStore {
             conversations[ci].updatedAt = Date()
             persist(conversations[ci])
             showToast(Toast(errorMessage, kind: .error, autoDismiss: 5))
+            onGenerationFinished?("生成未完成: \(errorMessage)")
         }
         if streamingMessageID == assistantMessageID {
             resetStreamingBuffer()
@@ -2515,7 +2520,9 @@ public final class ChatStore {
         genTask = nil
         conversations.sort(by: Self.recency)
         persist(convo)
-        if !visibleAnswer.isEmpty && !failed && stopReason != .cancelled {
+        if failed {
+            onGenerationFinished?("生成失败: \(stopReason.rawValue)")
+        } else if !visibleAnswer.isEmpty && stopReason != .cancelled {
             onGenerationFinished?(visibleAnswer)
         }
     }
@@ -2997,5 +3004,6 @@ public final class ChatStore {
     ) {
         finalizeIfNeeded(assistantID: assistantMessageID, stopReason: .cancelled, failed: true)
         showToast(Toast(message, kind: .error, autoDismiss: 5))
+        onGenerationFinished?("快捷指令运行失败: \(message)")
     }
 }

@@ -333,6 +333,12 @@ final class AppNotificationDelegate: NSObject, @preconcurrency UNUserNotificatio
         }
 
         let actionID = response.actionIdentifier
+        if actionID == UNNotificationDefaultActionIdentifier {
+            container.navigationRequest = .chat
+            completionHandler()
+            return
+        }
+
         let isClipboardAction = (actionID == QuickNotificationCoordinator.explainClipboardActionIdentifier)
         let textInput = (response as? UNTextInputNotificationResponse)?.userText.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -375,7 +381,14 @@ final class AppNotificationDelegate: NSObject, @preconcurrency UNUserNotificatio
             taskBox.end()
         }
 
-        container.chat.send(prompt)
+        Task { @MainActor [weak container] in
+            guard let container else {
+                taskBox.end()
+                return
+            }
+            await container.bootstrap()
+            container.chat.send(prompt)
+        }
     }
 }
 #endif
