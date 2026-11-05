@@ -9,14 +9,23 @@ import UserNotifications
 /// Allows the user to pull down a system notification anywhere in iOS to ask questions and receive in-place answers
 /// across multiple conversation turns without foregrounding the app.
 public enum QuickNotificationCoordinator {
-    public static let categoryIdentifier = "mobilellm.quick_chat.category"
+    public static let standbyCategoryIdentifier = "mobilellm.quick_chat.category.standby"
+    public static let responseCategoryIdentifier = "mobilellm.quick_chat.category.response"
+    public static var categoryIdentifier: String { standbyCategoryIdentifier }
+
     public static let actionIdentifier = "mobilellm.quick_chat.reply"
+    public static let continueActionIdentifier = "mobilellm.quick_chat.continue"
+    public static let copyActionIdentifier = "mobilellm.quick_chat.copy"
     public static let explainClipboardActionIdentifier = "mobilellm.quick_chat.explain_clipboard"
     public static let notificationIdentifier = "mobilellm.quick_chat.banner"
 
-    /// Sets up notification action category with text input and registers with the system.
+    /// Stores the latest generated response text for one-tap copying from the notification action menu.
+    public static var lastResponseText: String = ""
+
+    /// Sets up notification action categories for both standby and response states.
     public static func registerCategory() {
         #if canImport(UserNotifications)
+        // Standby actions: [快捷提问, 解释粘贴]
         let replyAction = UNTextInputNotificationAction(
             identifier: actionIdentifier,
             title: "快捷提问",
@@ -29,13 +38,42 @@ public enum QuickNotificationCoordinator {
             title: "解释粘贴",
             options: []
         )
-        let category = UNNotificationCategory(
-            identifier: categoryIdentifier,
+        let standbyCategory = UNNotificationCategory(
+            identifier: standbyCategoryIdentifier,
             actions: [replyAction, clipboardAction],
             intentIdentifiers: [],
             options: []
         )
-        UNUserNotificationCenter.current().setNotificationCategories([category])
+
+        // Response actions: [继续追问, 复制回复, 解释粘贴]
+        let continueAction = UNTextInputNotificationAction(
+            identifier: continueActionIdentifier,
+            title: "继续追问",
+            options: [],
+            textInputButtonTitle: "发送",
+            textInputPlaceholder: "针对上述回答继续追问..."
+        )
+        let copyAction = UNNotificationAction(
+            identifier: copyActionIdentifier,
+            title: "复制回复",
+            options: []
+        )
+        let responseCategory = UNNotificationCategory(
+            identifier: responseCategoryIdentifier,
+            actions: [continueAction, copyAction, clipboardAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        // Legacy fallback category to ensure seamless transitions
+        let legacyCategory = UNNotificationCategory(
+            identifier: "mobilellm.quick_chat.category",
+            actions: [replyAction, clipboardAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        UNUserNotificationCenter.current().setNotificationCategories([standbyCategory, responseCategory, legacyCategory])
         #endif
     }
 
@@ -65,7 +103,8 @@ public enum QuickNotificationCoordinator {
     public static func postStandbyNotification() {
         postNotification(
             title: "mobileLLM 快捷助手",
-            body: "已就绪。下拉或长按通知即可提问对话。"
+            body: "已就绪。下拉或长按通知即可提问对话。",
+            categoryIdentifier: standbyCategoryIdentifier
         )
     }
 
@@ -73,7 +112,8 @@ public enum QuickNotificationCoordinator {
     public static func postThinkingNotification() {
         postNotification(
             title: "mobileLLM 快捷助手",
-            body: "正在思考中，请稍候..."
+            body: "正在思考中，请稍候...",
+            categoryIdentifier: standbyCategoryIdentifier
         )
     }
 
@@ -81,28 +121,38 @@ public enum QuickNotificationCoordinator {
     public static func postEmptyClipboardNotification() {
         postNotification(
             title: "mobileLLM 快捷助手",
-            body: "剪贴板未检测到文本内容，请先复制后再试。"
+            body: "剪贴板未检测到文本内容，请先复制后再试。",
+            categoryIdentifier: standbyCategoryIdentifier
         )
     }
 
-    /// Updates the notification with the model's response and prompts for next turn.
+    /// Updates the notification with the model's complete response and dynamic response actions.
     public static func postResponseNotification(text: String) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let preview: String
-        if clean.count > 150 {
-            preview = String(clean.prefix(150)) + "..."
-        } else {
-            preview = clean
-        }
-        let body = preview.isEmpty ? "生成完毕。" : "\(preview)\n\n(下拉或长按可继续追问)"
+        lastResponseText = clean
+        let body = clean.isEmpty ? "生成完毕。" : clean
         postNotification(
             title: "mobileLLM 回复",
-            body: body
+            body: body,
+            categoryIdentifier: responseCategoryIdentifier
+        )
+    }
+
+    /// Updates the notification title to indicate that the response has been copied to the clipboard.
+    public static func postCopiedNotification() {
+        postNotification(
+            title: "mobileLLM 已复制到剪贴板 ✓",
+            body: lastResponseText.isEmpty ? "回复已成功复制。" : lastResponseText,
+            categoryIdentifier: responseCategoryIdentifier
         )
     }
 
     /// Posts or in-place updates the quick chat banner notification.
-    public static func postNotification(title: String, body: String) {
+    public static func postNotification(
+        title: String,
+        body: String,
+        categoryIdentifier: String = standbyCategoryIdentifier
+    ) {
         #if canImport(UserNotifications)
         let content = UNMutableNotificationContent()
         content.title = title

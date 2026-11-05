@@ -352,7 +352,18 @@ final class AppNotificationDelegate: NSObject, @preconcurrency UNUserNotificatio
         }
 
         let isClipboardAction = (actionID == QuickNotificationCoordinator.explainClipboardActionIdentifier)
+        let isCopyAction = (actionID == QuickNotificationCoordinator.copyActionIdentifier)
         let textInput = (response as? UNTextInputNotificationResponse)?.userText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if isCopyAction {
+            let textToCopy = QuickNotificationCoordinator.lastResponseText
+            if !textToCopy.isEmpty {
+                UIPasteboard.general.string = textToCopy
+                QuickNotificationCoordinator.postCopiedNotification()
+            }
+            completionHandler()
+            return
+        }
 
         let promptToSend: String?
         if isClipboardAction {
