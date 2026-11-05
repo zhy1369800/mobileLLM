@@ -70,7 +70,7 @@ public struct PiPFloatingCardView: View {
                 // Subtle footer hint
                 HStack {
                     Spacer()
-                    Text("轻点浮窗呼出左上角✕关闭 · 也可轻扫贴边")
+                    Text("轻点返回 App · 轻扫屏幕边缘贴边折叠")
                         .font(.system(size: 9))
                         .foregroundStyle(.white.opacity(0.45))
                 }
