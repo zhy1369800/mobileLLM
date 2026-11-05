@@ -62,7 +62,6 @@ public struct RootView: View {
             #if os(iOS)
             .background {
                 PiPAnchorView()
-                    .frame(width: 1, height: 1)
                     .allowsHitTesting(false)
             }
             #endif

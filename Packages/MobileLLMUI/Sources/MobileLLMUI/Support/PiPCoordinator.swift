@@ -116,14 +116,15 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
         guard isSupported else { return }
         guard pipController == nil else { return }
 
-        // Position anchor completely offscreen with minimal footprint (1x1) so that
-        // when iOS performs the restore transition back into the app, it never lands
-        // or lingers as an ugly black rectangle over the active chat UI.
-        let containerView = UIView(frame: CGRect(x: 0, y: -500, width: 1, height: 1))
+        // Transparent source anchor with valid onscreen geometry (280x180)
+        // iOS requires the sourceView to be within the visible bounds of the window
+        // for `canStartPictureInPictureAutomaticallyFromInline` to be eligible.
+        let containerView = UIView(frame: CGRect(x: 20, y: 100, width: 280, height: 180))
         containerView.backgroundColor = .clear
         containerView.isOpaque = false
         containerView.clipsToBounds = true
-        containerView.alpha = 0.01
+        containerView.layer.cornerRadius = 16
+        containerView.alpha = 0.05
         containerView.isUserInteractionEnabled = false
         parentView.addSubview(containerView)
         self.sourceView = containerView
@@ -165,11 +166,12 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
             try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
             try? AVAudioSession.sharedInstance().setActive(true)
             pipController?.canStartPictureInPictureAutomaticallyFromInline = true
+            videoCallVC?.view.isHidden = false
             hostingVC?.view.alpha = 1
         } else {
             stopPiP()
             pipController?.canStartPictureInPictureAutomaticallyFromInline = false
-            hostingVC?.view.alpha = 0
+            videoCallVC?.view.isHidden = true
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }
     }
@@ -179,6 +181,7 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
         guard isPiPActive || (pipController?.canStartPictureInPictureAutomaticallyFromInline == true) else { return }
         self.currentStatus = status
         self.currentText = text
+        videoCallVC?.view.isHidden = false
         hostingVC?.view.alpha = 1
         hostingVC?.rootView = PiPFloatingCardView(
             status: status,
@@ -189,6 +192,7 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
     /// Starts Picture-in-Picture explicitly if not already active.
     public func startPiP() {
         guard let controller = pipController, controller.canStartPictureInPictureAutomaticallyFromInline, !controller.isPictureInPictureActive else { return }
+        videoCallVC?.view.isHidden = false
         hostingVC?.view.alpha = 1
         controller.startPictureInPicture()
     }
@@ -196,14 +200,16 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
     /// Stops Picture-in-Picture if active.
     public func stopPiP() {
         guard let controller = pipController, controller.isPictureInPictureActive else { return }
-        hostingVC?.view.alpha = 0
         controller.stopPictureInPicture()
+        videoCallVC?.view.isHidden = true
+        videoCallVC?.view.removeFromSuperview()
     }
 
     // MARK: - AVPictureInPictureControllerDelegate
 
     public nonisolated func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         Task { @MainActor in
+            PiPCoordinator.shared.videoCallVC?.view.isHidden = false
             PiPCoordinator.shared.hostingVC?.view.alpha = 1
             PiPCoordinator.shared.isPiPActive = true
         }
@@ -211,23 +217,24 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
 
     public nonisolated func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         Task { @MainActor in
-            // Immediately vanish the card content so that the transition animation back into the app
-            // never renders a black rectangle over the foreground UI.
-            PiPCoordinator.shared.hostingVC?.view.alpha = 0
+            PiPCoordinator.shared.videoCallVC?.view.isHidden = true
+            PiPCoordinator.shared.videoCallVC?.view.removeFromSuperview()
         }
     }
 
     public nonisolated func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         Task { @MainActor in
-            PiPCoordinator.shared.hostingVC?.view.alpha = 0
             PiPCoordinator.shared.isPiPActive = false
+            PiPCoordinator.shared.videoCallVC?.view.isHidden = true
+            PiPCoordinator.shared.videoCallVC?.view.removeFromSuperview()
         }
     }
 
     public nonisolated func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
         Task { @MainActor in
-            PiPCoordinator.shared.hostingVC?.view.alpha = 0
             PiPCoordinator.shared.isPiPActive = false
+            PiPCoordinator.shared.videoCallVC?.view.isHidden = true
+            PiPCoordinator.shared.videoCallVC?.view.removeFromSuperview()
         }
     }
 
@@ -236,8 +243,9 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
         restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
     ) {
         Task { @MainActor in
-            PiPCoordinator.shared.hostingVC?.view.alpha = 0
             PiPCoordinator.shared.stopPiP()
+            PiPCoordinator.shared.videoCallVC?.view.isHidden = true
+            PiPCoordinator.shared.videoCallVC?.view.removeFromSuperview()
             completionHandler(true)
         }
     }
