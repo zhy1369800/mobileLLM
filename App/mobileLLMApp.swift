@@ -762,6 +762,10 @@ struct MobileLLMApp: App {
                 PiPCoordinator.shared.update(status: .responding, text: fullText)
             }
         }
+
+        if container.settings.pipWindowEnabled {
+            PiPCoordinator.shared.setEnabled(true)
+        }
         #endif
         #if DEBUG && os(macOS)
         // Keep screenshot automation independent of SwiftUI view identity. A view-scoped `.task` can be
@@ -842,6 +846,10 @@ struct MobileLLMApp: App {
                         if container.settings.quickNotificationEnabled {
                             QuickNotificationCoordinator.postStandbyNotification()
                         }
+                        if container.settings.pipWindowEnabled {
+                            PiPCoordinator.shared.setEnabled(true)
+                            PiPCoordinator.shared.startPiP()
+                        }
                     } else if phase == .active || phase == .inactive {
                         container.lifecycle.enterForeground()
                     }
@@ -852,8 +860,12 @@ struct MobileLLMApp: App {
                         if container.settings.quickNotificationEnabled {
                             QuickNotificationCoordinator.dismissNotification()
                         }
-                        PiPCoordinator.shared.stopPiP()
-                        PiPCoordinator.shared.setEnabled(false)
+                        if container.settings.pipWindowEnabled {
+                            PiPCoordinator.shared.setEnabled(true)
+                        } else {
+                            PiPCoordinator.shared.stopPiP()
+                            PiPCoordinator.shared.setEnabled(false)
+                        }
                     }
                     #else
                     // Free the resident model when the app leaves the foreground: it stops a 5 GB model

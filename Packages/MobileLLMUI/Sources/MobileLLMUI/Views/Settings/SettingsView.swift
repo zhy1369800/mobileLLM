@@ -261,7 +261,16 @@ struct SettingsView: View {
             }
             .tint(Theme.accent)
             Divider().background(Theme.hairline)
-            Toggle(isOn: $settings.pipWindowEnabled) {
+            Toggle(isOn: Binding(
+                get: { settings.pipWindowEnabled },
+                set: { newValue in
+                    settings.pipWindowEnabled = newValue
+                    PiPCoordinator.shared.setEnabled(newValue)
+                    if !newValue {
+                        PiPCoordinator.shared.stopPiP()
+                    }
+                }
+            )) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Picture-in-Picture floating window")
                         .font(.subheadline).foregroundStyle(Theme.textPrimary)
