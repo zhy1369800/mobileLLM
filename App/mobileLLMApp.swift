@@ -319,7 +319,8 @@ final class AppNotificationDelegate: NSObject, @preconcurrency UNUserNotificatio
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        completionHandler([.banner, .sound])
+        // 前台所有通知（包含快捷指令 task_... 内部自动化触发通知）完全静默，绝不弹出横幅打扰
+        completionHandler([])
     }
 
     func userNotificationCenter(
@@ -743,7 +744,8 @@ struct MobileLLMApp: App {
 
         container.chat.onGenerationFinished = { [weak container] fullText in
             guard let container else { return }
-            if container.settings.quickNotificationEnabled {
+            // 仅在退到后台时，才向系统通知栏刷新回复卡片；前台聊天直接渲染在 UI 上，不发横幅打扰
+            if container.lifecycle.isInBackground, container.settings.quickNotificationEnabled {
                 QuickNotificationCoordinator.postResponseNotification(text: fullText)
             }
             if container.settings.pipWindowEnabled {
