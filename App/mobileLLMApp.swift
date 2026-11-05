@@ -319,7 +319,18 @@ final class AppNotificationDelegate: NSObject, @preconcurrency UNUserNotificatio
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        // 前台所有通知（包含快捷指令 task_... 内部自动化触发通知）完全静默，绝不弹出横幅打扰
+        // 快捷指令内部任务通知（task_...），绝对静默，绝不弹出横幅打扰
+        if notification.request.identifier.hasPrefix("task_") {
+            completionHandler([])
+            return
+        }
+
+        // 快捷助手通知（在上滑退出过渡期或后台刷新时到达）：正常弹出横幅并展示在通知列表
+        if notification.request.identifier == QuickNotificationCoordinator.notificationIdentifier {
+            completionHandler([.banner, .list])
+            return
+        }
+
         completionHandler([])
     }
 

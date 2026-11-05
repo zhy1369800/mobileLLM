@@ -103,6 +103,12 @@ public final class ShortcutAutomationService: ShortcutAutomationExecuting, @unch
             trigger: nil // deliver immediately
         )
 
+        defer {
+            // Automatically clean up the trigger notification so it never lingers in Notification Center
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["task_" + effectiveTaskId])
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["task_" + effectiveTaskId])
+        }
+
         do {
             try await UNUserNotificationCenter.current().add(request)
         } catch {
