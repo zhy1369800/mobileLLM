@@ -55,10 +55,6 @@ public struct PiPFloatingCardView: View {
                         .foregroundStyle(.white.opacity(0.95))
 
                     Spacer()
-
-                    Text("轻点返回 App")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.white.opacity(0.45))
                 }
 
                 // Scrollable response text content
@@ -74,9 +70,9 @@ public struct PiPFloatingCardView: View {
                 // Subtle footer hint
                 HStack {
                     Spacer()
-                    Text("下拉通知提问 · 点击左上角✕关闭")
+                    Text("轻点浮窗呼出左上角✕关闭 · 也可轻扫贴边")
                         .font(.system(size: 9))
-                        .foregroundStyle(.white.opacity(0.4))
+                        .foregroundStyle(.white.opacity(0.45))
                 }
             }
             .padding(EdgeInsets(top: 10, leading: 12, bottom: 8, trailing: 12))
