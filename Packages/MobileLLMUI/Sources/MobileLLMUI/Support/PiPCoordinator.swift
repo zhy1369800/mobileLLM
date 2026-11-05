@@ -17,12 +17,10 @@ public enum PiPDisplayStatus: Equatable, Sendable {
 public struct PiPFloatingCardView: View {
     public let status: PiPDisplayStatus
     public let text: String
-    public var onClose: (() -> Void)?
 
-    public init(status: PiPDisplayStatus, text: String, onClose: (() -> Void)? = nil) {
+    public init(status: PiPDisplayStatus, text: String) {
         self.status = status
         self.text = text
-        self.onClose = onClose
     }
 
     private var statusTitle: String {
@@ -43,12 +41,11 @@ public struct PiPFloatingCardView: View {
 
     public var body: some View {
         ZStack {
-            // Elegant frosted dark glass background instead of solid dead black
             Color(red: 0.11, green: 0.11, blue: 0.13)
                 .ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 8) {
-                // Header with status indicator, title and quick-close button
+                // Header with status indicator and title
                 HStack(alignment: .center, spacing: 6) {
                     Circle()
                         .fill(statusColor)
@@ -59,15 +56,9 @@ public struct PiPFloatingCardView: View {
 
                     Spacer()
 
-                    // Explicit close button requested by user
-                    Button {
-                        onClose?()
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 15))
-                            .foregroundStyle(.white.opacity(0.6))
-                    }
-                    .buttonStyle(.plain)
+                    Text("轻点返回 App")
+                        .font(.system(size: 9))
+                        .foregroundStyle(.white.opacity(0.45))
                 }
 
                 // Scrollable response text content
@@ -83,7 +74,7 @@ public struct PiPFloatingCardView: View {
                 // Subtle footer hint
                 HStack {
                     Spacer()
-                    Text("下拉系统通知可继续提问")
+                    Text("下拉通知提问 · 点击左上角✕关闭")
                         .font(.system(size: 9))
                         .foregroundStyle(.white.opacity(0.4))
                 }
@@ -125,15 +116,16 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
         guard isSupported else { return }
         guard pipController == nil else { return }
 
-        // Fully transparent anchor to eliminate the ugly black rectangle during transitions
-        let containerView = UIView(frame: CGRect(x: 0, y: 0, width: 280, height: 180))
+        // Position anchor completely offscreen with minimal footprint (1x1) so that
+        // when iOS performs the restore transition back into the app, it never lands
+        // or lingers as an ugly black rectangle over the active chat UI.
+        let containerView = UIView(frame: CGRect(x: 0, y: -500, width: 1, height: 1))
         containerView.backgroundColor = .clear
         containerView.isOpaque = false
         containerView.clipsToBounds = true
-        containerView.layer.cornerRadius = 16
-        parentView.addSubview(containerView)
-        containerView.alpha = 0
+        containerView.alpha = 0.01
         containerView.isUserInteractionEnabled = false
+        parentView.addSubview(containerView)
         self.sourceView = containerView
 
         let pipVC = AVPictureInPictureVideoCallViewController()
@@ -141,10 +133,7 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
 
         let initialCard = PiPFloatingCardView(
             status: currentStatus,
-            text: currentText,
-            onClose: { [weak self] in
-                self?.stopPiP()
-            }
+            text: currentText
         )
         let host = UIHostingController(rootView: initialCard)
         host.view.frame = pipVC.view.bounds
@@ -176,9 +165,11 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
             try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
             try? AVAudioSession.sharedInstance().setActive(true)
             pipController?.canStartPictureInPictureAutomaticallyFromInline = true
+            hostingVC?.view.alpha = 1
         } else {
             stopPiP()
             pipController?.canStartPictureInPictureAutomaticallyFromInline = false
+            hostingVC?.view.alpha = 0
             try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         }
     }
@@ -188,24 +179,24 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
         guard isPiPActive || (pipController?.canStartPictureInPictureAutomaticallyFromInline == true) else { return }
         self.currentStatus = status
         self.currentText = text
+        hostingVC?.view.alpha = 1
         hostingVC?.rootView = PiPFloatingCardView(
             status: status,
-            text: text,
-            onClose: { [weak self] in
-                self?.stopPiP()
-            }
+            text: text
         )
     }
 
     /// Starts Picture-in-Picture explicitly if not already active.
     public func startPiP() {
         guard let controller = pipController, controller.canStartPictureInPictureAutomaticallyFromInline, !controller.isPictureInPictureActive else { return }
+        hostingVC?.view.alpha = 1
         controller.startPictureInPicture()
     }
 
     /// Stops Picture-in-Picture if active.
     public func stopPiP() {
         guard let controller = pipController, controller.isPictureInPictureActive else { return }
+        hostingVC?.view.alpha = 0
         controller.stopPictureInPicture()
     }
 
@@ -213,18 +204,29 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
 
     public nonisolated func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         Task { @MainActor in
+            PiPCoordinator.shared.hostingVC?.view.alpha = 1
             PiPCoordinator.shared.isPiPActive = true
+        }
+    }
+
+    public nonisolated func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        Task { @MainActor in
+            // Immediately vanish the card content so that the transition animation back into the app
+            // never renders a black rectangle over the foreground UI.
+            PiPCoordinator.shared.hostingVC?.view.alpha = 0
         }
     }
 
     public nonisolated func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         Task { @MainActor in
+            PiPCoordinator.shared.hostingVC?.view.alpha = 0
             PiPCoordinator.shared.isPiPActive = false
         }
     }
 
     public nonisolated func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
         Task { @MainActor in
+            PiPCoordinator.shared.hostingVC?.view.alpha = 0
             PiPCoordinator.shared.isPiPActive = false
         }
     }
@@ -234,6 +236,7 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
         restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
     ) {
         Task { @MainActor in
+            PiPCoordinator.shared.hostingVC?.view.alpha = 0
             PiPCoordinator.shared.stopPiP()
             completionHandler(true)
         }
