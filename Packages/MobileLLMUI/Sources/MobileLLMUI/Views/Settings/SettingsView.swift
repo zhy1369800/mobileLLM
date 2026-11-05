@@ -255,7 +255,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Quick notification assistant")
                         .font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("Presents an actionable notification when backgrounded. Pull down to ask questions via keyboard and receive in-place multi-turn replies.")
+                    Text("Presents an actionable notification when backgrounded. Pull down to ask questions via keyboard and receive in-place multi-turn replies. Tip: Set Banner Style to 'Persistent' in iOS Notification Settings to keep the card pinned indefinitely.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                 }
             }

@@ -44,7 +44,11 @@ public enum QuickNotificationCoordinator {
         #if canImport(UserNotifications)
         do {
             let center = UNUserNotificationCenter.current()
-            let granted = try await center.requestAuthorization(options: [.alert, .sound])
+            var options: UNAuthorizationOptions = [.alert, .sound]
+            if #available(iOS 15.0, *) {
+                options.insert(.timeSensitive)
+            }
+            let granted = try await center.requestAuthorization(options: options)
             if granted {
                 registerCategory()
             }
@@ -105,6 +109,9 @@ public enum QuickNotificationCoordinator {
         content.body = body
         content.categoryIdentifier = categoryIdentifier
         content.sound = nil
+        if #available(iOS 15.0, *) {
+            content.interruptionLevel = .timeSensitive
+        }
 
         let request = UNNotificationRequest(
             identifier: notificationIdentifier,
