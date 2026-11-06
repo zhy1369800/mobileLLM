@@ -112,7 +112,6 @@ public enum ShortcutsModelPromptBuilder {
             sections.append(historyText)
         }
 
-        let trimmedCurrent = currentPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let toolConstraint = !trimmedTools.isEmpty
             ? "\n\n##重要重要!!! 你不需要执行工具，只用决策返回工具格式就好##"
             : ""
