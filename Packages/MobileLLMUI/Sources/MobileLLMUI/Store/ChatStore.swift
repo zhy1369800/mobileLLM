@@ -1615,7 +1615,7 @@ public final class ChatStore {
             inputTokenBudget: 8192
         ).map { "\($0.role == .user ? "User" : "Assistant"): \($0.content)" }.joined(separator: "\n\n")
 
-        let fullPrompt = "\(ContextCompactor.summarizerSystemPrompt)\n\nConversation to summarize:\n\(promptText)"
+        let fullPrompt = "\(ContextCompactor.summarizerSystemPrompt)\n\n\(promptText)"
         let paramsDict = ShortcutsModelPromptBuilder.buildParams(msg: fullPrompt)
         let paramsData = (try? JSONSerialization.data(withJSONObject: paramsDict, options: [])) ?? Data()
         let paramsString = String(data: paramsData, encoding: .utf8) ?? "{}"
@@ -2647,15 +2647,28 @@ public final class ChatStore {
             cap = localContextRequest
         }
         guard let convo = activeConversation else { return (0, cap) }
+        let messagesToCount: [Message]
+        var summaryTokens = 0
+        if settings.autoCompactionEnabled, !isOnlineActive,
+           let summary = convo.compactionSummary, !summary.isEmpty,
+           let cutoff = convo.compactionCutoffMessageID,
+           let active = ContextCompactor.activeMessages(convo.messages, cutoffID: cutoff) {
+            messagesToCount = active
+            summaryTokens = TokenEstimate.tokens(in: ContextCompactor.summaryBlock(summary))
+        } else {
+            messagesToCount = convo.messages
+        }
+
         // CJK-aware throughout (`TokenEstimate`) so a Chinese thread's meter isn't ~3× under. The active
         // skill's instructions AND the memory block ride the composed system prompt, so they're counted
         // here too. Memory is searched with the query the NEXT send would use — draft included — because a
         // meter that warns you after the injection pushed you over the window is no warning at all. (So the
         // count can shift slightly as you type, when the draft brings different facts into range; the
         // block's cap bounds that to a few tokens.)
-        let system = composedSystemPrompt(query: Self.memoryQuery(draft: draft, history: convo.messages))
+        let system = composedSystemPrompt(query: Self.memoryQuery(draft: draft, history: messagesToCount))
         var used = system.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0 : TokenEstimate.tokens(in: system)
-        for message in convo.messages where !message.answer.isEmpty { used += message.approximateTokens }
+        used += summaryTokens
+        for message in messagesToCount where !message.answer.isEmpty { used += message.approximateTokens }
         used += streaming.map { TokenEstimate.tokens(in: $0.answer) + TokenEstimate.tokens(in: $0.reasoning) } ?? 0
         return (used, cap)
     }
