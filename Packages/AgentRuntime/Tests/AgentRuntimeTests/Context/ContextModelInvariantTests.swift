@@ -246,6 +246,32 @@ final class ContextModelInvariantTests: XCTestCase {
             omissionReason: nil
         ))
     }
+
+    func testContextCompilationErrorLocalizedDescriptionAndTightBudgets() throws {
+        let err0 = ContextCompilationError.invalidInput("context token budget")
+        XCTAssertEqual(err0.localizedDescription, "Context compilation invalid input: context token budget")
+
+        let err1 = ContextCompilationError.contextUnsatisfiable(requiredTokens: 5000, availableTokens: 3000)
+        XCTAssertEqual(err1.localizedDescription, "Context capacity exceeded: required 5000 tokens, but only 3000 available.")
+
+        // Zero-tool budget when tools are disabled
+        let zeroToolBudget = try ContextTokenBudget(
+            maximumContextTokens: 4_096,
+            reservedOutputTokens: 1_024,
+            maximumToolSchemaTokens: 0
+        )
+        XCTAssertEqual(zeroToolBudget.maximumInputTokens, 3_072)
+        XCTAssertEqual(zeroToolBudget.maximumToolSchemaTokens, 0)
+
+        // Tight 2048 budget with scaled down tools
+        let tightBudget = try ContextTokenBudget(
+            maximumContextTokens: 2_048,
+            reservedOutputTokens: 1_024,
+            maximumToolSchemaTokens: 512
+        )
+        XCTAssertEqual(tightBudget.maximumInputTokens, 1_024)
+        XCTAssertEqual(tightBudget.maximumToolSchemaTokens, 512)
+    }
 }
 
 private func jsonObject<Value: Encodable>(_ value: Value) throws -> [String: Any] {

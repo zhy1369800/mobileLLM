@@ -4,11 +4,24 @@ import AgentContracts
 import Foundation
 
 /// Fail-closed errors emitted while freezing, compiling, or restoring model context.
-public enum ContextCompilationError: Error, Hashable, Sendable {
+public enum ContextCompilationError: Error, Hashable, Sendable, LocalizedError {
     case invalidInput(String)
     case contextUnsatisfiable(requiredTokens: UInt64, availableTokens: UInt64)
     case manifestMismatch
     case integrityFailure(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidInput(let detail):
+            return "Context compilation invalid input: \(detail)"
+        case .contextUnsatisfiable(let requiredTokens, let availableTokens):
+            return "Context capacity exceeded: required \(requiredTokens) tokens, but only \(availableTokens) available."
+        case .manifestMismatch:
+            return "Context manifest mismatch during recovery."
+        case .integrityFailure(let detail):
+            return "Context integrity failure: \(detail)"
+        }
+    }
 }
 
 /// Deterministic token-estimator identity persisted with every compiled request.
