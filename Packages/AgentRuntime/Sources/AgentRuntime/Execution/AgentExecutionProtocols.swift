@@ -38,7 +38,7 @@ public protocol AgentExecutionHandle: Sendable {
 }
 
 /// Errors safe for clients of the reconnectable execution API to branch on.
-public enum AgentExecutionError: Error, Hashable, Sendable {
+public enum AgentExecutionError: Error, Hashable, Sendable, LocalizedError {
     case requestRunAlreadyExists(AgentRunID)
     case submissionCommandConflict(AgentCommandID)
     case executionNotFound(AgentExecutionHandleID)
@@ -60,6 +60,53 @@ public enum AgentExecutionError: Error, Hashable, Sendable {
     case invalidRecoveryBoundary
     case ephemeralObserverLagged
     case internalInvariant(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .requestRunAlreadyExists(let id):
+            return "Agent run already exists: \(id.description)"
+        case .submissionCommandConflict(let id):
+            return "Submission command conflict: \(id.description)"
+        case .executionNotFound(let id):
+            return "Execution handle not found: \(id.description)"
+        case .corruptExecutionBinding:
+            return "Corrupt execution binding."
+        case .cursorBelongsToAnotherExecution:
+            return "Event cursor belongs to another execution."
+        case .cursorNotFound:
+            return "Event cursor not found in journal."
+        case .cursorIntegrityMismatch:
+            return "Event cursor integrity mismatch."
+        case .commandTargetsAnotherRun:
+            return "Command targets another run."
+        case .commandLeaseUnavailable:
+            return "Command lease unavailable."
+        case .dependencyUnavailable(let detail):
+            return "Execution dependency unavailable: \(detail)"
+        case .malformedModelAction:
+            return "Malformed model action."
+        case .structuredRepairExhausted:
+            return "Structured repair exhausted."
+        case .toolBatchInvalid:
+            return "Tool batch is invalid."
+        case .toolUnavailable(let id):
+            return "Tool unavailable: \(id.description)"
+        case .approvalUnavailable:
+            return "Approval unavailable."
+        case .interactionUnavailable:
+            return "Interaction unavailable."
+        case .reconciliationUnavailable:
+            return "Reconciliation unavailable."
+        case .budgetUnavailable:
+            return "Execution budget unavailable."
+        case .invalidRecoveryBoundary:
+            return "Invalid recovery boundary."
+        case .ephemeralObserverLagged:
+            return "Ephemeral observer lagged behind live stream."
+        case .internalInvariant(let detail):
+            return "Internal runtime invariant failed: \(detail)"
+        }
+    }
 }
 
 /// Trusted wall-clock and bounded-delay source. Tests provide a virtual implementation.

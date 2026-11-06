@@ -54,6 +54,30 @@ final class ShortcutsModelSelectionTests: XCTestCase {
         XCTAssertTrue(chat.hasModel)
         XCTAssertEqual(chat.activeModelLabel, "自定义AI (快捷指令)")
     }
+
+    func testShortcutsRegenerateRoutesToShortcutsGeneration() async throws {
+        let settings = AppSettings(defaults: defaults)
+        let service = ShortcutsService(name: "豆包", shortcutName: "问豆包", isEnabled: true)
+        settings.upsertShortcutsService(service)
+        settings.setShortcutsServiceEnabled(id: service.id, enabled: true)
+
+        let store = ConversationStore(root: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString))
+        let chat = ChatStore(engine: MockEngine(), store: store, settings: settings)
+
+        chat.newConversation()
+        chat.draft = "你好"
+        chat.send()
+
+        guard let convo = chat.activeConversation, convo.messages.count >= 2 else {
+            XCTFail("Expected user and assistant messages")
+            return
+        }
+        let assistantID = convo.messages[1].id
+        chat.regenerate(assistantMessageID: assistantID)
+
+        XCTAssertTrue(chat.isShortcutsActive)
+        XCTAssertEqual(chat.streaming?.warmingNote, "正在调用快捷指令...")
+    }
 }
 
 private final class MockEngine: LLMEngine, @unchecked Sendable {

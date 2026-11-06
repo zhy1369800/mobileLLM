@@ -2032,6 +2032,14 @@ public final class ChatStore {
         let fresh = Message(role: .assistant, answer: "", parentID: user.id)
         conversations[ci].messages.append(fresh)
         conversations[ci].updatedAt = Date()
+        if isShortcutsActive {
+            startShortcutsGeneration(
+                assistantID: fresh.id,
+                in: conversations[ci].id,
+                currentPrompt: user.answer
+            )
+            return
+        }
         if let agentRuns {
             materializeToolPolicyIfNeeded(at: ci)
             startAgentRun(
@@ -2097,6 +2105,14 @@ public final class ChatStore {
         let assistant = Message(role: .assistant, answer: "", parentID: user.id)
         conversations[ci].messages.append(assistant)
         conversations[ci].updatedAt = Date()
+        if isShortcutsActive {
+            startShortcutsGeneration(
+                assistantID: assistant.id,
+                in: conversations[ci].id,
+                currentPrompt: text
+            )
+            return
+        }
         if let agentRuns {
             materializeToolPolicyIfNeeded(at: ci)
             startAgentRun(

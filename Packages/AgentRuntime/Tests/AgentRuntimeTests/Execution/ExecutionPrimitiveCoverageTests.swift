@@ -401,4 +401,15 @@ final class ExecutionPrimitiveCoverageTests: XCTestCase {
         XCTAssertTrue(selection.descriptors.isEmpty)
         XCTAssertTrue(selection.snapshot.decisions.isEmpty)
     }
+
+    func testAgentExecutionErrorLocalizedDescription() throws {
+        let errCursor = AgentExecutionError.cursorNotFound
+        XCTAssertEqual(errCursor.localizedDescription, "Event cursor not found in journal.")
+
+        let errHandle = AgentExecutionError.executionNotFound(AgentExecutionHandleID())
+        XCTAssertTrue(errHandle.localizedDescription.contains("Execution handle not found:"))
+
+        let errInvariant = AgentExecutionError.internalInvariant("test broken")
+        XCTAssertEqual(errInvariant.localizedDescription, "Internal runtime invariant failed: test broken")
+    }
 }
