@@ -50,8 +50,29 @@ public enum ShortcutsModelPromptBuilder {
         systemPrompt: String = "",
         toolDescriptions: String = "",
         history: [(role: String, content: String)] = [],
-        currentPrompt: String
+        currentPrompt: String,
+        isFirstTurn: Bool
     ) -> String {
+        buildMessage(
+            systemPrompt: systemPrompt,
+            toolDescriptions: toolDescriptions,
+            history: history,
+            currentPrompt: currentPrompt,
+            fullContext: isFirstTurn
+        )
+    }
+
+    public static func buildMessage(
+        systemPrompt: String = "",
+        toolDescriptions: String = "",
+        history: [(role: String, content: String)] = [],
+        currentPrompt: String,
+        fullContext: Bool = true
+    ) -> String {
+        let trimmedCurrent = currentPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard fullContext else {
+            return trimmedCurrent
+        }
         var sections: [String] = []
 
         var combinedSystem = systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)

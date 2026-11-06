@@ -170,4 +170,33 @@ final class ShortcutsModelTests: XCTestCase {
         XCTAssertFalse(msg.contains("shortcut"))
         XCTAssertTrue(msg.contains("助手: 我可以帮您解答各种问题。"))
     }
+
+    func testBuildMessageSubsequentTurnOnlyReturnsCurrentPrompt() {
+        let msg = ShortcutsModelPromptBuilder.buildMessage(
+            systemPrompt: "系统提示词",
+            toolDescriptions: "- some_tool: 执行某些操作",
+            history: [("user", "第一句话"), ("assistant", "回复一")],
+            currentPrompt: "最近有哪些有关 ai 的信息",
+            isFirstTurn: false
+        )
+        // Subsequent turns must not include system prompt, tools, or history
+        XCTAssertEqual(msg, "最近有哪些有关 ai 的信息")
+        XCTAssertFalse(msg.contains("【系统提示】"))
+        XCTAssertFalse(msg.contains("【可用工具说明】"))
+        XCTAssertFalse(msg.contains("【历史对话】"))
+    }
+
+    func testBuildMessageFullContextExplicit() {
+        let msg = ShortcutsModelPromptBuilder.buildMessage(
+            systemPrompt: "新系统提示词",
+            toolDescriptions: "- new_tool: 新增工具",
+            history: [],
+            currentPrompt: "调用新工具",
+            fullContext: true
+        )
+        XCTAssertTrue(msg.contains("【系统提示】\n新系统提示词"))
+        XCTAssertTrue(msg.contains("【可用工具说明】"))
+        XCTAssertTrue(msg.contains("new_tool"))
+        XCTAssertTrue(msg.contains("【当前提问】\n调用新工具"))
+    }
 }

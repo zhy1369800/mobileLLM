@@ -202,6 +202,8 @@ public final class ChatStore {
     /// Settings can be open in more than one macOS window. Each erase request owns a reservation so an
     /// earlier failing request cannot reopen persistence while another window is still deleting files.
     private var conversationEraseReservations = 0
+    /// 最近一次传给快捷指令模型的配置哈希指纹（系统词 + 工具说明），用于检测中途是否切换了 Skill/开启了工具。
+    private var lastShortcutsConfigFingerprint: [UUID: Int] = [:]
     /// How long a soft-deleted conversation stays undoable in-session before its file is purged from disk
     /// (the privacy promise — a deleted chat mustn't linger). Matches the Undo banner's auto-dismiss.
     static let undoWindow: TimeInterval = 5
@@ -1101,6 +1103,7 @@ public final class ChatStore {
         let previousActive = activeID
         locallyRemovedConversationIDs.insert(id)
         conversations.removeAll { $0.id == id }
+        lastShortcutsConfigFingerprint.removeValue(forKey: id)
         if activeID == id {
             activeID = conversations.first?.id
             restoreConversationModelIfNeeded()
@@ -2771,8 +2774,10 @@ public final class ChatStore {
         streaming = state
         streamingMessageID = assistantID
 
-        let historyMessages = convo.messages.filter { $0.id != assistantID && $0.role != .system }
-        let historyTuples: [(role: String, content: String)] = historyMessages.map { ($0.role.rawValue, $0.answer) }
+        let completedTurns = convo.messages.filter { $0.id != assistantID && $0.role != .system }
+        let priorHistory = completedTurns.dropLast()
+        let isFirstTurn = priorHistory.isEmpty
+        let historyTuples: [(role: String, content: String)] = priorHistory.map { ($0.role.rawValue, $0.answer) }
         let system = composedSystemPrompt(query: currentPrompt)
 
         let store = self.store
@@ -2820,12 +2825,23 @@ public final class ChatStore {
                     toolDesc = ShortcutsModelPromptBuilder.formatToolDeclarations(registry.tools.map(\.schema))
                 }
 
+                // 计算当前会话的指令配置哈希指纹（涵盖 System Prompt、活跃 Skill、工具列表及开关）
+                var hasher = Hasher()
+                hasher.combine(system)
+                hasher.combine(toolDesc)
+                let currentFingerprint = hasher.finalize()
+                let lastFingerprint = self.lastShortcutsConfigFingerprint[conversationID]
+                // 判定是否需要全量发送：新 Chat 首轮，或者检测到中途变更了 Skill / 工具配置 / 系统提示词
+                let shouldSendFullContext = priorHistory.isEmpty || (lastFingerprint != currentFingerprint)
+
                 var currentMsg = ShortcutsModelPromptBuilder.buildMessage(
                     systemPrompt: system,
                     toolDescriptions: toolDesc,
                     history: historyTuples,
-                    currentPrompt: currentPrompt
+                    currentPrompt: currentPrompt,
+                    fullContext: shouldSendFullContext
                 )
+                self.lastShortcutsConfigFingerprint[conversationID] = currentFingerprint
 
                 var toolRuns: [ToolRun] = []
                 var iteration = 0
@@ -2866,7 +2882,7 @@ public final class ChatStore {
                             let run = ToolRun(name: toolCall.tool, arguments: argsSummary, result: toolResultText)
                             toolRuns.append(run)
 
-                            // 保留原始提问与上下文，将工具执行结果传递给快捷指令模型
+                            // 将工具执行结果作为当前轮的纯净反馈回传给快捷指令模型
                             currentMsg = ShortcutsModelPromptBuilder.buildMessage(
                                 systemPrompt: system,
                                 toolDescriptions: toolDesc,
@@ -2879,7 +2895,8 @@ public final class ChatStore {
                                 \(toolResultText)
 
                                 请根据上述工具执行结果，以自然语言直接回答用户最初的提问。
-                                """
+                                """,
+                                fullContext: false
                             )
                             continue
                         } else {
@@ -2894,7 +2911,8 @@ public final class ChatStore {
 
                                 【工具执行错误】
                                 未找到名为 '\(toolCall.tool)' 的工具。请仅使用【可用工具说明】中声明的工具，或直接以自然语言回答用户最初的提问。
-                                """
+                                """,
+                                fullContext: false
                             )
                             continue
                         }

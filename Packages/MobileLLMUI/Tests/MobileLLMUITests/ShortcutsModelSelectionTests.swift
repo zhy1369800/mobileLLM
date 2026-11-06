@@ -78,6 +78,34 @@ final class ShortcutsModelSelectionTests: XCTestCase {
         XCTAssertTrue(chat.isShortcutsActive)
         XCTAssertEqual(chat.streaming?.warmingNote, "正在调用快捷指令...")
     }
+
+    func testShortcutsMidConversationConfigChangeTriggersFullContext() async throws {
+        let settings = AppSettings(defaults: defaults)
+        let service = ShortcutsService(name: "豆包", shortcutName: "问豆包", isEnabled: true)
+        settings.upsertShortcutsService(service)
+        settings.setShortcutsServiceEnabled(id: service.id, enabled: true)
+
+        let store = ConversationStore(root: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString))
+        let chat = ChatStore(engine: MockEngine(), store: store, settings: settings)
+
+        chat.newConversation()
+        chat.draft = "第一句话"
+        chat.send()
+
+        guard let convo = chat.activeConversation, convo.messages.count >= 2 else {
+            XCTFail("Expected messages")
+            return
+        }
+
+        chat.draft = "第二句话"
+        chat.send()
+
+        settings.toolsEnabled = true
+        chat.draft = "第三句话使用工具"
+        chat.send()
+
+        XCTAssertTrue(chat.isShortcutsActive)
+    }
 }
 
 private final class MockEngine: LLMEngine, @unchecked Sendable {
