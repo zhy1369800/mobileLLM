@@ -143,6 +143,30 @@ final class ShortcutAutomationToolTests: XCTestCase {
         let out = await tool.execute(argumentsJSON: #"{"action":"list"}"#)
         XCTAssertTrue(out.contains("Shortcut automation execution failed: Workflow interrupted"), out)
     }
+
+    func testExecuteTaskWithDispatchedCallbackProtocolForwarding() async throws {
+        let executor = FakeShortcutAutomationExecutor()
+        // Test 5-parameter call forwards properly without onTaskDispatched
+        let res5 = try await executor.executeTask(
+            action: "list",
+            shortcut: nil,
+            params: nil,
+            taskId: "test-5",
+            timeoutSeconds: 10
+        )
+        XCTAssertEqual(res5, #"{"success":true,"status":"completed","result":"Done"}"#)
+
+        // Test 6-parameter call forwards properly to 5-parameter implementation on legacy executors
+        let res6 = try await executor.executeTask(
+            action: "exec",
+            shortcut: "test_shortcut",
+            params: "{}",
+            taskId: "test-6",
+            timeoutSeconds: 15,
+            onTaskDispatched: { }
+        )
+        XCTAssertEqual(res6, #"{"success":true,"status":"completed","result":"Done"}"#)
+    }
 }
 
 private extension FakeShortcutAutomationExecutor {

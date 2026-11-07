@@ -11,13 +11,15 @@ public protocol ShortcutAutomationExecuting: Sendable {
     ///   - params: Parameters to pass to the shortcut (plain string or serialized JSON string).
     ///   - taskId: Optional specific task UUID. If omitted/nil, an ID is generated.
     ///   - timeoutSeconds: Maximum timeout (1–25 seconds).
+    ///   - onTaskDispatched: Optional closure invoked immediately after the automation trigger notification is scheduled.
     /// - Returns: A JSON string result representing the outcome.
     func executeTask(
         action: String,
         shortcut: String?,
         params: String?,
         taskId: String?,
-        timeoutSeconds: Int
+        timeoutSeconds: Int,
+        onTaskDispatched: (@Sendable () -> Void)?
     ) async throws -> String
 
     /// Current permission state for notifications/automations.
@@ -30,6 +32,41 @@ public protocol ShortcutAutomationExecuting: Sendable {
 public extension ShortcutAutomationExecuting {
     func permissionState() async -> ToolPermission { .granted }
     func requestPermission() async -> ToolPermission { .granted }
+
+    func executeTask(
+        action: String,
+        shortcut: String?,
+        params: String?,
+        taskId: String?,
+        timeoutSeconds: Int
+    ) async throws -> String {
+        try await executeTask(
+            action: action,
+            shortcut: shortcut,
+            params: params,
+            taskId: taskId,
+            timeoutSeconds: timeoutSeconds,
+            onTaskDispatched: nil
+        )
+    }
+
+    func executeTask(
+        action: String,
+        shortcut: String?,
+        params: String?,
+        taskId: String?,
+        timeoutSeconds: Int,
+        onTaskDispatched: (@Sendable () -> Void)?
+    ) async throws -> String {
+        _ = onTaskDispatched
+        return try await executeTask(
+            action: action,
+            shortcut: shortcut,
+            params: params,
+            taskId: taskId,
+            timeoutSeconds: timeoutSeconds
+        )
+    }
 }
 
 /// Errors raised during shortcut automation execution.

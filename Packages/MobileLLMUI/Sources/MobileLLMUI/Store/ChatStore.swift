@@ -165,6 +165,8 @@ public final class ChatStore {
     public var onGenerationFinished: (@MainActor (String) -> Void)?
     /// Observer notified when generation starts.
     public var onGenerationStarted: (@MainActor () -> Void)?
+    /// Observer notified when a shortcut automation task notification has been dispatched.
+    public var onShortcutsTaskDispatched: (@MainActor () -> Void)?
     private var genTask: Task<Void, Never>?
     @ObservationIgnored private var pendingStreamReasoning: String = ""
     @ObservationIgnored private var pendingStreamAnswer: String = ""
@@ -2874,7 +2876,15 @@ public final class ChatStore {
                         shortcut: shortcutName,
                         params: paramsString,
                         taskId: taskId,
-                        timeoutSeconds: 25
+                        timeoutSeconds: 25,
+                        onTaskDispatched: { [weak self] in
+                            Task { @MainActor in
+                                // 仅在首轮任务派发时通知更新“思考中”，后续工具回传迭代不重复触发
+                                if iteration == 1 {
+                                    self?.onShortcutsTaskDispatched?()
+                                }
+                            }
+                        }
                     )
 
                     let answerContent = ShortcutsModelPromptBuilder.extractResultContent(from: rawResult)

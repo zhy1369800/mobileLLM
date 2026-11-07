@@ -106,6 +106,43 @@ final class ShortcutsModelSelectionTests: XCTestCase {
 
         XCTAssertTrue(chat.isShortcutsActive)
     }
+
+    func testShortcutsTaskDispatchedCallbackInvoked() async throws {
+        let settings = AppSettings(defaults: defaults)
+        let service = ShortcutsService(name: "豆包", shortcutName: "问豆包", isEnabled: true)
+        settings.upsertShortcutsService(service)
+        settings.setShortcutsServiceEnabled(id: service.id, enabled: true)
+
+        let store = ConversationStore(root: URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString))
+        let fakeExecutor = TestDispatchExecutor()
+        let chat = ChatStore(engine: MockEngine(), store: store, settings: settings, shortcutExecutor: fakeExecutor)
+
+        var dispatchedCalled = false
+        chat.onShortcutsTaskDispatched = {
+            dispatchedCalled = true
+        }
+
+        chat.newConversation()
+        chat.draft = "你好"
+        chat.send()
+
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(dispatchedCalled)
+    }
+}
+
+private final class TestDispatchExecutor: ShortcutAutomationExecuting, @unchecked Sendable {
+    func executeTask(
+        action: String,
+        shortcut: String?,
+        params: String?,
+        taskId: String?,
+        timeoutSeconds: Int,
+        onTaskDispatched: (@Sendable () -> Void)?
+    ) async throws -> String {
+        onTaskDispatched?()
+        return #"{"success":true,"status":"completed","result":"ok"}"#
+    }
 }
 
 private final class MockEngine: LLMEngine, @unchecked Sendable {

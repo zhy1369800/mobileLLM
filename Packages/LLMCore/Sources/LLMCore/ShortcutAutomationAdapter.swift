@@ -53,7 +53,8 @@ public final class ShortcutAutomationService: ShortcutAutomationExecuting, @unch
         shortcut: String?,
         params: String?,
         taskId: String?,
-        timeoutSeconds: Int
+        timeoutSeconds: Int,
+        onTaskDispatched: (@Sendable () -> Void)? = nil
     ) async throws -> String {
         // Clean up any stale task files in background
         Task { [weak self] in
@@ -114,6 +115,9 @@ public final class ShortcutAutomationService: ShortcutAutomationExecuting, @unch
         } catch {
             // Even if notification scheduling fails, don't immediately fail; the file is created
         }
+
+        // Notify that the Automation Task notification has been dispatched into the notification center
+        onTaskDispatched?()
 
         // Wait and poll for completion
         let result = try await waitForTaskCompletion(

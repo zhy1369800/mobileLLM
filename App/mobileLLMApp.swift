@@ -389,7 +389,10 @@ final class AppNotificationDelegate: NSObject, @preconcurrency UNUserNotificatio
         let taskBox = QuickReplyTaskBox(completion: completionHandler)
 
         if container.settings.quickNotificationEnabled {
-            QuickNotificationCoordinator.postThinkingNotification()
+            // 快捷指令模式下先派发 Task 触发通知，再弹出思考中横幅，保持“先Task弹窗再思考中弹窗”的顺畅时序
+            if !container.chat.isShortcutsActive {
+                QuickNotificationCoordinator.postThinkingNotification()
+            }
         }
         if container.settings.pipWindowEnabled {
             PiPCoordinator.shared.setEnabled(true)
@@ -771,6 +774,17 @@ struct MobileLLMApp: App {
             }
             if container.settings.pipWindowEnabled {
                 PiPCoordinator.shared.update(status: .responding, text: fullText)
+            }
+        }
+
+        container.chat.onShortcutsTaskDispatched = { [weak container] in
+            guard let container else { return }
+            // 处于后台且启用了快捷通知时，在 Task 弹窗派发入队后稍作延时发出思考中通知，保证置顶展示
+            if container.lifecycle.isInBackground, container.settings.quickNotificationEnabled {
+                Task {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                    QuickNotificationCoordinator.postThinkingNotification()
+                }
             }
         }
 
