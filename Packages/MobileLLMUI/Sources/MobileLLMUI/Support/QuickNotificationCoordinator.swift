@@ -33,7 +33,7 @@ public enum QuickNotificationCoordinator {
         let clipboardAction = UNNotificationAction(
             identifier: explainClipboardActionIdentifier,
             title: "解释粘贴",
-            options: []
+            options: [.foreground]
         )
         let standbyCategory = UNNotificationCategory(
             identifier: standbyCategoryIdentifier,
@@ -130,7 +130,8 @@ public enum QuickNotificationCoordinator {
         postNotification(
             title: "mobileLLM 回复",
             body: body,
-            categoryIdentifier: responseCategoryIdentifier
+            categoryIdentifier: responseCategoryIdentifier,
+            userInfo: ["full_text": clean]
         )
     }
 
@@ -139,7 +140,8 @@ public enum QuickNotificationCoordinator {
         postNotification(
             title: "mobileLLM 已复制到剪贴板 ✓",
             body: text,
-            categoryIdentifier: responseCategoryIdentifier
+            categoryIdentifier: responseCategoryIdentifier,
+            userInfo: ["full_text": text]
         )
     }
 
@@ -153,7 +155,8 @@ public enum QuickNotificationCoordinator {
         title: String,
         body: String,
         categoryIdentifier: String = standbyCategoryIdentifier,
-        reAlert: Bool = true
+        reAlert: Bool = true,
+        userInfo: [AnyHashable: Any] = [:]
     ) {
         #if canImport(UserNotifications)
         let content = UNMutableNotificationContent()
@@ -161,6 +164,7 @@ public enum QuickNotificationCoordinator {
         content.body = body
         content.categoryIdentifier = categoryIdentifier
         content.sound = nil
+        content.userInfo = userInfo
         if #available(iOS 15.0, *) {
             content.interruptionLevel = .timeSensitive
         }

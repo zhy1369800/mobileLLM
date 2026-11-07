@@ -356,10 +356,22 @@ final class AppNotificationDelegate: NSObject, @preconcurrency UNUserNotificatio
         let textInput = (response as? UNTextInputNotificationResponse)?.userText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if isCopyAction {
-            let textToCopy = response.notification.request.content.body
+            let textToCopy = (response.notification.request.content.userInfo["full_text"] as? String)
+                ?? response.notification.request.content.body
             if !textToCopy.isEmpty {
+                let bgTask = UIApplication.shared.beginBackgroundTask(withName: "mobilellm.copy_reply") {}
+                UIPasteboard.general.setValue(textToCopy, forPasteboardType: "public.utf8-plain-text")
                 UIPasteboard.general.string = textToCopy
                 QuickNotificationCoordinator.postCopiedNotification(text: textToCopy)
+                Task { @MainActor in
+                    // 缓冲 150ms 确保跨进程 XPC 写入系统 pasteboardd 完成，避免进程被 iOS 瞬间冻结挂起
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    if bgTask != .invalid {
+                        UIApplication.shared.endBackgroundTask(bgTask)
+                    }
+                    completionHandler()
+                }
+                return
             }
             completionHandler()
             return
@@ -367,6 +379,7 @@ final class AppNotificationDelegate: NSObject, @preconcurrency UNUserNotificatio
 
         let promptToSend: String?
         if isClipboardAction {
+            container.navigationRequest = .chat
             if let clip = UIPasteboard.general.string?.trimmingCharacters(in: .whitespacesAndNewlines), !clip.isEmpty {
                 promptToSend = "请简要解析并总结以下内容：\n\n\(clip)"
             } else {
