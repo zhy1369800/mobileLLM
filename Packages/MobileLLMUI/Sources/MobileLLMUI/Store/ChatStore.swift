@@ -1503,14 +1503,11 @@ public final class ChatStore {
             persist(conversations[ci])
         }
         let history = conversations[ci].messages.filter { !turnIDs.contains($0.id) }
-        let toolSchemaTokens = settings.toolsEnabled ? (agentToolSchemaTokens?() ?? 0) : 0
-        let fixedTokens = ContextPolicy.fixedOverheadTokens(
-            // Composed prompt (base + active skill + memory), exactly what the run will carry.
-            systemPromptTokens: ContextCompactor.tokens(in: composedSystemPrompt(query: currentText), role: .system),
-            currentUserTokens: ContextCompactor.tokens(in: currentText),
-            toolSchemaTokens: toolSchemaTokens,
-            contextLength: cap,
-            online: isOnlineActive
+        // Composed prompt (base + active skill + memory), exactly what the run will carry.
+        let fixedTokens = fixedPromptOverhead(
+            systemPrompt: composedSystemPrompt(query: currentText),
+            currentText: currentText,
+            cap: cap
         )
         return ContextCompactor.plan(
             history: history,
@@ -1518,6 +1515,18 @@ public final class ChatStore {
             summary: conversations[ci].compactionSummary,
             fixedTokens: fixedTokens,
             contextLength: cap
+        )
+    }
+
+    /// Everything a prompt carries besides conversation history — system prompt, outgoing text, output
+    /// reserve, tool schemas. Shared by the compaction trigger and the context meter so they can't drift.
+    private func fixedPromptOverhead(systemPrompt: String, currentText: String, cap: Int) -> Int {
+        ContextPolicy.fixedOverheadTokens(
+            systemPromptTokens: ContextCompactor.tokens(in: systemPrompt, role: .system),
+            currentUserTokens: ContextCompactor.tokens(in: currentText),
+            toolSchemaTokens: settings.toolsEnabled ? (agentToolSchemaTokens?() ?? 0) : 0,
+            contextLength: cap,
+            online: isOnlineActive
         )
     }
 
@@ -2663,15 +2672,20 @@ public final class ChatStore {
             messagesToCount = convo.messages
         }
 
-        // Measured with `ContextCompactor.tokens` — the runtime's own estimator — so the meter, the compaction
-        // trigger and the runtime's truncation all agree on what "full" means. The active
+        // Measured with `ContextCompactor.tokens` — the runtime's own estimator — and the same fixed overhead
+        // as the compaction trigger (system prompt, draft, output reserve, tool schemas), so the meter,
+        // compaction and the runtime's truncation all agree on what "full" means. The active
         // skill's instructions AND the memory block ride the composed system prompt, so they're counted
         // here too. Memory is searched with the query the NEXT send would use — draft included — because a
         // meter that warns you after the injection pushed you over the window is no warning at all. (So the
         // count can shift slightly as you type, when the draft brings different facts into range; the
         // block's cap bounds that to a few tokens.)
         let system = composedSystemPrompt(query: Self.memoryQuery(draft: draft, history: messagesToCount))
-        var used = ContextCompactor.tokens(in: system.trimmingCharacters(in: .whitespacesAndNewlines), role: .system)
+        var used = fixedPromptOverhead(
+            systemPrompt: system.trimmingCharacters(in: .whitespacesAndNewlines),
+            currentText: draft,
+            cap: cap
+        )
         used += summaryTokens
         for message in messagesToCount where !message.answer.isEmpty { used += ContextCompactor.tokens(of: message) }
         used += streaming.map {

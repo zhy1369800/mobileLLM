@@ -675,24 +675,43 @@ struct MobileLLMApp: App {
                         .descriptors(for: container.settings.mcpServers)
                         .map(\.id.logicalID)
                 }
+                // The context meter asks for this on every redraw, so remember the last answer per tool setup.
+                let toolSchemaCache = ToolSchemaTokenCache()
                 container.chat.agentToolSchemaTokens = { [weak container] in
-                    guard let container,
-                          let catalog = try? AppToolCatalog.catalog(
-                              enabledToolNames: container.settings.builtInToolConfig.enabled.map(\.rawValue),
-                              memoryAvailable: container.chat.memoryBook != nil,
-                              eventSeamAvailable: container.toolEventStore != nil,
-                              locationSeamAvailable: container.toolLocationProvider != nil,
-                              shortcutSeamAvailable: container.toolShortcutExecutor != nil,
-                              mcpDescriptors: container.mcpDiscovery.descriptors(for: container.settings.mcpServers)
-                          )
-                    else { return 0 }
+                    guard let container else { return 0 }
+                    let enabledNames = container.settings.builtInToolConfig.enabled.map(\.rawValue).sorted()
+                    let mcpDescriptors = container.mcpDiscovery.descriptors(for: container.settings.mcpServers)
+                    let online = container.chat.isOnlineActive
+                    let seams = [
+                        container.chat.memoryBook != nil,
+                        container.toolEventStore != nil,
+                        container.toolLocationProvider != nil,
+                        container.toolShortcutExecutor != nil,
+                    ]
+                    let key = [
+                        enabledNames.joined(separator: ","),
+                        mcpDescriptors.map { $0.id.description }.joined(separator: ","),
+                        seams.map { $0 ? "1" : "0" }.joined(),
+                        online ? "online" : "local",
+                    ].joined(separator: "|")
+                    if let cached = toolSchemaCache.value(for: key) { return cached }
+                    guard let catalog = try? AppToolCatalog.catalog(
+                        enabledToolNames: enabledNames,
+                        memoryAvailable: seams[0],
+                        eventSeamAvailable: seams[1],
+                        locationSeamAvailable: seams[2],
+                        shortcutSeamAvailable: seams[3],
+                        mcpDescriptors: mcpDescriptors
+                    ) else { return 0 }
                     // Upper bound: the run advertises at most N tools, so charge the N largest schemas.
                     let estimator = DeterministicUTF8TokenEstimator()
-                    return catalog.descriptors
+                    let tokens = catalog.descriptors
                         .map { Int(estimator.estimateToolSchema($0)) }
                         .sorted(by: >)
-                        .prefix(ContextPolicy.maximumAdvertisedTools(online: container.chat.isOnlineActive))
+                        .prefix(ContextPolicy.maximumAdvertisedTools(online: online))
                         .reduce(0, +)
+                    toolSchemaCache.store(tokens, for: key)
+                    return tokens
                 }
                 container.agentDiagnosticSnapshot = { @MainActor in
                     await assembly.diagnosticLogger.snapshot()
@@ -1129,3 +1148,17 @@ struct AppCommands: Commands {
     }
 }
 #endif
+
+/// Last tool-schema token estimate, keyed by the tool setup that produced it (see `agentToolSchemaTokens`).
+@MainActor
+private final class ToolSchemaTokenCache {
+    private var key: String?
+    private var cached = 0
+
+    func value(for key: String) -> Int? { self.key == key ? cached : nil }
+
+    func store(_ value: Int, for key: String) {
+        self.key = key
+        cached = value
+    }
+}
