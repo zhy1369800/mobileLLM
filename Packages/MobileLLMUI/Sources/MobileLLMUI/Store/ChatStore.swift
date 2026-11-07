@@ -2658,22 +2658,25 @@ public final class ChatStore {
            let cutoff = convo.compactionCutoffMessageID,
            let active = ContextCompactor.activeMessages(convo.messages, cutoffID: cutoff) {
             messagesToCount = active
-            summaryTokens = TokenEstimate.tokens(in: ContextCompactor.summaryBlock(summary))
+            summaryTokens = ContextCompactor.tokens(in: ContextCompactor.summaryBlock(summary), role: .system)
         } else {
             messagesToCount = convo.messages
         }
 
-        // CJK-aware throughout (`TokenEstimate`) so a Chinese thread's meter isn't ~3× under. The active
+        // Measured with `ContextCompactor.tokens` — the runtime's own estimator — so the meter, the compaction
+        // trigger and the runtime's truncation all agree on what "full" means. The active
         // skill's instructions AND the memory block ride the composed system prompt, so they're counted
         // here too. Memory is searched with the query the NEXT send would use — draft included — because a
         // meter that warns you after the injection pushed you over the window is no warning at all. (So the
         // count can shift slightly as you type, when the draft brings different facts into range; the
         // block's cap bounds that to a few tokens.)
         let system = composedSystemPrompt(query: Self.memoryQuery(draft: draft, history: messagesToCount))
-        var used = system.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0 : TokenEstimate.tokens(in: system)
+        var used = ContextCompactor.tokens(in: system.trimmingCharacters(in: .whitespacesAndNewlines), role: .system)
         used += summaryTokens
-        for message in messagesToCount where !message.answer.isEmpty { used += message.approximateTokens }
-        used += streaming.map { TokenEstimate.tokens(in: $0.answer) + TokenEstimate.tokens(in: $0.reasoning) } ?? 0
+        for message in messagesToCount where !message.answer.isEmpty { used += ContextCompactor.tokens(of: message) }
+        used += streaming.map {
+            ContextCompactor.tokens(in: $0.answer, role: .assistant) + ContextCompactor.tokens(in: $0.reasoning, role: .assistant)
+        } ?? 0
         return (used, cap)
     }
 
