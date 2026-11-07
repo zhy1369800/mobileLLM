@@ -1504,7 +1504,8 @@ public final class ChatStore {
             ? settings.builtInToolConfig.enabled.count + (agentMCPToolLogicalIDs?().count ?? 0)
             : 0
         let fixedTokens = ContextPolicy.fixedOverheadTokens(
-            systemPromptTokens: TokenEstimate.tokens(in: settings.systemPrompt),
+            // Composed prompt (base + active skill + memory), exactly what the run will carry.
+            systemPromptTokens: TokenEstimate.tokens(in: composedSystemPrompt(query: currentText)),
             currentUserTokens: TokenEstimate.tokens(in: currentText),
             activeToolsCount: activeToolsCount,
             contextLength: cap,
