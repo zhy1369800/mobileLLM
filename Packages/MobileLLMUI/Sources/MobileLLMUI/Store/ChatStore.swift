@@ -628,6 +628,15 @@ public final class ChatStore {
         return params
     }
 
+    /// The effective context cap (in tokens) at which the engine actually runs for the active conversation,
+    /// taking into account online ceilings, local model native limits, and per-conversation overrides.
+    public var effectiveContextTokenCap: Int {
+        if isOnlineActive {
+            return min(onlineContextRequest, OnlineModelIdentity.maximumContextTokens)
+        }
+        return effectiveSampling(for: currentLocalModel).contextTokenCap
+    }
+
     /// Set one per-conversation sampling field; nil restores "follow the global setting".
     public func setConversationTemperature(_ value: Double?) {
         mutateConversationSampling { $0.temperature = value }
@@ -1480,14 +1489,7 @@ public final class ChatStore {
             return nil
         }
 
-        let cap: Int
-        if let model = activeModel?.model {
-            cap = effectiveSampling(for: model).contextTokenCap
-        } else if isOnlineActive {
-            cap = min(onlineContextRequest, OnlineModelIdentity.maximumContextTokens)
-        } else {
-            cap = settings.contextLength
-        }
+        let cap = effectiveContextTokenCap
 
         // Edit / regenerate replace message ids. A cutoff that no longer exists means the summary describes
         // history that is gone, so drop it before planning.
@@ -1498,24 +1500,16 @@ public final class ChatStore {
             persist(conversations[ci])
         }
         let history = conversations[ci].messages.filter { !turnIDs.contains($0.id) }
-        let reservedOutput = ContextPolicy.reservedOutputTokens(for: cap)
-        let toolTokens: Int
-        if !settings.toolsEnabled {
-            toolTokens = 0
-        } else {
-            let activeToolsCount = settings.builtInToolConfig.enabled.count + (agentMCPToolLogicalIDs?().count ?? 0)
-            let estimatedToolTokens = activeToolsCount * 200
-            let maxToolBudget = ContextPolicy.maximumToolSchemaBudget(
-                for: cap,
-                online: isOnlineActive,
-                toolsEnabled: true
-            )
-            toolTokens = min(maxToolBudget, estimatedToolTokens)
-        }
-        let fixedTokens = TokenEstimate.tokens(in: settings.systemPrompt)
-            + TokenEstimate.tokens(in: currentText)
-            + reservedOutput
-            + toolTokens
+        let activeToolsCount = settings.toolsEnabled
+            ? settings.builtInToolConfig.enabled.count + (agentMCPToolLogicalIDs?().count ?? 0)
+            : 0
+        let fixedTokens = ContextPolicy.fixedOverheadTokens(
+            systemPromptTokens: TokenEstimate.tokens(in: settings.systemPrompt),
+            currentUserTokens: TokenEstimate.tokens(in: currentText),
+            activeToolsCount: activeToolsCount,
+            contextLength: cap,
+            online: isOnlineActive
+        )
         return ContextCompactor.plan(
             history: history,
             cutoffID: conversations[ci].compactionCutoffMessageID,
@@ -2653,16 +2647,7 @@ public final class ChatStore {
     /// Tokens currently used by the active thread's context vs the cap (composer meter; DESIGN §4).
     public func contextUsage() -> (used: Int, cap: Int) {
         // The meter must show the cap the engine actually runs at, not the requested one.
-        let cap: Int
-        if isOnlineActive {
-            // Online providers are not bounded by device RAM: the setting is the cap (up to the service
-            // window) instead of a local checkpoint's native context.
-            cap = min(onlineContextRequest, OnlineModelIdentity.maximumContextTokens)
-        } else if let model = activeModel?.model {
-            cap = ContextPolicy.effective(requested: localContextRequest, model: model)
-        } else {
-            cap = localContextRequest
-        }
+        let cap = effectiveContextTokenCap
         guard let convo = activeConversation else { return (0, cap) }
         let messagesToCount: [Message]
         var summaryTokens = 0

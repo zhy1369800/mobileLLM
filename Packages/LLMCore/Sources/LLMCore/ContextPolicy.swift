@@ -88,4 +88,36 @@ public enum ContextPolicy {
             return min(4_096, availableInput >= 4_096 ? 4_096 : availableInput / 2)
         }
     }
+
+    /// Estimated schema tokens consumed by active tools, capped by the maximum schema budget.
+    /// Centralizes tool overhead estimation (approx. 200 tokens per tool schema).
+    public static func estimatedToolTokens(
+        activeToolsCount: Int,
+        contextLength: Int,
+        online: Bool
+    ) -> Int {
+        guard activeToolsCount > 0 else { return 0 }
+        let estimatedPerTool = 200
+        let total = activeToolsCount * estimatedPerTool
+        let ceiling = maximumToolSchemaBudget(for: contextLength, online: online, toolsEnabled: true)
+        return min(ceiling, total)
+    }
+
+    /// Fixed overhead tokens consumed before conversation history:
+    /// system prompt, current user input, reserved generation output, and active tools.
+    public static func fixedOverheadTokens(
+        systemPromptTokens: Int,
+        currentUserTokens: Int,
+        activeToolsCount: Int,
+        contextLength: Int,
+        online: Bool
+    ) -> Int {
+        let reserved = reservedOutputTokens(for: contextLength)
+        let tools = estimatedToolTokens(
+            activeToolsCount: activeToolsCount,
+            contextLength: contextLength,
+            online: online
+        )
+        return systemPromptTokens + currentUserTokens + reserved + tools
+    }
 }

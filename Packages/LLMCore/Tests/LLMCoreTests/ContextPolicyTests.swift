@@ -66,4 +66,28 @@ final class ContextPolicyTests: XCTestCase {
         XCTAssertFalse(ContextPolicy.fits(model: m, variant: m.variants[0], device: phone, context: 262_144),
                        "…but 256K of KV does not, and that's the question the ladder asks")
     }
+
+    func testEstimatedToolTokensAndFixedOverheadCalculations() {
+        // Zero tools
+        XCTAssertEqual(ContextPolicy.estimatedToolTokens(activeToolsCount: 0, contextLength: 8192, online: false), 0)
+
+        // 3 tools @ 200 tokens each = 600 tokens
+        XCTAssertEqual(ContextPolicy.estimatedToolTokens(activeToolsCount: 3, contextLength: 8192, online: false), 600)
+
+        // Tool tokens capped by schema ceiling
+        // Tight 2048 context -> reserved 1024 -> availableInput 1024 -> schema ceiling = 1024 / 2 = 512
+        XCTAssertEqual(ContextPolicy.maximumToolSchemaBudget(for: 2048, online: false, toolsEnabled: true), 512)
+        XCTAssertEqual(ContextPolicy.estimatedToolTokens(activeToolsCount: 10, contextLength: 2048, online: false), 512)
+
+        // Fixed overhead sums system, user, reserved output, and estimated tools
+        let overhead = ContextPolicy.fixedOverheadTokens(
+            systemPromptTokens: 300,
+            currentUserTokens: 50,
+            activeToolsCount: 3,
+            contextLength: 8192,
+            online: false
+        )
+        // 300 (system) + 50 (user) + 1024 (reserved output) + 600 (tools) = 1974
+        XCTAssertEqual(overhead, 1974)
+    }
 }
