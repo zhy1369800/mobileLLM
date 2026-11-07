@@ -143,11 +143,17 @@ public enum QuickNotificationCoordinator {
         )
     }
 
+    /// Active notification dispatch task to serialize updates and cancel stale intermediate posts.
+    private static var activePostTask: Task<Void, Never>?
+
     /// Posts or in-place updates the quick chat banner notification.
+    /// When `reAlert` is true, explicitly removes existing delivered notifications and waits 100ms
+    /// so that iOS SpringBoard never suppresses new banners under Persistent Banner settings.
     public static func postNotification(
         title: String,
         body: String,
-        categoryIdentifier: String = standbyCategoryIdentifier
+        categoryIdentifier: String = standbyCategoryIdentifier,
+        reAlert: Bool = true
     ) {
         #if canImport(UserNotifications)
         let content = UNMutableNotificationContent()
@@ -165,14 +171,25 @@ public enum QuickNotificationCoordinator {
             trigger: nil // Deliver immediately
         )
 
-        Task {
-            try? await UNUserNotificationCenter.current().add(request)
+        activePostTask?.cancel()
+        activePostTask = Task {
+            let center = UNUserNotificationCenter.current()
+            if reAlert {
+                // 显式注销当前展示在屏幕上的悬停通知，消除 iOS 在“持续（Persistent）”样式下抑制同名新横幅弹出的问题
+                center.removeDeliveredNotifications(withIdentifiers: [notificationIdentifier])
+                center.removePendingNotificationRequests(withIdentifiers: [notificationIdentifier])
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard !Task.isCancelled else { return }
+            try? await center.add(request)
         }
         #endif
     }
 
     /// Dismisses the quick chat notification banner.
     public static func dismissNotification() {
+        activePostTask?.cancel()
+        activePostTask = nil
         #if canImport(UserNotifications)
         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [notificationIdentifier])
         UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: [notificationIdentifier])

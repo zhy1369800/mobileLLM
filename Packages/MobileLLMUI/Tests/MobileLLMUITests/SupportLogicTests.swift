@@ -104,4 +104,22 @@ final class SupportLogicTests: XCTestCase {
         let nonJSON = "Deleted reminder 123"
         XCTAssertEqual(ToolFormatting.prettyJSON(orRaw: nonJSON), nonJSON)
     }
+
+    // MARK: QuickNotificationCoordinator Contracts
+
+    func testQuickNotificationCoordinatorIdentifiers() {
+        XCTAssertEqual(QuickNotificationCoordinator.standbyCategoryIdentifier, "mobilellm.quick_chat.category.standby")
+        XCTAssertEqual(QuickNotificationCoordinator.responseCategoryIdentifier, "mobilellm.quick_chat.category.response")
+        XCTAssertEqual(QuickNotificationCoordinator.categoryIdentifier, QuickNotificationCoordinator.standbyCategoryIdentifier)
+        XCTAssertEqual(QuickNotificationCoordinator.notificationIdentifier, "mobilellm.quick_chat.banner")
+    }
+
+    func testQuickNotificationCoordinatorPostMethodsDoNotCrash() {
+        QuickNotificationCoordinator.postStandbyNotification()
+        QuickNotificationCoordinator.postThinkingNotification()
+        QuickNotificationCoordinator.postResponseNotification(text: "测试回答")
+        QuickNotificationCoordinator.postCopiedNotification(text: "已复制内容")
+        QuickNotificationCoordinator.postEmptyClipboardNotification()
+        QuickNotificationCoordinator.dismissNotification()
+    }
 }
