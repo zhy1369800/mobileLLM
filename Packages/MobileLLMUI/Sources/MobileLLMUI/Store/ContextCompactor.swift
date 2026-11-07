@@ -22,8 +22,6 @@ public enum ContextCompactor {
     public static let summaryRatio = 0.12
     /// Conversations shorter than this are never compacted.
     public static let minimumHistoryMessages = 4
-    /// Output reserve charged to every turn (matches the runtime's `reservedOutputTokens`).
-    public static let reservedOutputTokens = 1_024
 
     public static let summarizerSystemPrompt =
         "你是一个专业的对话总结助手。请将以下对话内容浓缩为简短客观的事实摘要，提炼讨论的核心主题、关键决策及重要背景，保持精炼扼要。\n"

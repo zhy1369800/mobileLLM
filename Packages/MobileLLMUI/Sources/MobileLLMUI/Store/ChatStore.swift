@@ -634,7 +634,7 @@ public final class ChatStore {
         if isOnlineActive {
             return min(onlineContextRequest, OnlineModelIdentity.maximumContextTokens)
         }
-        return effectiveSampling(for: currentLocalModel).contextTokenCap
+        return effectiveSampling(for: activeModel?.model).contextTokenCap
     }
 
     /// Set one per-conversation sampling field; nil restores "follow the global setting".
