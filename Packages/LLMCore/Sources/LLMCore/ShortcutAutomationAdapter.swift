@@ -116,6 +116,13 @@ public final class ShortcutAutomationService: ShortcutAutomationExecuting, @unch
             // Even if notification scheduling fails, don't immediately fail; the file is created
         }
 
+        // 扳机通知仅用于唤起系统快捷指令自动化（0.5s内即可被系统捕获），1.5s后主动从屏幕与通知栏撤除，避免长期逗留阻碍视线
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: ["task_" + effectiveTaskId])
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: ["task_" + effectiveTaskId])
+        }
+
         // Notify that the Automation Task notification has been dispatched into the notification center
         onTaskDispatched?()
 
