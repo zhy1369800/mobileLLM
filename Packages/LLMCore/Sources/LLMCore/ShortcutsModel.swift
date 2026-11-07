@@ -45,6 +45,16 @@ public enum ShortcutsModelPromptBuilder {
         }.joined(separator: "\n\n")
     }
 
+    public static let toolCallingSpecification = """
+    【工具调用格式规范】
+    如果你需要调用工具，请务必严格输出以下格式的 Markdown 代码块，不要附带多余文字：
+    ```tool_call
+    {"tool": "工具名", "arguments": {"参数名": "参数值"}}
+    ```
+    当你获得【工具执行结果】后，请结合结果以自然语言给出最终回复，不要再次输出相同的工具调用。
+    ##重要重要!!! 你不需要亲自执行操作，只用识别意图并严格返回上述工具调用格式即可##
+    """
+
     /// Formats system prompt, tools, history, and current user prompt into a cohesive `msg` string.
     public static func buildMessage(
         systemPrompt: String = "",
@@ -70,33 +80,30 @@ public enum ShortcutsModelPromptBuilder {
         fullContext: Bool = true
     ) -> String {
         let trimmedCurrent = currentPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard fullContext else {
-            return trimmedCurrent
-        }
-        var sections: [String] = []
-
-        var combinedSystem = systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedTools = toolDescriptions.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedTools.isEmpty {
-            let toolInstructions = """
+        let isToolResultFeedback = trimmedCurrent.contains("【工具执行结果】")
+
+        // 仅在开启工具且不是回传工具执行结果时，在提问下方追加【可用工具说明】与【工具调用格式规范】（Recency Bias 最强注意力）
+        let promptWithConstraint: String
+        if !trimmedTools.isEmpty && !isToolResultFeedback {
+            let toolsBlock = """
             【可用工具说明】
             你可以调用以下工具来获取信息或完成操作：
             \(trimmedTools)
 
-            【工具调用格式规范】
-            如果你需要调用工具，请务必严格输出以下格式的 Markdown 代码块，不要附带多余文字：
-            ```tool_call
-            {"tool": "工具名", "arguments": {"参数名": "参数值"}}
-            ```
-            当你获得【工具执行结果】后，请结合结果以自然语言给出最终回复，不要再次输出相同的工具调用。
+            \(toolCallingSpecification)
             """
-            if combinedSystem.isEmpty {
-                combinedSystem = toolInstructions
-            } else {
-                combinedSystem += "\n\n" + toolInstructions
-            }
+            promptWithConstraint = "\(trimmedCurrent)\n\n\(toolsBlock)"
+        } else {
+            promptWithConstraint = trimmedCurrent
         }
 
+        guard fullContext else {
+            return promptWithConstraint
+        }
+        var sections: [String] = []
+
+        let combinedSystem = systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if !combinedSystem.isEmpty {
             sections.append("【系统提示】\n\(combinedSystem)")
         }
@@ -111,11 +118,6 @@ public enum ShortcutsModelPromptBuilder {
             }
             sections.append(historyText)
         }
-
-        let toolConstraint = !trimmedTools.isEmpty
-            ? "\n\n##重要重要!!! 你不需要执行工具，只用决策返回工具格式就好##"
-            : ""
-        let promptWithConstraint = trimmedCurrent + toolConstraint
 
         if sections.isEmpty {
             return promptWithConstraint

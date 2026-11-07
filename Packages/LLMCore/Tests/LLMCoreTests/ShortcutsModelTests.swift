@@ -171,19 +171,60 @@ final class ShortcutsModelTests: XCTestCase {
         XCTAssertTrue(msg.contains("助手: 我可以帮您解答各种问题。"))
     }
 
-    func testBuildMessageSubsequentTurnOnlyReturnsCurrentPrompt() {
+    func testBuildMessageSubsequentTurnWithoutToolsReturnsCurrentPrompt() {
         let msg = ShortcutsModelPromptBuilder.buildMessage(
             systemPrompt: "系统提示词",
-            toolDescriptions: "- some_tool: 执行某些操作",
+            toolDescriptions: "",
             history: [("user", "第一句话"), ("assistant", "回复一")],
             currentPrompt: "最近有哪些有关 ai 的信息",
             isFirstTurn: false
         )
-        // Subsequent turns must not include system prompt, tools, or history
+        // Subsequent turns without tools return plain prompt
         XCTAssertEqual(msg, "最近有哪些有关 ai 的信息")
         XCTAssertFalse(msg.contains("【系统提示】"))
         XCTAssertFalse(msg.contains("【可用工具说明】"))
+        XCTAssertFalse(msg.contains("【工具调用格式规范】"))
         XCTAssertFalse(msg.contains("【历史对话】"))
+    }
+
+    func testBuildMessageSubsequentTurnWithToolsAppendsToolCallingSpecification() {
+        let msg = ShortcutsModelPromptBuilder.buildMessage(
+            systemPrompt: "系统提示词",
+            toolDescriptions: "- reminder_task_tool: 创建提醒",
+            history: [("user", "第一句话"), ("assistant", "回复一")],
+            currentPrompt: "帮我建个提醒",
+            isFirstTurn: false
+        )
+        // Subsequent turns with tools append tool descriptions and calling specification directly below current prompt
+        XCTAssertTrue(msg.hasPrefix("帮我建个提醒"))
+        XCTAssertTrue(msg.contains("【可用工具说明】"))
+        XCTAssertTrue(msg.contains("reminder_task_tool"))
+        XCTAssertTrue(msg.contains("【工具调用格式规范】"))
+        XCTAssertTrue(msg.contains("```tool_call"))
+        XCTAssertTrue(msg.contains("##重要重要!!! 你不需要亲自执行操作，只用识别意图并严格返回上述工具调用格式即可##"))
+        // Must NOT contain full system prompt or history
+        XCTAssertFalse(msg.contains("【系统提示】"))
+        XCTAssertFalse(msg.contains("【历史对话】"))
+    }
+
+    func testBuildMessageToolFeedbackDoesNotAppendToolCallingSpec() {
+        let toolFeedback = """
+        【工具执行结果】
+        工具: reminder_task_tool
+        结果:
+        成功创建提醒：买牛奶
+
+        请根据上述工具执行结果，以自然语言直接回答用户最初的提问。
+        """
+        let msg = ShortcutsModelPromptBuilder.buildMessage(
+            systemPrompt: "系统提示词",
+            toolDescriptions: "- reminder_task_tool: 创建提醒",
+            history: [],
+            currentPrompt: toolFeedback,
+            isFirstTurn: false
+        )
+        XCTAssertFalse(msg.contains("【工具调用格式规范】"))
+        XCTAssertTrue(msg.contains("成功创建提醒：买牛奶"))
     }
 
     func testBuildMessageFullContextExplicit() {
@@ -198,5 +239,7 @@ final class ShortcutsModelTests: XCTestCase {
         XCTAssertTrue(msg.contains("【可用工具说明】"))
         XCTAssertTrue(msg.contains("new_tool"))
         XCTAssertTrue(msg.contains("【当前提问】\n调用新工具"))
+        XCTAssertTrue(msg.contains("【工具调用格式规范】"))
+        XCTAssertTrue(msg.contains("```tool_call"))
     }
 }
