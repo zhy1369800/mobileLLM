@@ -47,7 +47,7 @@ final class ContextCompactorTests: XCTestCase {
         XCTAssertNil(ContextCompactor.plan(
             history: conversation(pairs: 6), cutoffID: nil, summary: nil,
             fixedTokens: 0, contextLength: 2048
-        ), "Prompt fitting under capacity must not trigger compaction")
+        ), "History under the trigger threshold must not compact")
     }
 
     func testPlanKeepsTheNewestWindowAndMovesTheCutoff() throws {
