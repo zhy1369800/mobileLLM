@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 import Foundation
+import AgentContracts
 import AgentRuntime
 import LLMCore
 
@@ -37,19 +38,21 @@ public enum ContextCompactor {
 
     private static let estimator = DeterministicUTF8TokenEstimator()
 
-    /// Token count of one prompt text, measured with the SAME estimator the runtime's `ContextCompiler`
-    /// uses to decide truncation — so "history is full" means the same thing here and there.
-    public static func tokens(in text: String) -> Int {
+    /// Token count of one prompt text framed as a message, measured with the SAME estimator the runtime's
+    /// `ContextCompiler` uses to decide truncation (including the per-message role header/footer) — so
+    /// "history is full" means the same thing here and there.
+    public static func tokens(in text: String, role: AgentModelMessageRole = .user) -> Int {
         guard !text.isEmpty else { return 0 }
-        return Int(estimator.estimateText(text, overheadTokens: estimator.identity.messageOverheadTokens))
+        return Int(estimator.estimateFramedMessage(role: role, content: text))
     }
 
-    /// A message's prompt cost: its answer plus any replayed tool calls / results.
+    /// A message's prompt cost: its answer plus any replayed tool calls / results, each framed like the
+    /// runtime replays them (call = assistant turn, result = user turn).
     static func tokens(of message: Message) -> Int {
-        var count = tokens(in: message.answer)
+        var count = tokens(in: message.answer, role: message.role == .assistant ? .assistant : .user)
         for run in message.toolRuns ?? [] {
-            count += tokens(in: run.rawCallText ?? "\(run.name) \(run.arguments)")
-            if let result = run.result { count += tokens(in: run.rawResponseText ?? result) }
+            count += tokens(in: run.rawCallText ?? "\(run.name) \(run.arguments)", role: .assistant)
+            if let result = run.result { count += tokens(in: run.rawResponseText ?? result, role: .user) }
         }
         return count
     }
@@ -77,7 +80,7 @@ public enum ContextCompactor {
         let turns = active.filter { $0.role != .system && $0.hasVisibleContent }
         guard turns.count >= minimumHistoryMessages else { return nil }
 
-        let historyTokens = tokens(in: summary ?? "")
+        let historyTokens = tokens(in: summary ?? "", role: .system)
             + turns.reduce(0) { $0 + tokens(of: $1) }
         let netHistoryCapacity = max(256, contextLength - fixedTokens)
         let triggerThreshold = Int(Double(netHistoryCapacity) * triggerRatio)

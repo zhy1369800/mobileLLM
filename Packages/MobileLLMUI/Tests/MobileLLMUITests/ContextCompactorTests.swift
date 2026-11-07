@@ -6,7 +6,8 @@ import LLMCore
 
 final class ContextCompactorTests: XCTestCase {
 
-    /// 234 tokens under the runtime estimator (598 ASCII bytes / 3, +8 framing, +12.5% margin).
+    /// 257 (user) / 259 (assistant) tokens under the runtime estimator: 598 ASCII bytes plus the
+    /// `<message …>` frame, / 3, +8 overhead, +12.5% margin.
     private func message(_ role: Message.Role, _ label: String) -> Message {
         Message(role: role, answer: label + " " + String(repeating: "word ", count: 119))
     }
@@ -51,12 +52,12 @@ final class ContextCompactorTests: XCTestCase {
     }
 
     func testPlanKeepsTheNewestWindowAndMovesTheCutoff() throws {
-        let history = conversation(pairs: 7)   // 14 x 234 = 3276 tokens > capacity of 2048
+        let history = conversation(pairs: 7)   // 7 x 516 = 3612 tokens > capacity of 2048
         let plan = try XCTUnwrap(ContextCompactor.plan(
             history: history, cutoffID: nil, summary: nil, fixedTokens: 0, contextLength: 2048
         ))
-        // 35% of 2048 ≈ 716 tokens ≈ the newest 3 messages fit; the window then moves forward to open on a
-        // user turn, so 2 messages stay verbatim and the first 12 are summarized.
+        // 35% of 2048 ≈ 716 tokens ≈ the newest 2 messages (516) fit and already open on a user turn,
+        // so they stay verbatim and the first 12 are summarized.
         XCTAssertEqual(plan.toSummarize.count, 12)
         XCTAssertEqual(plan.newCutoffID, history[11].id)
         XCTAssertEqual(plan.toSummarize.map(\.id), Array(history[0...11]).map(\.id))
@@ -65,7 +66,7 @@ final class ContextCompactorTests: XCTestCase {
     /// The verbatim window must open on a user turn, never on an orphaned assistant reply.
     func testRecentWindowStartsOnAUserTurn() throws {
         var history = conversation(pairs: 6)
-        history.append(message(.user, "u7"))   // 13 messages, ~3042 tokens > 2048 capacity
+        history.append(message(.user, "u7"))   // 13 messages, ~3353 tokens > 2048 capacity
         let plan = try XCTUnwrap(ContextCompactor.plan(
             history: history, cutoffID: nil, summary: nil, fixedTokens: 0, contextLength: 2048
         ))
@@ -197,7 +198,7 @@ final class ContextCompactorTests: XCTestCase {
     /// compaction correctly scales its trigger against the net history capacity (~2096 tokens) and succeeds
     /// when history reaches physical capacity.
     func testPlanTriggersInTightContextWithToolOverhead() throws {
-        // 8 pairs = 3744 tokens > net capacity of 2096 (4096 - 2000)
+        // 8 pairs = 4128 tokens > net capacity of 2096 (4096 - 2000)
         let history = conversation(pairs: 8)
         let fixedTokens = 2_000 // 1024 output + ~700 tools + ~276 system
         let contextLength = 4_096

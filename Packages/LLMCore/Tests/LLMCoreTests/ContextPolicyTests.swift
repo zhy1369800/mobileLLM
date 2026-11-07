@@ -73,13 +73,13 @@ final class ContextPolicyTests: XCTestCase {
         XCTAssertEqual(ContextPolicy.fixedOverheadTokens(
             systemPromptTokens: 100, currentUserTokens: 10, toolSchemaTokens: 5_000,
             contextLength: 2048, online: false
-        ), 100 + 10 + 1024 + 512)
+        ), 100 + 10 + 1024 + 512 + 128)   // + tool-turn reserve (1024 input / 8)
 
         // Under the ceiling the measured cost passes through unchanged.
         XCTAssertEqual(ContextPolicy.fixedOverheadTokens(
             systemPromptTokens: 300, currentUserTokens: 50, toolSchemaTokens: 600,
             contextLength: 8192, online: false
-        ), 300 + 50 + 1024 + 600)
+        ), 300 + 50 + 1024 + 600 + 896)   // + tool-turn reserve (7168 input / 8)
 
         // No tools -> no schema cost.
         XCTAssertEqual(ContextPolicy.fixedOverheadTokens(

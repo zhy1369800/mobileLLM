@@ -1506,7 +1506,7 @@ public final class ChatStore {
         let toolSchemaTokens = settings.toolsEnabled ? (agentToolSchemaTokens?() ?? 0) : 0
         let fixedTokens = ContextPolicy.fixedOverheadTokens(
             // Composed prompt (base + active skill + memory), exactly what the run will carry.
-            systemPromptTokens: ContextCompactor.tokens(in: composedSystemPrompt(query: currentText)),
+            systemPromptTokens: ContextCompactor.tokens(in: composedSystemPrompt(query: currentText), role: .system),
             currentUserTokens: ContextCompactor.tokens(in: currentText),
             toolSchemaTokens: toolSchemaTokens,
             contextLength: cap,

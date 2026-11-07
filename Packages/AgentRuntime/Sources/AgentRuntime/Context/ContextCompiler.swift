@@ -32,6 +32,15 @@ public struct DeterministicUTF8TokenEstimator: Hashable, Codable, Sendable {
         estimateToolSchema(serializedSchema: ContextRendering.toolEvidence(descriptor).serializedSchema)
     }
 
+    /// Cost of `content` as one framed prompt message (role header, footer, per-message overhead),
+    /// exactly as `ContextCompiler` charges a trusted message.
+    public func estimateFramedMessage(role: AgentModelMessageRole, content: String) -> UInt64 {
+        guard let message = try? AgentModelMessage(role: role, content: content, isUntrustedData: false) else {
+            return estimateText(content, overheadTokens: identity.messageOverheadTokens)
+        }
+        return estimateMessage(message)
+    }
+
     private func estimateUTF8ByteCount(_ byteCount: UInt64, overheadTokens: UInt16) -> UInt64 {
         let divisor = UInt64(identity.utf8BytesPerToken)
         let contentTokens = byteCount == 0 ? 0 : (byteCount - 1) / divisor + 1

@@ -94,9 +94,17 @@ public enum ContextPolicy {
         online ? 16 : 8
     }
 
+    /// Room kept for what a tool-using turn adds on top of history while it runs (run state plus the tool
+    /// results fed back), which the runtime ranks above old history. Without this, the runtime starts
+    /// truncating history inside a tool turn while compaction still thinks everything fits.
+    public static func toolTurnReserveTokens(for contextLength: Int) -> Int {
+        min(1_024, maximumInputTokens(for: contextLength) / 8)
+    }
+
     /// Fixed overhead tokens consumed before conversation history: system prompt, current user input,
     /// reserved generation output, and tool schemas (`toolSchemaTokens` is the caller's measured schema
-    /// cost, capped here by the same ceiling the runtime enforces).
+    /// cost, capped here by the same ceiling the runtime enforces) plus the tool-turn reserve when any
+    /// tool is advertised.
     public static func fixedOverheadTokens(
         systemPromptTokens: Int,
         currentUserTokens: Int,
@@ -105,8 +113,10 @@ public enum ContextPolicy {
         online: Bool
     ) -> Int {
         let ceiling = maximumToolSchemaBudget(for: contextLength, online: online, toolsEnabled: true)
+        let schema = min(ceiling, max(0, toolSchemaTokens))
         return systemPromptTokens + currentUserTokens
             + reservedOutputTokens(for: contextLength)
-            + min(ceiling, max(0, toolSchemaTokens))
+            + schema
+            + (schema > 0 ? toolTurnReserveTokens(for: contextLength) : 0)
     }
 }
