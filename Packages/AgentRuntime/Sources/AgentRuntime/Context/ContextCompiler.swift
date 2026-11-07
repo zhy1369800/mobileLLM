@@ -27,6 +27,11 @@ public struct DeterministicUTF8TokenEstimator: Hashable, Codable, Sendable {
         estimateText(serializedSchema, overheadTokens: identity.toolSchemaOverheadTokens)
     }
 
+    /// Schema cost of one advertised tool, exactly as `ContextCompiler` charges it.
+    public func estimateToolSchema(_ descriptor: AgentToolDescriptor) -> UInt64 {
+        estimateToolSchema(serializedSchema: ContextRendering.toolEvidence(descriptor).serializedSchema)
+    }
+
     private func estimateUTF8ByteCount(_ byteCount: UInt64, overheadTokens: UInt16) -> UInt64 {
         let divisor = UInt64(identity.utf8BytesPerToken)
         let contentTokens = byteCount == 0 ? 0 : (byteCount - 1) / divisor + 1

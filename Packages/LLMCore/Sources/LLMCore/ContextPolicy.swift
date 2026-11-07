@@ -89,35 +89,24 @@ public enum ContextPolicy {
         }
     }
 
-    /// Estimated schema tokens consumed by active tools, capped by the maximum schema budget.
-    /// Centralizes tool overhead estimation (approx. 200 tokens per tool schema).
-    public static func estimatedToolTokens(
-        activeToolsCount: Int,
-        contextLength: Int,
-        online: Bool
-    ) -> Int {
-        guard activeToolsCount > 0 else { return 0 }
-        let estimatedPerTool = 200
-        let total = activeToolsCount * estimatedPerTool
-        let ceiling = maximumToolSchemaBudget(for: contextLength, online: online, toolsEnabled: true)
-        return min(ceiling, total)
+    /// Most tools a single run may advertise to the model.
+    public static func maximumAdvertisedTools(online: Bool) -> Int {
+        online ? 16 : 8
     }
 
-    /// Fixed overhead tokens consumed before conversation history:
-    /// system prompt, current user input, reserved generation output, and active tools.
+    /// Fixed overhead tokens consumed before conversation history: system prompt, current user input,
+    /// reserved generation output, and tool schemas (`toolSchemaTokens` is the caller's measured schema
+    /// cost, capped here by the same ceiling the runtime enforces).
     public static func fixedOverheadTokens(
         systemPromptTokens: Int,
         currentUserTokens: Int,
-        activeToolsCount: Int,
+        toolSchemaTokens: Int,
         contextLength: Int,
         online: Bool
     ) -> Int {
-        let reserved = reservedOutputTokens(for: contextLength)
-        let tools = estimatedToolTokens(
-            activeToolsCount: activeToolsCount,
-            contextLength: contextLength,
-            online: online
-        )
-        return systemPromptTokens + currentUserTokens + reserved + tools
+        let ceiling = maximumToolSchemaBudget(for: contextLength, online: online, toolsEnabled: true)
+        return systemPromptTokens + currentUserTokens
+            + reservedOutputTokens(for: contextLength)
+            + min(ceiling, max(0, toolSchemaTokens))
     }
 }

@@ -539,7 +539,7 @@ struct AppFrozenInputBuilder: Sendable {
             ]),
             activeSkillToolHints: [],
             explicitlyRequestedToolIDs: [],
-            maximumAdvertisedTools: online ? 16 : 8,
+            maximumAdvertisedTools: ContextPolicy.maximumAdvertisedTools(online: online),
             contextPolicyVersion: 1,
             approvalPolicyVersion: 1
         )

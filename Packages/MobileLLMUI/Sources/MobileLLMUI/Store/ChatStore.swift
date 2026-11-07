@@ -856,6 +856,9 @@ public final class ChatStore {
     /// Set by the app shell: logical ids of MCP tools explicitly discovered through the server
     /// setup/refresh flow. They join the built-in selection in every newly materialized policy.
     public var agentMCPToolLogicalIDs: (@MainActor () -> [AgentToolLogicalID])?
+    /// Set by the app shell: schema tokens the currently enabled tools cost, measured on the real tool
+    /// descriptors with the runtime's own estimator, so compaction budgets what the run will really send.
+    public var agentToolSchemaTokens: (@MainActor () -> Int)?
     /// Canonicalizes an exact or legacy persisted variant id using the same installed-model resolver that
     /// will perform restoration. Without this, one legacy Explore id appears to match every quant sibling.
     public var resolvePersistedVariantID: (@MainActor (_ modelID: String, _ variantID: String) -> String?)?
@@ -1500,14 +1503,12 @@ public final class ChatStore {
             persist(conversations[ci])
         }
         let history = conversations[ci].messages.filter { !turnIDs.contains($0.id) }
-        let activeToolsCount = settings.toolsEnabled
-            ? settings.builtInToolConfig.enabled.count + (agentMCPToolLogicalIDs?().count ?? 0)
-            : 0
+        let toolSchemaTokens = settings.toolsEnabled ? (agentToolSchemaTokens?() ?? 0) : 0
         let fixedTokens = ContextPolicy.fixedOverheadTokens(
             // Composed prompt (base + active skill + memory), exactly what the run will carry.
-            systemPromptTokens: TokenEstimate.tokens(in: composedSystemPrompt(query: currentText)),
-            currentUserTokens: TokenEstimate.tokens(in: currentText),
-            activeToolsCount: activeToolsCount,
+            systemPromptTokens: ContextCompactor.tokens(in: composedSystemPrompt(query: currentText)),
+            currentUserTokens: ContextCompactor.tokens(in: currentText),
+            toolSchemaTokens: toolSchemaTokens,
             contextLength: cap,
             online: isOnlineActive
         )

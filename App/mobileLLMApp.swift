@@ -675,6 +675,25 @@ struct MobileLLMApp: App {
                         .descriptors(for: container.settings.mcpServers)
                         .map(\.id.logicalID)
                 }
+                container.chat.agentToolSchemaTokens = { [weak container] in
+                    guard let container,
+                          let catalog = try? AppToolCatalog.catalog(
+                              enabledToolNames: container.settings.builtInToolConfig.enabled.map(\.rawValue),
+                              memoryAvailable: container.chat.memoryBook != nil,
+                              eventSeamAvailable: container.toolEventStore != nil,
+                              locationSeamAvailable: container.toolLocationProvider != nil,
+                              shortcutSeamAvailable: container.toolShortcutExecutor != nil,
+                              mcpDescriptors: container.mcpDiscovery.descriptors(for: container.settings.mcpServers)
+                          )
+                    else { return 0 }
+                    // Upper bound: the run advertises at most N tools, so charge the N largest schemas.
+                    let estimator = DeterministicUTF8TokenEstimator()
+                    return catalog.descriptors
+                        .map { Int(estimator.estimateToolSchema($0)) }
+                        .sorted(by: >)
+                        .prefix(ContextPolicy.maximumAdvertisedTools(online: container.chat.isOnlineActive))
+                        .reduce(0, +)
+                }
                 container.agentDiagnosticSnapshot = { @MainActor in
                     await assembly.diagnosticLogger.snapshot()
                         .map { entry in
