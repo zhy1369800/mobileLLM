@@ -47,7 +47,8 @@ struct ChatDetailView: View {
                        loadingModelName: loadingModelName,
                        onOpenModels: onOpenModels,
                        onSwitchModel: { showSwitcher = true },
-                       agentRuns: container.agentRuns)
+                       agentRuns: container.agentRuns,
+                       keyboardOverlap: keyboardOverlap)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {

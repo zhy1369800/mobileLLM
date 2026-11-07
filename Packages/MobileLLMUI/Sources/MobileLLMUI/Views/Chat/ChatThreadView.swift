@@ -10,9 +10,15 @@ import UIKit
 /// 纯数值容器：记录视口与内容高度，避免软键盘收放动画或流式增长时修改 @State 触发整树重绘闪烁
 private final class ScrollMetrics {
     var viewportHeight: CGFloat = 0
+    var keyboardOverlap: CGFloat = 0
     var contentHeight: CGFloat = 0
     var needsInitialScroll: Bool = true
-    var isOverflowing: Bool { viewportHeight > 0 && contentHeight > viewportHeight + 2 }
+    /// 软键盘完全收起后的真实视口高度（当前可视高 + 键盘遮挡高）
+    var restingViewportHeight: CGFloat { viewportHeight + keyboardOverlap }
+    /// 软键盘是否处于弹起或收起过渡态
+    var isKeyboardElevated: Bool { keyboardOverlap > 1 }
+    /// 内容是否真实超出无键盘的全屏视口（消除发送瞬间因半屏高度产生的假溢出回弹）
+    var isOverflowing: Bool { restingViewportHeight > 0 && contentHeight > restingViewportHeight + 2 }
 }
 
 /// The message list + streaming surface (DESIGN §4). User turns are right-aligned bubbles; assistant
@@ -31,6 +37,8 @@ struct ChatThreadView: View {
     var onSwitchModel: () -> Void = {}
     /// The durable agent runtime projection surface; nil in legacy/preview layouts.
     var agentRuns: AgentRunStore? = nil
+    /// Extra bottom lift while the software keyboard is up.
+    var keyboardOverlap: CGFloat = 0
 
     @State private var atBottom = true
     @State private var userScrolledUp = false
@@ -147,8 +155,11 @@ struct ChatThreadView: View {
                             }
                             guard !userScrolledUp && !isUserDragging else { return }
                             if metrics.isOverflowing && newHeight > oldHeight + 0.5 {
-                                // 1. 流式输出增长或回复完成帧挂载底部按钮栏/统计栏且总高已超出一屏：平滑跟随到底部
-                                proxy.scrollTo(bottomID, anchor: .bottom)
+                                // 1. 流式输出增长或回复完成帧挂载底部按钮栏/统计栏且总高已超出全屏视口：
+                                // 仅在软键盘已收起时跟随到底部；若发送瞬间键盘尚未收起，交由视口展开完成回调对齐，避免先瞬移到半屏再跌落回全屏的闪烁
+                                if !metrics.isKeyboardElevated {
+                                    proxy.scrollTo(bottomID, anchor: .bottom)
+                                }
                             } else if newHeight < oldHeight - 20 {
                                 // 2. 思考框自动收纳导致高度骤降：在折叠排版完成后校正视口，防止画面悬空停在底部空白页
                                 let overflowing = metrics.isOverflowing
@@ -170,13 +181,29 @@ struct ChatThreadView: View {
                 Color.clear
                     .onAppear {
                         metrics.viewportHeight = geo.size.height
+                        metrics.keyboardOverlap = keyboardOverlap
                         performInitialScrollIfNeeded(proxy)
                     }
-                    .onChange(of: geo.size.height) { _, newHeight in
+                    .onChange(of: geo.size.height) { oldHeight, newHeight in
                         metrics.viewportHeight = newHeight
-                        performInitialScrollIfNeeded(proxy)
+                        metrics.keyboardOverlap = keyboardOverlap
+                        if metrics.needsInitialScroll {
+                            performInitialScrollIfNeeded(proxy)
+                            return
+                        }
+                        // 软键盘收起使视口恢复全屏后，若处于底部跟随态且总高已超出全屏视口，按全屏尺寸一次对齐到底部
+                        if newHeight > oldHeight + 1,
+                           keyboardOverlap <= 1,
+                           !userScrolledUp,
+                           !isUserDragging,
+                           metrics.isOverflowing {
+                            proxy.scrollTo(bottomID, anchor: .bottom)
+                        }
                     }
             })
+            .onChange(of: keyboardOverlap) { _, newOverlap in
+                metrics.keyboardOverlap = newOverlap
+            }
             .simultaneousGesture(
                 DragGesture(minimumDistance: 6)
                     .onChanged { value in
