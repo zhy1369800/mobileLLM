@@ -186,6 +186,63 @@ final class ContextCompilerTests: XCTestCase {
         XCTAssertEqual(oldRecord.omissionReason, .inputBudgetExhausted)
     }
 
+    /// A tool result fetched in this run must survive a tight budget at the expense of old history;
+    /// otherwise the model never sees it and calls the same tool again.
+    func testCurrentRunToolResultOutranksOlderHistory() throws {
+        let old = try ConversationTurnContextSource(
+            messageID: messageID(1),
+            revision: "1",
+            role: .user,
+            content: String(repeating: "old context ", count: 300)
+        )
+        let lookup = try tool("lookup")
+        let result = try UntrustedToolResultContextSource(
+            invocationID: invocationID(2),
+            descriptorID: lookup.id,
+            resultRevision: "result-1",
+            resultContent: String(repeating: "fresh result ", count: 20)
+        )
+        let snapshot = try FrozenContextSnapshot(
+            runID: runID(),
+            requestID: requestID(),
+            stepID: stepID(),
+            baseSystem: BaseSystemContextSource(revision: "1", content: "Follow the base policy."),
+            conversation: [old],
+            currentUser: CurrentUserContextSource(
+                userTurnID: userTurnID(1),
+                revision: "1",
+                content: "Answer the latest request.",
+                attachments: []
+            ),
+            untrustedToolResults: [result],
+            selectorID: "mobilellm.tool-selector",
+            selectorPolicyVersion: 1,
+            contextPolicyVersion: 1,
+            approvalPolicyVersion: 1
+        )
+        let wide = try ContextCompiler().compile(snapshot, budget: wideBudget())
+        let mandatory = wide.manifest.sourceRecords
+            .filter { $0.kind == .baseSystem || $0.kind == .currentUser }
+            .reduce(0) { $0 + $1.adoptedEstimatedTokens }
+        let resultTokens = try XCTUnwrap(
+            wide.manifest.sourceRecords.first { $0.kind == .untrustedToolResult }
+        ).originalEstimatedTokens
+        let budget = try ContextTokenBudget(
+            maximumContextTokens: mandatory + resultTokens + 16,
+            reservedOutputTokens: 16,
+            maximumToolSchemaTokens: 0
+        )
+        let compiled = try ContextCompiler().compile(snapshot, budget: budget)
+        let resultRecord = try XCTUnwrap(
+            compiled.manifest.sourceRecords.first { $0.kind == .untrustedToolResult }
+        )
+        let oldRecord = try XCTUnwrap(
+            compiled.manifest.sourceRecords.first { $0.sourceID == old.frozen.sourceID }
+        )
+        XCTAssertEqual(resultRecord.disposition, .included)
+        XCTAssertNotEqual(oldRecord.disposition, .included)
+    }
+
     func testUnicodeTruncationIsDeterministicAndAlwaysUsesValidUTF8Ranges() throws {
         let skill = try SkillInstructionContextSource(
             skillID: "skill.unicode",

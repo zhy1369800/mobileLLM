@@ -390,12 +390,15 @@ enum ContextRendering {
             let selected = candidates.filter { kinds.contains($0.kind) }
             return reversed ? selected.reversed() : selected
         }
+        // This run's own evidence (state, artifacts, tool results) outranks older chat history: when a tool
+        // result is squeezed out by history, the model never sees what it just fetched and calls the tool
+        // again. History only gets what is left, newest first.
         return values([.skill])
             + values([.canonicalEnglishMemory])
-            + values([.conversationUser, .conversationAssistant], reversed: true)
             + values([.runState])
             + values([.artifactExcerpt])
             + values([.untrustedToolResult])
+            + values([.conversationUser, .conversationAssistant], reversed: true)
     }
 
     static func candidate(
