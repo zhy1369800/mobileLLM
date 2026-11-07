@@ -1498,9 +1498,24 @@ public final class ChatStore {
             persist(conversations[ci])
         }
         let history = conversations[ci].messages.filter { !turnIDs.contains($0.id) }
+        let reservedOutput = ContextPolicy.reservedOutputTokens(for: cap)
+        let toolTokens: Int
+        if !settings.toolsEnabled {
+            toolTokens = 0
+        } else {
+            let activeToolsCount = settings.builtInToolConfig.enabled.count + (agentMCPToolLogicalIDs?().count ?? 0)
+            let estimatedToolTokens = activeToolsCount * 200
+            let maxToolBudget = ContextPolicy.maximumToolSchemaBudget(
+                for: cap,
+                online: isOnlineActive,
+                toolsEnabled: true
+            )
+            toolTokens = min(maxToolBudget, estimatedToolTokens)
+        }
         let fixedTokens = TokenEstimate.tokens(in: settings.systemPrompt)
             + TokenEstimate.tokens(in: currentText)
-            + ContextCompactor.reservedOutputTokens
+            + reservedOutput
+            + toolTokens
         return ContextCompactor.plan(
             history: history,
             cutoffID: conversations[ci].compactionCutoffMessageID,

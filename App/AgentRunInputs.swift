@@ -375,19 +375,12 @@ struct AppFrozenInputBuilder: Sendable {
         let effectiveContext = online
             ? UInt64(snapshot.onlineContextLength)
             : UInt64(ContextPolicy.effective(requested: snapshot.contextLength, model: snapshot.model))
-        let reservedOutput = min(UInt64(1_024), effectiveContext > 512 ? 1_024 : max(UInt64(1), effectiveContext / 2))
-        let availableInput = effectiveContext > reservedOutput ? effectiveContext - reservedOutput : 0
-        let maximumToolSchemaTokens: UInt64
-        if !snapshot.toolsEnabled {
-            maximumToolSchemaTokens = 0
-        } else if online {
-            maximumToolSchemaTokens = min(16_384, availableInput)
-        } else {
-            // Local runs receive a bounded 4K schema budget so selected built-ins fit.
-            // When the context window is tight (e.g. 2048 or 4096 tokens), scale tool schemas
-            // down to half of available input so they never exceed available tokens or crowd out the prompt.
-            maximumToolSchemaTokens = min(UInt64(4_096), availableInput >= 4_096 ? 4_096 : availableInput / 2)
-        }
+        let reservedOutput = UInt64(ContextPolicy.reservedOutputTokens(for: Int(effectiveContext)))
+        let maximumToolSchemaTokens = UInt64(ContextPolicy.maximumToolSchemaBudget(
+            for: Int(effectiveContext),
+            online: online,
+            toolsEnabled: snapshot.toolsEnabled
+        ))
         let contextBudget = try ContextTokenBudget(
             maximumContextTokens: effectiveContext,
             reservedOutputTokens: reservedOutput,

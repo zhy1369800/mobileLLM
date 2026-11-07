@@ -64,4 +64,28 @@ public enum ContextPolicy {
         }
         return rungs.first ?? ladder[0]
     }
+
+    // MARK: - Input & Output Budget Allocations (Single Source of Truth)
+
+    /// Output tokens reserved for model completion based on effective context window.
+    public static func reservedOutputTokens(for contextLength: Int) -> Int {
+        min(1_024, contextLength > 512 ? 1_024 : max(1, contextLength / 2))
+    }
+
+    /// Maximum input budget available for prompt, tools, system and history.
+    public static func maximumInputTokens(for contextLength: Int) -> Int {
+        let reserved = reservedOutputTokens(for: contextLength)
+        return contextLength > reserved ? contextLength - reserved : 0
+    }
+
+    /// Maximum schema budget for tools under a given input capacity.
+    public static func maximumToolSchemaBudget(for contextLength: Int, online: Bool, toolsEnabled: Bool) -> Int {
+        guard toolsEnabled else { return 0 }
+        let availableInput = maximumInputTokens(for: contextLength)
+        if online {
+            return min(16_384, availableInput)
+        } else {
+            return min(4_096, availableInput >= 4_096 ? 4_096 : availableInput / 2)
+        }
+    }
 }

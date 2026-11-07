@@ -45,26 +45,26 @@ final class ContextCompactorTests: XCTestCase {
 
     func testNoPlanWhileThePromptFits() {
         XCTAssertNil(ContextCompactor.plan(
-            history: conversation(pairs: 3), cutoffID: nil, summary: nil,
-            fixedTokens: 0, contextLength: 8192
-        ))
+            history: conversation(pairs: 6), cutoffID: nil, summary: nil,
+            fixedTokens: 0, contextLength: 2048
+        ), "Prompt fitting under capacity must not trigger compaction")
     }
 
     func testPlanKeepsTheNewestWindowAndMovesTheCutoff() throws {
-        let history = conversation(pairs: 6)   // ~1800 tokens > 75% of 2048
+        let history = conversation(pairs: 7)   // ~2100 tokens > 100% capacity of 2048
         let plan = try XCTUnwrap(ContextCompactor.plan(
             history: history, cutoffID: nil, summary: nil, fixedTokens: 0, contextLength: 2048
         ))
         // 35% of 2048 ≈ 716 tokens ≈ the newest 4 messages stay verbatim.
-        XCTAssertEqual(plan.toSummarize.count, 8)
-        XCTAssertEqual(plan.newCutoffID, history[7].id)
-        XCTAssertEqual(plan.toSummarize.map(\.id), Array(history[0...7]).map(\.id))
+        XCTAssertEqual(plan.toSummarize.count, 10)
+        XCTAssertEqual(plan.newCutoffID, history[9].id)
+        XCTAssertEqual(plan.toSummarize.map(\.id), Array(history[0...9]).map(\.id))
     }
 
     /// The verbatim window must open on a user turn, never on an orphaned assistant reply.
     func testRecentWindowStartsOnAUserTurn() throws {
-        var history = conversation(pairs: 5)
-        history.append(message(.user, "u6"))   // u1 a1 … u5 a5 u6 — the raw newest-4 would open on a5
+        var history = conversation(pairs: 6)
+        history.append(message(.user, "u7"))   // 13 messages, ~1950 + 150 tokens > 2048 capacity
         let plan = try XCTUnwrap(ContextCompactor.plan(
             history: history, cutoffID: nil, summary: nil, fixedTokens: 0, contextLength: 2048
         ))
@@ -75,7 +75,7 @@ final class ContextCompactorTests: XCTestCase {
     /// The point of compaction: after one, further turns only APPEND, so the active prompt keeps its
     /// prefix (KV-cache hit) and no new compaction fires for a few turns.
     func testPromptPrefixIsStableBetweenCompactions() throws {
-        let history = conversation(pairs: 6)
+        let history = conversation(pairs: 7)
         let plan = try XCTUnwrap(ContextCompactor.plan(
             history: history, cutoffID: nil, summary: nil, fixedTokens: 0, contextLength: 2048
         ))
@@ -83,7 +83,7 @@ final class ContextCompactorTests: XCTestCase {
         let summary = "short summary"
         let before = try XCTUnwrap(ContextCompactor.activeMessages(history, cutoffID: cutoff))
 
-        let grown = history + [message(.user, "u7"), message(.assistant, "a7")]
+        let grown = history + [message(.user, "u8"), message(.assistant, "a8")]
         let after = try XCTUnwrap(ContextCompactor.activeMessages(grown, cutoffID: cutoff))
 
         XCTAssertEqual(Array(after.prefix(before.count)).map(\.id), before.map(\.id), "prefix must not move")
@@ -93,11 +93,11 @@ final class ContextCompactorTests: XCTestCase {
     }
 
     func testPlanTriggersAgainOnceTheActiveWindowFillsUp() throws {
-        var history = conversation(pairs: 6)
+        var history = conversation(pairs: 7)
         let first = try XCTUnwrap(ContextCompactor.plan(
             history: history, cutoffID: nil, summary: nil, fixedTokens: 0, contextLength: 2048
         ))
-        history += conversation(pairs: 4)
+        history += conversation(pairs: 6)
         let second = try XCTUnwrap(ContextCompactor.plan(
             history: history, cutoffID: first.newCutoffID, summary: "s", fixedTokens: 0, contextLength: 2048
         ))
@@ -190,5 +190,26 @@ final class ContextCompactorTests: XCTestCase {
         // When auto-compaction is disabled in settings, it reverts to the uncompacted count
         chat.settings.autoCompactionEnabled = false
         XCTAssertEqual(chat.contextUsage().used, uncompactedUsage, "Disabling compaction reverts the meter")
+    }
+
+    /// Verifies that when tools + output reserve occupy a portion of a 4K context (e.g. ~2000 tokens fixed),
+    /// compaction correctly scales its trigger against the net history capacity (~2096 tokens) and succeeds
+    /// when history reaches physical capacity.
+    func testPlanTriggersInTightContextWithToolOverhead() throws {
+        // 8 pairs ≈ 2400 tokens > net capacity of 2096 (4096 - 2000)
+        let history = conversation(pairs: 8)
+        let fixedTokens = 2_000 // 1024 output + ~700 tools + ~276 system
+        let contextLength = 4_096
+
+        let plan = try XCTUnwrap(ContextCompactor.plan(
+            history: history,
+            cutoffID: nil,
+            summary: nil,
+            fixedTokens: fixedTokens,
+            contextLength: contextLength
+        ))
+
+        XCTAssertFalse(plan.toSummarize.isEmpty, "Should summarize older turns to relieve tight history capacity")
+        XCTAssertTrue(history.contains { $0.id == plan.newCutoffID })
     }
 }
