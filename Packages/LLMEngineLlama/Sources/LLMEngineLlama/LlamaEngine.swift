@@ -326,11 +326,12 @@ public actor LlamaEngine: LLMEngine {
     /// the tokens after the edit point are decoded.
     private struct SessionCheckpoint {
         let turnCount: Int                   // kept.count at save time
-        let promptEndPos: Int                // physical KV position where the prompt ended == tokens.count
+        let promptEndPos: Int                // physical KV position where the snapshot ended
         let filePath: String
-        let tokens: [llama_token]            // physical KV tokens saved in the file (for round-trip check)
+        let tokens: [llama_token]            // token header saved in the file (for round-trip check)
         let renderedTokens: [llama_token]    // canonical rendered prompt tokens (for prefix validation)
         let turns: [ChatTurn]                // kept turns at save time, to rebuild sessionCache.turns on restore
+        let hasImages: Bool                  // whether the captured KV state includes multimodal ViT embeddings
     }
 
     private func checkpointDirectoryURL() -> URL? {
@@ -402,22 +403,29 @@ public actor LlamaEngine: LLMEngine {
     private func saveCheckpoint(turnCount: Int,
                                 promptTokens: [llama_token],
                                 renderedTokens: [llama_token]? = nil,
+                                promptEndPos: Int? = nil,
                                 turns: [ChatTurn],
+                                hasImages: Bool = false,
                                 context: OpaquePointer) {
         let canonicalTokens = (renderedTokens?.isEmpty == false) ? renderedTokens! : promptTokens
-        guard !promptTokens.isEmpty, !turns.isEmpty else {
+        let effectiveEndPos = promptEndPos ?? promptTokens.count
+        guard !promptTokens.isEmpty, !turns.isEmpty, effectiveEndPos > 0 else {
             NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: empty tokens or turns")
             return
         }
-        // Short-context skip: full recompute is fast enough, not worth the disk write.
-        guard promptTokens.count > 1024 else {
-            NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: tokens=%d <= 1024", Int32(promptTokens.count))
+        // Short-context skip for pure text (≤ 1024 tokens): full recompute is < 0.5 s.
+        // Multimodal checkpoints are ALWAYS saved regardless of token count because ViT image encoding
+        // takes 2–5 seconds even on a short 1-turn prompt.
+        if !hasImages && effectiveEndPos <= 1024 {
+            NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: tokens=%d <= 1024", Int32(effectiveEndPos))
             return
         }
-        // Same-turn boundary with identical prompt: already saved, skip the (potentially 100+ MB) write.
+        // Same-turn boundary with identical prompt and turns: already saved, skip the disk write.
         if let existing = checkpoints[turnCount],
+           existing.promptEndPos == effectiveEndPos,
            existing.tokens == promptTokens,
            existing.renderedTokens == canonicalTokens,
+           existing.turns == turns,
            FileManager.default.fileExists(atPath: existing.filePath) {
             NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: turn %d identical to existing checkpoint", Int32(turnCount))
             return
@@ -440,22 +448,24 @@ public actor LlamaEngine: LLMEngine {
                 checkpointOrder.removeAll { $0 == turnCount }
             }
             try? FileManager.default.removeItem(atPath: filePath)
-            NSLog("[LlamaEngine][Checkpoint] Checkpoint save failed (turn=%d, tokens=%d, path=%@)", Int32(turnCount), Int32(promptTokens.count), filePath)
+            NSLog("[LlamaEngine][Checkpoint] Checkpoint save failed (turn=%d, endPos=%d, path=%@)", Int32(turnCount), Int32(effectiveEndPos), filePath)
         } else {
             checkpointOrder.removeAll { $0 == turnCount }
             checkpointOrder.append(turnCount)
             checkpoints[turnCount] = SessionCheckpoint(turnCount: turnCount,
-                                                       promptEndPos: promptTokens.count,
+                                                       promptEndPos: effectiveEndPos,
                                                        filePath: filePath,
                                                        tokens: promptTokens,
                                                        renderedTokens: canonicalTokens,
-                                                       turns: turnsCopy)
+                                                       turns: turnsCopy,
+                                                       hasImages: hasImages)
             checkpointModelKey = loadedModelKey
             checkpointContextCap = contextCap
             checkpointKVBits = contextKVBits
             checkpointIsSpeculative = (contextSpeculativeMode != .off)
             trimCheckpoints()
-            NSLog("[LlamaEngine][Checkpoint] Checkpoint save succeeded (turn=%d, tokens=%d, bytes=%zu, path=%@)", Int32(turnCount), Int32(promptTokens.count), written, filePath)
+            NSLog("[LlamaEngine][Checkpoint] Checkpoint save succeeded (turn=%d, endPos=%d, hasImages=%@, bytes=%zu, path=%@)",
+                  Int32(turnCount), Int32(effectiveEndPos), hasImages ? "true" : "false", written, filePath)
             // New files do not inherit the directory's isExcludedFromBackup attribute; mark this one
             // so the fresh snapshot stays out of iCloud backup.
             var fileURL = URL(fileURLWithPath: filePath)
@@ -463,6 +473,37 @@ public actor LlamaEngine: LLMEngine {
             values.isExcludedFromBackup = true
             try? fileURL.setResourceValues(values)
         }
+    }
+
+    /// Load and verify a checkpoint file into `context`, rolling `sessionCache` back to its boundary on success.
+    private func loadCheckpointFile(_ cp: SessionCheckpoint,
+                                    context: OpaquePointer,
+                                    failureReason: inout String?) -> Bool {
+        var loaded = [llama_token](repeating: 0, count: cp.tokens.count + 16)
+        var loadedCount = 0
+        let nread = cp.filePath.withCString { cPath in
+            loaded.withUnsafeMutableBufferPointer { buf in
+                llama_state_seq_load_file(context, cPath, 0, buf.baseAddress, buf.count, &loadedCount)
+            }
+        }
+        guard nread > 0, loadedCount == cp.tokens.count else {
+            if failureReason == nil {
+                failureReason = "检查点文件缺失或未完成写入 (turn=\(cp.turnCount))"
+            }
+            return false
+        }
+        guard loaded.prefix(loadedCount).elementsEqual(cp.tokens) else {
+            if failureReason == nil {
+                failureReason = "检查点文件内容校验失败 (turn=\(cp.turnCount))"
+            }
+            return false
+        }
+        sessionCache.rollbackToCheckpoint(turns: cp.turns,
+                                          tokens: cp.hasImages ? [] : cp.tokens,
+                                          count: cp.promptEndPos,
+                                          turnCount: cp.turnCount,
+                                          promptEndPos: cp.promptEndPos)
+        return true
     }
 
     /// LRU eviction: keep only the most recently saved `checkpointMaxSlots` snapshots.
@@ -495,37 +536,15 @@ public actor LlamaEngine: LLMEngine {
         var loadFailureReason: String? = nil
         let candidates = checkpoints.values.sorted { $0.renderedTokens.count > $1.renderedTokens.count }
         for cp in candidates {
+            guard !cp.hasImages else { continue }
             let matchLen = cp.renderedTokens.count
             guard matchLen >= minCommon, matchLen <= newPromptTokens.count else { continue }
             // Prefix validation: the saved canonical prompt must equal the head of the new prompt.
             guard newPromptTokens.prefix(matchLen).elementsEqual(cp.renderedTokens) else { continue }
 
-            // Load and verify the file round-trips to the same token list (defensive: file may be stale).
-            // Buffer is sized to the larger of the checkpoint token count and the new prompt, plus a
-            // 16-token guard — prevents a stale/corrupted file from writing past the array bounds.
-            var loaded = [llama_token](repeating: 0, count: max(cp.tokens.count, newPromptTokens.count) + 16)
-            var loadedCount = 0
-            let nread = cp.filePath.withCString { cPath in
-                loaded.withUnsafeMutableBufferPointer { buf in
-                    llama_state_seq_load_file(context, cPath, 0, buf.baseAddress, buf.count, &loadedCount)
-                }
-            }
-            guard nread > 0, loadedCount == cp.promptEndPos else {
-                if loadFailureReason == nil {
-                    loadFailureReason = "检查点文件缺失或未完成写入 (turn=\(cp.turnCount))"
-                }
+            guard loadCheckpointFile(cp, context: context, failureReason: &loadFailureReason) else {
                 continue
             }
-            guard loaded.prefix(loadedCount).elementsEqual(cp.tokens) else {
-                if loadFailureReason == nil {
-                    loadFailureReason = "检查点文件内容校验失败 (turn=\(cp.turnCount))"
-                }
-                continue
-            }
-
-            // Roll the session cache back to the restored boundary so subsequent commits line up.
-            sessionCache.rollbackToCheckpoint(turns: cp.turns, tokens: cp.tokens, count: cp.promptEndPos,
-                                              turnCount: cp.turnCount, promptEndPos: cp.promptEndPos)
 
             let suffix = newPromptTokens[matchLen...]
             NSLog("[LlamaEngine] Checkpoint restored: turn=%d, promptEndPos=%d (matched=%d), suffix=%d tok",
@@ -536,6 +555,80 @@ public actor LlamaEngine: LLMEngine {
             reason = loadFailureReason
         } else {
             reason = "无前缀匹配的检查点 (编辑点早于所有已保存边界或前缀不符)"
+        }
+        return nil
+    }
+
+    private enum MultimodalRestoreMatch {
+        /// Restored a visual-prefix checkpoint where all images up to the final turn are already in KV;
+        /// caller only needs to decode the trailing pure-text `tailTokens` starting at `pos`.
+        case visualPrefix(pos: Int, tailTokens: [llama_token])
+        /// Restored an earlier turn-boundary checkpoint up to `pos`; caller evaluates `remainingTurns`.
+        case turnPrefix(pos: Int, remainingTurns: [ChatTurn])
+    }
+
+    /// Attempt to restore the best matching checkpoint for a multimodal (`hasImages == true`) turn.
+    private func restoreMultimodalCheckpoint(kept: [ChatTurn],
+                                             vocab: OpaquePointer,
+                                             renderPrompt: ([ChatTurn]) -> String,
+                                             context: OpaquePointer,
+                                             reason: inout String) -> MultimodalRestoreMatch? {
+        guard !checkpoints.isEmpty else {
+            reason = "无已保存检查点 (checkpoints 为空)"
+            return nil
+        }
+        var loadFailureReason: String? = nil
+        let candidates = checkpoints.values.sorted { $0.promptEndPos > $1.promptEndPos }
+        let marker = String(cString: mtmd_default_marker())
+
+        for cp in candidates {
+            // Case 1: Visual-prefix checkpoint (saved right after the last image chunk of turn `cp.turnCount`).
+            // Serves BOTH:
+            //   (a) Regenerate / Edit-Resend of the caption on that image turn itself (`kept.count == cp.turnCount`), and
+            //   (b) Regenerate / Edit-Resend on subsequent text-only turns (`kept.count > cp.turnCount` with no new images),
+            // because in both cases `marker` in turn `cp.turnCount` is the final media marker in `kept`, so everything
+            // after `lastMarkerRange.upperBound` is pure text that `decodeSuffix` can evaluate in ~10–30 ms.
+            if cp.hasImages,
+               cp.turnCount <= kept.count,
+               cp.turns.count == cp.turnCount,
+               let cpLast = cp.turns.last, cpLast.content.isEmpty, !cpLast.images.isEmpty {
+                let targetTurn = kept[cp.turnCount - 1]
+                let trailingTurns = Array(kept[cp.turnCount...])
+                let trailingHasImages = trailingTurns.contains { !$0.images.isEmpty }
+                if !trailingHasImages,
+                   targetTurn.role == cpLast.role,
+                   targetTurn.images == cpLast.images,
+                   Array(kept.prefix(cp.turnCount - 1)) == Array(cp.turns.dropLast()) {
+                    let fullText = renderPrompt(Self.injectMediaMarkers(kept, marker: marker))
+                    guard let lastMarkerRange = fullText.range(of: marker, options: .backwards) else { continue }
+                    let tailText = String(fullText[lastMarkerRange.upperBound...])
+                    let tailTokens = Self.tokenize(vocab: vocab, text: tailText, addSpecial: false)
+                    guard !tailTokens.isEmpty, cp.promptEndPos + tailTokens.count < contextCap else { continue }
+                    guard loadCheckpointFile(cp, context: context, failureReason: &loadFailureReason) else { continue }
+                    NSLog("[LlamaEngine] Multimodal visual-prefix checkpoint restored: turn=%d (kept=%d), pos=%d, tail=%d tok",
+                          Int32(cp.turnCount), Int32(kept.count), Int32(cp.promptEndPos), Int32(tailTokens.count))
+                    return .visualPrefix(pos: cp.promptEndPos, tailTokens: tailTokens)
+                }
+            }
+
+            // Case 2: Earlier full turn-boundary checkpoint (e.g. EOS base checkpoint from a prior turn).
+            if cp.turnCount < kept.count,
+               cp.turns.count == cp.turnCount,
+               cp.turns.last?.content.isEmpty == false,
+               Array(kept.prefix(cp.turnCount)) == cp.turns {
+                let remainingTurns = Array(kept[cp.turnCount...])
+                guard !remainingTurns.isEmpty else { continue }
+                guard loadCheckpointFile(cp, context: context, failureReason: &loadFailureReason) else { continue }
+                NSLog("[LlamaEngine] Multimodal turn-prefix checkpoint restored: turn=%d, pos=%d, remainingTurns=%d",
+                      Int32(cp.turnCount), Int32(cp.promptEndPos), Int32(remainingTurns.count))
+                return .turnPrefix(pos: cp.promptEndPos, remainingTurns: remainingTurns)
+            }
+        }
+
+        if let loadFailureReason {
+            reason = loadFailureReason
+        } else {
+            reason = "无前缀匹配的检查点 (编辑点早于所有已保存边界或图片/前缀不符)"
         }
         return nil
     }
@@ -835,6 +928,7 @@ public actor LlamaEngine: LLMEngine {
             let incrementalReserve = min(reserve, 256)
 
             var incrementalSuffixTokens: [llama_token]? = nil
+            var canIncrementalMultimodal = false
             if prefixMatched && !newTurnsCarryImages {
                 let suffixText: String
                 if !hasImages, let m = model,
@@ -862,6 +956,16 @@ public actor LlamaEngine: LLMEngine {
                 } else {
                     NSLog("[LlamaEngine][CacheMiss] Incremental continuation skipped: KV cache headroom exceeded or empty tokens (used=%d, suffix=%d, reserve=%d, cap=%d). Falling back to full evaluation.",
                           Int32(sessionCache.tokenCount), Int32(tokens.count), Int32(incrementalReserve), Int32(contextCap))
+                }
+            } else if params.kvCheckpointsEnabled && prefixMatched && newTurnsCarryImages {
+                let fallback = Self.buildPrompt(messages: newTurns, template: promptTemplate,
+                                                reasoning: reasoningStyle, thinking: wantThinking)
+                let estTokens = Self.tokenize(vocab: vocab, text: fallback, addSpecial: false).count + Self.imageTokenCount(newTurns)
+                if sessionCache.tokenCount + estTokens + incrementalReserve <= contextCap {
+                    canIncrementalMultimodal = true
+                } else {
+                    NSLog("[LlamaEngine][CacheMiss] Multimodal incremental continuation skipped: KV headroom exceeded (used=%d, est=%d, reserve=%d, cap=%d).",
+                          Int32(sessionCache.tokenCount), Int32(estTokens), Int32(incrementalReserve), Int32(contextCap))
                 }
             } else if previousCount > 0 {
                 let countOk = kept.count > previousCount
@@ -921,12 +1025,102 @@ public actor LlamaEngine: LLMEngine {
                 // Note: conversationTokens for speculative n-gram lookup is built lazily below,
                 // only when speculative mode is active and prompt lookup is actually in use.
             } else if hasImages {
-                // Multimodal full evaluation: image turn or conversation diverged
-                sessionCache.reset(context: context)
-                // let safeVisionBatch = min(nBatch, 512)
-                promptTokenCount = try await mtmdPrefill(kept: kept, context: context,
-                                                         renderPrompt: renderPrompt, nBatch: nBatch,
-                                                         governance: governance)
+                if canIncrementalMultimodal {
+                    // Module 1: Prior turns are already resident in sessionCache; evaluate ONLY the newly
+                    // added turn(s) carrying images starting from `sessionCache.tokenCount`.
+                    isIncrementalContinuation = true
+                    cachePathResult = .incremental
+                    promptTokenCount = try await mtmdPrefill(turnsToEval: newTurns,
+                                                             fullKeptTurns: kept,
+                                                             startPos: sessionCache.tokenCount,
+                                                             addSpecial: false,
+                                                             saveVisualCheckpoint: params.kvCheckpointsEnabled,
+                                                             context: context,
+                                                             renderPrompt: renderPrompt,
+                                                             nBatch: nBatch,
+                                                             governance: governance)
+                    NSLog("[LlamaEngine][CacheHit] multimodal incremental continuation: reused %d cached tokens, mtmd decoded %d tok",
+                          Int32(sessionCache.tokenCount), Int32(promptTokenCount))
+                } else {
+                    var mmRestored = false
+                    if params.kvCheckpointsEnabled {
+                        var restoreReason = ""
+                        if let match = restoreMultimodalCheckpoint(kept: kept,
+                                                                   vocab: vocab,
+                                                                   renderPrompt: renderPrompt,
+                                                                   context: context,
+                                                                   reason: &restoreReason) {
+                            switch match {
+                            case .visualPrefix(let pos, let tailTokens):
+                                if try await decodeSuffix(tailTokens, from: pos,
+                                                          nBatch: nBatch, context: context, governance: governance) {
+                                    promptTokenCount = tailTokens.count
+                                    cachedRollbackTokensCount = pos
+                                    rollbackSucceeded = true
+                                    mmRestored = true
+                                    cachePathResult = .checkpoint
+                                    rollbackDiagnosticMessage = "检查点恢复(多模态视觉前缀): 复用 \(pos) tok, 解码配文 \(tailTokens.count) tok"
+                                    NSLog("[LlamaEngine][CacheHit] multimodal visual-prefix checkpoint restore: reused %d tokens, decoded tail %d tok",
+                                          Int32(pos), Int32(tailTokens.count))
+                                }
+                            case .turnPrefix(let pos, let remainingTurns):
+                                let remainingCarryImages = remainingTurns.contains { !$0.images.isEmpty }
+                                if !remainingCarryImages {
+                                    let rawSuffix = Self.buildPrompt(messages: remainingTurns, template: promptTemplate,
+                                                                     reasoning: reasoningStyle, thinking: wantThinking)
+                                    let suffixText = (promptTemplate == .deepSeek || promptTemplate == .hunyuan || rawSuffix.hasPrefix("\n"))
+                                        ? rawSuffix : ("\n" + rawSuffix)
+                                    let suffixTokens = Self.tokenize(vocab: vocab, text: suffixText, addSpecial: false)
+                                    if !suffixTokens.isEmpty && pos + suffixTokens.count < contextCap,
+                                       try await decodeSuffix(suffixTokens, from: pos,
+                                                              nBatch: nBatch, context: context, governance: governance) {
+                                        promptTokenCount = suffixTokens.count
+                                        cachedRollbackTokensCount = pos
+                                        rollbackSucceeded = true
+                                        mmRestored = true
+                                        cachePathResult = .checkpoint
+                                        rollbackDiagnosticMessage = "检查点恢复(多模态基座): 复用 \(pos) tok, 解码后缀 \(suffixTokens.count) tok"
+                                        NSLog("[LlamaEngine][CacheHit] multimodal turn-prefix checkpoint restore: reused %d tokens, decoded suffix %d tok",
+                                              Int32(pos), Int32(suffixTokens.count))
+                                    }
+                                } else if pos + Self.imageTokenCount(remainingTurns) < contextCap {
+                                    promptTokenCount = try await mtmdPrefill(turnsToEval: remainingTurns,
+                                                                             fullKeptTurns: kept,
+                                                                             startPos: pos,
+                                                                             addSpecial: false,
+                                                                             saveVisualCheckpoint: params.kvCheckpointsEnabled,
+                                                                             context: context,
+                                                                             renderPrompt: renderPrompt,
+                                                                             nBatch: nBatch,
+                                                                             governance: governance)
+                                    cachedRollbackTokensCount = pos
+                                    rollbackSucceeded = true
+                                    mmRestored = true
+                                    cachePathResult = .checkpoint
+                                    rollbackDiagnosticMessage = "检查点恢复(多模态增量): 复用 \(pos) tok, 增量预填充 \(promptTokenCount) tok"
+                                    NSLog("[LlamaEngine][CacheHit] multimodal checkpoint + incremental mtmd: reused %d tokens, mtmd decoded %d tok",
+                                          Int32(pos), Int32(promptTokenCount))
+                                }
+                            }
+                        } else {
+                            rollbackDiagnosticMessage = "检查点恢复未命中: \(restoreReason)，回退全量重算"
+                            NSLog("[LlamaEngine][CacheMiss] Multimodal checkpoint restore missed: %@", restoreReason)
+                        }
+                    }
+                    if !mmRestored {
+                        // Multimodal full evaluation: first image turn or no matching checkpoint
+                        sessionCache.reset(context: context)
+                        promptTokenCount = try await mtmdPrefill(turnsToEval: kept,
+                                                                 fullKeptTurns: kept,
+                                                                 startPos: 0,
+                                                                 addSpecial: true,
+                                                                 saveVisualCheckpoint: params.kvCheckpointsEnabled,
+                                                                 context: context,
+                                                                 renderPrompt: renderPrompt,
+                                                                 nBatch: nBatch,
+                                                                 governance: governance)
+                    }
+                }
             } else {
                 // Pure text evaluation: Prefix Rollback optimization with clean slate fallback
                 let promptTokens = fittedPromptTokens.isEmpty
@@ -1050,44 +1244,39 @@ public actor LlamaEngine: LLMEngine {
                     // where llama_memory_seq_rm is rejected (Qwen 3.5 hybrid Gated DeltaNet / recurrent
                     // state) — instead of a full recompute we reload the saved "prompt fully prefilled"
                     // state file for the matching turn boundary and decode only the tokens after the edit
-                    // point. Pure-text sessions only; vision turns keep the clean-slate path.
-                    if residentHadImages {
-                        rollbackDiagnosticMessage = "检查点恢复跳过: 会话含多模态图片"
-                        NSLog("[LlamaEngine][CacheMiss] Checkpoint restore skipped: session has images")
-                    } else {
-                        var restoreReason = ""
-                        if let restored = restoreCheckpoint(newPromptTokens: promptTokens,
-                                                            minCommon: 16,
-                                                            context: context,
-                                                            reason: &restoreReason) {
-                            let suffixTokens: [llama_token]
-                            if restored.suffix.isEmpty {
-                                // Exact same prompt as the checkpoint: replay the last token to refresh logits
-                                // (mirrors the isFullPromptMatch regenerate path). restored.pos >= 16 here.
-                                suffixTokens = [promptTokens[promptTokens.count - 1]]
-                            } else {
-                                suffixTokens = Array(restored.suffix)
-                            }
-                            effectiveCommon = restored.pos
-                            suffixTokensToDecode = suffixTokens
-                            totalPromptCountForStats = promptTokens.count
-                            if try await decodeSuffix(suffixTokens, from: effectiveCommon,
-                                                      nBatch: nBatch, context: context, governance: governance) {
-                                promptTokenCount = suffixTokens.count
-                                cachedRollbackTokensCount = effectiveCommon
-                                rollbackSucceeded = true
-                                cachePathResult = .checkpoint
-                                rollbackDiagnosticMessage = "检查点恢复: 复用 \(effectiveCommon) tok, 解码后缀 \(suffixTokens.count) tok"
-                                NSLog("[LlamaEngine][CacheHit] checkpoint restore: reused %d prompt tokens, decoded suffix %d tok",
-                                      Int32(effectiveCommon), Int32(suffixTokens.count))
-                            } else {
-                                rollbackDiagnosticMessage = "检查点恢复失败: 后缀Token解码错误, 回退全量重算"
-                                NSLog("[LlamaEngine][CacheMiss] Checkpoint restore decode failed, falling back to clean slate")
-                            }
+                    // point.
+                    var restoreReason = ""
+                    if let restored = restoreCheckpoint(newPromptTokens: promptTokens,
+                                                        minCommon: 16,
+                                                        context: context,
+                                                        reason: &restoreReason) {
+                        let suffixTokens: [llama_token]
+                        if restored.suffix.isEmpty {
+                            // Exact same prompt as the checkpoint: replay the last token to refresh logits
+                            // (mirrors the isFullPromptMatch regenerate path). restored.pos >= 16 here.
+                            suffixTokens = [promptTokens[promptTokens.count - 1]]
                         } else {
-                            rollbackDiagnosticMessage = "检查点恢复未命中: \(restoreReason)，回退全量重算"
-                            NSLog("[LlamaEngine][CacheMiss] Checkpoint restore missed: %@", restoreReason)
+                            suffixTokens = Array(restored.suffix)
                         }
+                        effectiveCommon = restored.pos
+                        suffixTokensToDecode = suffixTokens
+                        totalPromptCountForStats = promptTokens.count
+                        if try await decodeSuffix(suffixTokens, from: effectiveCommon,
+                                                  nBatch: nBatch, context: context, governance: governance) {
+                            promptTokenCount = suffixTokens.count
+                            cachedRollbackTokensCount = effectiveCommon
+                            rollbackSucceeded = true
+                            cachePathResult = .checkpoint
+                            rollbackDiagnosticMessage = "检查点恢复: 复用 \(effectiveCommon) tok, 解码后缀 \(suffixTokens.count) tok"
+                            NSLog("[LlamaEngine][CacheHit] checkpoint restore: reused %d prompt tokens, decoded suffix %d tok",
+                                  Int32(effectiveCommon), Int32(suffixTokens.count))
+                        } else {
+                            rollbackDiagnosticMessage = "检查点恢复失败: 后缀Token解码错误, 回退全量重算"
+                            NSLog("[LlamaEngine][CacheMiss] Checkpoint restore decode failed, falling back to clean slate")
+                        }
+                    } else {
+                        rollbackDiagnosticMessage = "检查点恢复未命中: \(restoreReason)，回退全量重算"
+                        NSLog("[LlamaEngine][CacheMiss] Checkpoint restore missed: %@", restoreReason)
                     }
                 }
 
@@ -1583,16 +1772,27 @@ public actor LlamaEngine: LLMEngine {
                 cont.finish()
                 // Save a turn-completed EOS base checkpoint after finishing the UI stream so the
                 // disk write never blocks the final token or completion state on the UI side.
-                if params.kvCheckpointsEnabled && !hasImages && !sessionCache.hasImages && !sessionCache.tokens.isEmpty {
-                    let completedRendered = Self.tokenize(vocab: vocab,
-                                                          text: renderCompletedHistory(updatedTurns),
-                                                          addSpecial: true)
-                    if !completedRendered.isEmpty {
-                        saveCheckpoint(turnCount: updatedTurns.count,
-                                       promptTokens: sessionCache.tokens,
-                                       renderedTokens: completedRendered,
-                                       turns: updatedTurns,
-                                       context: context)
+                // For multimodal sessions, a visual-prefix checkpoint was already saved during mtmdPrefill,
+                // so only write an additional EOS base snapshot once the conversation has grown by > 1024 tokens
+                // past the latest saved checkpoint (avoids writing twice per image turn or on every short text follow-up).
+                if params.kvCheckpointsEnabled && sessionCache.tokenCount > 0 {
+                    let isMultimodalSession = hasImages || sessionCache.hasImages
+                    let maxSavedPos = checkpoints.values.map(\.promptEndPos).max() ?? 0
+                    let shouldSaveEos = !isMultimodalSession || (sessionCache.tokenCount - maxSavedPos > 1024)
+                    if shouldSaveEos {
+                        let completedRendered = Self.tokenize(vocab: vocab,
+                                                              text: renderCompletedHistory(updatedTurns),
+                                                              addSpecial: true)
+                        let tokenHeader = isMultimodalSession ? completedRendered : sessionCache.tokens
+                        if !completedRendered.isEmpty && !tokenHeader.isEmpty {
+                            saveCheckpoint(turnCount: updatedTurns.count,
+                                           promptTokens: tokenHeader,
+                                           renderedTokens: completedRendered,
+                                           promptEndPos: sessionCache.tokenCount,
+                                           turns: updatedTurns,
+                                           hasImages: isMultimodalSession,
+                                           context: context)
+                        }
                     }
                 }
             } else {
@@ -1657,21 +1857,34 @@ public actor LlamaEngine: LLMEngine {
         }
     }
 
-    /// Multimodal prefill: render the kept turns with a media marker injected per attached image, split the
-    /// Prefill multimodal messages (text + images) using llama.cpp's `mtmd` helper. Prepares images, splits
-    /// the rendered prompt around media markers, and feeds chunks through the vision encoder into the KV cache.
-    /// Returns the prefilled token count for the stats line.
-    private func mtmdPrefill(kept: [ChatTurn], context: OpaquePointer,
-                             renderPrompt: ([ChatTurn]) -> String, nBatch: Int,
+    /// Multimodal prefill: render `turnsToEval` with a media marker injected per attached image, split the
+    /// rendered prompt around media markers, and feed chunks through the vision encoder into the KV cache
+    /// starting at physical position `startPos`. When `saveVisualCheckpoint` is true and the final turn
+    /// carries images, saves a visual-prefix checkpoint right after the last image chunk (`idx == nChunks - 2`)
+    /// so that regenerating or editing the image caption skips ViT re-encoding completely.
+    private func mtmdPrefill(turnsToEval: [ChatTurn],
+                             fullKeptTurns: [ChatTurn],
+                             startPos: Int = 0,
+                             addSpecial: Bool = true,
+                             saveVisualCheckpoint: Bool = false,
+                             context: OpaquePointer,
+                             renderPrompt: ([ChatTurn]) -> String,
+                             nBatch: Int,
                              governance: GenerationGovernance) async throws -> Int {
         guard let mtmdCtx = mtmdContext else { throw EngineError.visionUnavailable }
         let marker = String(cString: mtmd_default_marker())
-        let promptText = renderPrompt(Self.injectMediaMarkers(kept, marker: marker))
+        let rawRendered = renderPrompt(Self.injectMediaMarkers(turnsToEval, marker: marker))
+        let promptText: String
+        if startPos > 0 && promptTemplate != .deepSeek && promptTemplate != .hunyuan && !rawRendered.hasPrefix("\n") {
+            promptText = "\n" + rawRendered
+        } else {
+            promptText = rawRendered
+        }
 
         // Decode each attached image (encoded JPEG/PNG bytes) into an mtmd bitmap, in prompt order.
         var bitmaps: [OpaquePointer?] = []
         defer { for b in bitmaps { if let b { mtmd_bitmap_free(b) } } }
-        for turn in kept {
+        for turn in turnsToEval {
             for image in turn.images {
                 try await governance.checkpoint()
                 guard self.context == context else { throw CancellationError() }
@@ -1691,7 +1904,7 @@ public actor LlamaEngine: LLMEngine {
         let tokenizeRC: Int32 = promptText.withCString { cText -> Int32 in
             // text_len in BYTES (matches the text path's `utf8.count`), robust to any embedded null.
             var input = mtmd_input_text(text: cText, text_len: promptText.utf8.count,
-                                        add_special: true, parse_special: true)
+                                        add_special: addSpecial, parse_special: true)
             var bmpArray = bitmaps
             return bmpArray.withUnsafeMutableBufferPointer { buf in
                 mtmd_tokenize(mtmdCtx, chunks, &input, buf.baseAddress, bitmaps.count)
@@ -1701,7 +1914,8 @@ public actor LlamaEngine: LLMEngine {
 
         // Evaluate chunk-by-chunk into the KV cache; only the last chunk needs logits (for the first sample).
         let nChunks = mtmd_input_chunks_size(chunks)
-        var nPast: llama_pos = 0
+        let shouldSaveVisualPrefix = saveVisualCheckpoint && (fullKeptTurns.last?.images.isEmpty == false) && nChunks >= 2
+        var nPast: llama_pos = Int32(startPos)
         for idx in 0..<nChunks {
             try await governance.checkpoint()
             guard self.context == context else { throw CancellationError() }
@@ -1714,6 +1928,27 @@ public actor LlamaEngine: LLMEngine {
             nPast = newNPast
             if Task.isCancelled || governance.isCancelled { throw CancellationError() }
             guard self.context == context else { throw CancellationError() }   // reentrant teardown
+
+            if shouldSaveVisualPrefix && idx == nChunks - 2, let vocab {
+                var visualTurns = fullKeptTurns
+                if let last = visualTurns.last {
+                    visualTurns[visualTurns.count - 1] = ChatTurn(role: last.role, content: "", images: last.images)
+                }
+                let headerTokens = Self.tokenize(vocab: vocab, text: renderPrompt(visualTurns), addSpecial: true)
+                if !headerTokens.isEmpty {
+                    saveCheckpoint(turnCount: fullKeptTurns.count,
+                                   promptTokens: headerTokens,
+                                   renderedTokens: headerTokens,
+                                   promptEndPos: Int(nPast),
+                                   turns: visualTurns,
+                                   hasImages: true,
+                                   context: context)
+                }
+            }
+        }
+        if saveVisualCheckpoint || startPos > 0 {
+            let advancedPos = Int(nPast) - startPos
+            return advancedPos > 0 ? advancedPos : Int(mtmd_helper_get_n_tokens(chunks))
         }
         return Int(mtmd_helper_get_n_tokens(chunks))
     }
