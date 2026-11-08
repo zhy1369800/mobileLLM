@@ -2673,15 +2673,32 @@ public final class ChatStore {
     }
     @ObservationIgnored private var contextHistoryCache: ContextHistoryCache?
 
+    private struct ContextOverheadCache {
+        let conversationID: UUID
+        let cap: Int
+        let isOnline: Bool
+        let draft: String
+        let recentUserTurns: [String]
+        let baseSystemPrompt: String
+        let activeSkill: Skill?
+        let memoryEnabled: Bool
+        let memoryFacts: [MemoryFact]
+        let toolSchemaTokens: Int
+        let fixedOverheadTokens: Int
+    }
+    @ObservationIgnored private var contextOverheadCache: ContextOverheadCache?
+
     /// Tokens currently used by the active thread's context vs the cap (composer meter; DESIGN §4).
     public func contextUsage() -> (used: Int, cap: Int) {
         // The meter must show the cap the engine actually runs at, not the requested one.
         let cap = effectiveContextTokenCap
         guard let convo = activeConversation else {
             contextHistoryCache = nil
+            contextOverheadCache = nil
             return (0, cap)
         }
-        let compactionEnabled = settings.autoCompactionEnabled && !isOnlineActive
+        let online = isOnlineActive
+        let compactionEnabled = settings.autoCompactionEnabled && !online
 
         let historyTokens: Int
         let recentUserTurns: [String]
@@ -2728,20 +2745,58 @@ public final class ChatStore {
 
         // Measured with `ContextCompactor.tokens` — the runtime's own estimator — and the same fixed overhead
         // as the compaction trigger (system prompt, draft, output reserve, tool schemas), so the meter,
-        // compaction and the runtime's truncation all agree on what "full" means. The active
-        // skill's instructions AND the memory block ride the composed system prompt, so they're counted
-        // here too. Memory is searched with the query the NEXT send would use — draft included — because a
-        // meter that warns you after the injection pushed you over the window is no warning at all. (So the
-        // count can shift slightly as you type, when the draft brings different facts into range; the
-        // block's cap bounds that to a few tokens.)
-        let query = ([draft] + recentUserTurns).filter { !$0.isEmpty }.joined(separator: " ")
-        let system = composedSystemPrompt(query: query)
-        var used = fixedPromptOverhead(
-            systemPrompt: system.trimmingCharacters(in: .whitespacesAndNewlines),
-            currentText: draft,
-            cap: cap
-        )
-        used += historyTokens
+        // compaction and the runtime's truncation all agree on what "full" means. Cached across streaming
+        // ticks so the 20fps meter update does not re-run `MemoryRanking.rank` or re-tokenize the system
+        // prompt on the main thread when nothing in the fixed inputs changed.
+        let currentDraft = draft
+        let baseSystemPrompt = settings.systemPrompt
+        let skill = activeSkill
+        let memoryOn = settings.memoryEnabled
+        let facts = memoryOn ? (memoryBook?.facts ?? []) : []
+        let toolSchemaTokens = settings.toolsEnabled ? (agentToolSchemaTokens?() ?? 0) : 0
+
+        let fixedOverhead: Int
+        if let cache = contextOverheadCache,
+           cache.conversationID == convo.id,
+           cache.cap == cap,
+           cache.isOnline == online,
+           cache.draft == currentDraft,
+           cache.recentUserTurns == recentUserTurns,
+           cache.baseSystemPrompt == baseSystemPrompt,
+           cache.activeSkill == skill,
+           cache.memoryEnabled == memoryOn,
+           cache.memoryFacts == facts,
+           cache.toolSchemaTokens == toolSchemaTokens {
+            fixedOverhead = cache.fixedOverheadTokens
+        } else {
+            let query = ([currentDraft] + recentUserTurns).filter { !$0.isEmpty }.joined(separator: " ")
+            let memBlock = (!facts.isEmpty) ? Self.memoryBlock(facts, query: query) : nil
+            let system = Self.systemPrompt(base: baseSystemPrompt, skill: skill, memoryBlock: memBlock)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let computedOverhead = ContextPolicy.fixedOverheadTokens(
+                systemPromptTokens: ContextCompactor.tokens(in: system, role: .system),
+                currentUserTokens: ContextCompactor.tokens(in: currentDraft),
+                toolSchemaTokens: toolSchemaTokens,
+                contextLength: cap,
+                online: online
+            )
+            contextOverheadCache = ContextOverheadCache(
+                conversationID: convo.id,
+                cap: cap,
+                isOnline: online,
+                draft: currentDraft,
+                recentUserTurns: recentUserTurns,
+                baseSystemPrompt: baseSystemPrompt,
+                activeSkill: skill,
+                memoryEnabled: memoryOn,
+                memoryFacts: facts,
+                toolSchemaTokens: toolSchemaTokens,
+                fixedOverheadTokens: computedOverhead
+            )
+            fixedOverhead = computedOverhead
+        }
+
+        var used = fixedOverhead + historyTokens
         used += streaming.map {
             ContextCompactor.tokens(in: $0.answer, role: .assistant) + ContextCompactor.tokens(in: $0.reasoning, role: .assistant)
         } ?? 0

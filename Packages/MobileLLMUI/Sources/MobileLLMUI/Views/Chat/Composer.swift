@@ -44,16 +44,9 @@ struct Composer: View {
     /// Composer controls scale with Dynamic Type instead of a hard 44pt.
     @ScaledMetric(relativeTo: .body) private var controlSize: CGFloat = 44
 
-    private func meterColor(for usage: (used: Int, cap: Int)) -> Color {
-        let ratio = usage.cap > 0 ? Double(usage.used) / Double(usage.cap) : 0
-        if ratio >= 0.98 { return Theme.danger }
-        if ratio >= 0.85 { return Theme.fitAmber }
-        return Theme.textTertiary
-    }
-
     var body: some View {
         VStack(spacing: Theme.Space.xs) {
-            contextMeter
+            ContextMeterBar(chat: chat)
             if let skill = chat.activeSkill { activeSkillChip(skill) }
             if !chat.pendingImages.isEmpty { pendingImageChips }
             if chat.agentRuntimeUnavailableReason != nil {
@@ -178,26 +171,6 @@ struct Composer: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(isLoadingModel ? "Loading model" : "No model loaded")
         .accessibilityHint(isLoadingModel ? "" : "Choose a model to start chatting")
-    }
-
-    // MARK: Context meter
-
-    private var contextMeter: some View {
-        let currentUsage = chat.contextUsage()
-        let color = meterColor(for: currentUsage)
-        return HStack(spacing: Theme.Space.xs) {
-            Spacer()
-            if currentUsage.used > 0 {
-                Image(systemName: "gauge.with.dots.needle.33percent")
-                    .font(.caption2).foregroundStyle(color)
-                Text(Format.context(currentUsage.used, currentUsage.cap))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(color)
-                    .accessibilityLabel("Context used")
-                    .accessibilityValue("\(currentUsage.used) of \(currentUsage.cap) tokens")
-            }
-        }
-        .frame(height: 14)
     }
 
     // MARK: Field
@@ -596,6 +569,38 @@ struct Composer: View {
     private var sendBackground: Color {
         if chat.isStreaming { return Theme.danger }
         return chat.canSend ? Theme.accent : Theme.fitGray
+    }
+}
+
+/// Isolated subview for the context meter so `chat.contextUsage()` reading `chat.streaming` only
+/// invalidates this 14pt gauge row during streaming generation, rather than re-evaluating the entire
+/// `Composer` body (text field, menus, and buttons) on every 20fps flush.
+private struct ContextMeterBar: View {
+    let chat: ChatStore
+
+    private func meterColor(for usage: (used: Int, cap: Int)) -> Color {
+        let ratio = usage.cap > 0 ? Double(usage.used) / Double(usage.cap) : 0
+        if ratio >= 0.98 { return Theme.danger }
+        if ratio >= 0.85 { return Theme.fitAmber }
+        return Theme.textTertiary
+    }
+
+    var body: some View {
+        let currentUsage = chat.contextUsage()
+        let color = meterColor(for: currentUsage)
+        HStack(spacing: Theme.Space.xs) {
+            Spacer()
+            if currentUsage.used > 0 {
+                Image(systemName: "gauge.with.dots.needle.33percent")
+                    .font(.caption2).foregroundStyle(color)
+                Text(Format.context(currentUsage.used, currentUsage.cap))
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(color)
+                    .accessibilityLabel("Context used")
+                    .accessibilityValue("\(currentUsage.used) of \(currentUsage.cap) tokens")
+            }
+        }
+        .frame(height: 14)
     }
 }
 
