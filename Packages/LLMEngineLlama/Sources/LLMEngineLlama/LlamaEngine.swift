@@ -523,26 +523,70 @@ public actor LlamaEngine: LLMEngine {
         }
     }
 
-    /// Attempt to restore the best matching checkpoint for an edit-resend. A checkpoint matches when the
-    /// saved prompt tokens are a prefix of the NEW prompt tokens (the user edited strictly after that
-    /// turn boundary); the newest/longest match is preferred for maximum reuse. On success the session
-    /// cache is rolled back to the checkpoint state and the physical prompt-end position is returned
-    /// (caller then decodes `newPromptTokens[promptEndPos...]`). Returns nil when nothing usable exists;
-    /// `reason` (in-out) carries why, so the caller can surface the miss in the logs UI.
-    private func restoreCheckpoint(newPromptTokens: [llama_token],
+    /// Attempt to restore the best matching checkpoint for an edit-resend. Prioritizes semantic turn-boundary
+    /// matching (where `kept` starts with the exact text of a completed `.assistant` turn checkpoint) so that
+    /// edit-resend achieves 99.9% reuse without falling victim to BPE greedy tokenization divergence.
+    /// Falls back to token-level prefix matching if no whole-turn boundary matches.
+    private func restoreCheckpoint(kept: [ChatTurn],
+                                   fittedPromptText: String,
+                                   vocab: OpaquePointer?,
+                                   thinking: Bool,
+                                   newPromptTokens: [llama_token],
                                    minCommon: Int,
                                    reserve: Int,
                                    context: OpaquePointer,
-                                   reason: inout String) -> (pos: Int, suffix: ArraySlice<llama_token>)? {
+                                   reason: inout String) -> (pos: Int, suffix: [llama_token])? {
         guard !checkpoints.isEmpty else {
             reason = "无已保存检查点 (checkpoints 为空)"
             return nil
         }
-        // Record the FIRST candidate that matched the prefix but failed to load — the one the user
-        // most wants to know about. First-wins: a later, older candidate's failure must not overwrite
-        // the newest match's reason in the logs UI.
         var loadFailureReason: String? = nil
-        let candidates = checkpoints.values.sorted { $0.renderedTokens.count > $1.renderedTokens.count }
+        let candidates = checkpoints.values.sorted { $0.promptEndPos > $1.promptEndPos }
+
+        // Strategy 1: Semantic turn-boundary matching (bypasses token-level divergence).
+        for cp in candidates {
+            guard !cp.hasImages else { continue }
+            if cp.turnCount < kept.count,
+               cp.turns.count == cp.turnCount,
+               cp.turns.last?.role == .assistant,
+               Array(kept.prefix(cp.turnCount)) == cp.turns {
+                let remainingTurns = Array(kept[cp.turnCount...])
+                let suffixText: String
+                if let m = model,
+                   let prefixRendered = Self.autoPrompt(Array(kept.prefix(cp.turnCount)), modelPtr: m,
+                                                        reasoning: reasoningStyle, thinking: thinking,
+                                                        addGenerationPrompt: false) {
+                    let cleanPrefix = prefixRendered.hasSuffix("\n") ? String(prefixRendered.dropLast()) : prefixRendered
+                    if !cleanPrefix.isEmpty && fittedPromptText.hasPrefix(cleanPrefix) {
+                        suffixText = String(fittedPromptText.dropFirst(cleanPrefix.count))
+                    } else {
+                        let fallback = Self.buildPrompt(messages: remainingTurns, template: promptTemplate,
+                                                        reasoning: reasoningStyle, thinking: thinking)
+                        suffixText = fallback.hasPrefix("\n") ? fallback : ("\n" + fallback)
+                    }
+                } else {
+                    let fallback = Self.buildPrompt(messages: remainingTurns, template: promptTemplate,
+                                                    reasoning: reasoningStyle, thinking: thinking)
+                    suffixText = fallback.hasPrefix("\n") ? fallback : ("\n" + fallback)
+                }
+                let suffixTokens = vocab != nil ? Self.tokenize(vocab: vocab!, text: suffixText, addSpecial: false) : []
+                guard !suffixTokens.isEmpty else { continue }
+                guard cp.physicalEndPos + suffixTokens.count + reserve <= contextCap else {
+                    if loadFailureReason == nil {
+                        loadFailureReason = "检查点物理KV余量不足 (pos=\(cp.physicalEndPos), suffix=\(suffixTokens.count), reserve=\(reserve), cap=\(contextCap))"
+                    }
+                    continue
+                }
+                guard loadCheckpointFile(cp, context: context, failureReason: &loadFailureReason) else {
+                    continue
+                }
+                NSLog("[LlamaEngine] Checkpoint restored (turn-prefix): turn=%d, promptEndPos=%d, suffix=%d tok",
+                      Int32(cp.turnCount), Int32(cp.promptEndPos), Int32(suffixTokens.count))
+                return (cp.promptEndPos, suffixTokens)
+            }
+        }
+
+        // Strategy 2: Fallback to token-level prefix matching.
         for cp in candidates {
             guard !cp.hasImages else { continue }
             let matchLen = cp.renderedTokens.count
@@ -550,9 +594,6 @@ public actor LlamaEngine: LLMEngine {
             // Prefix validation: the saved canonical prompt must equal the head of the new prompt.
             guard newPromptTokens.prefix(matchLen).elementsEqual(cp.renderedTokens) else { continue }
 
-            // Physical KV capacity guard: in thinking mode `cp.promptEndPos` includes historical
-            // `<think>` blocks and is larger than `matchLen`. Ensure sufficient headroom remains
-            // for the suffix and answer reserve before loading the file.
             let suffixCount = max(1, newPromptTokens.count - matchLen)
             guard cp.physicalEndPos + suffixCount + reserve <= contextCap else {
                 if loadFailureReason == nil {
@@ -565,8 +606,8 @@ public actor LlamaEngine: LLMEngine {
                 continue
             }
 
-            let suffix = newPromptTokens[matchLen...]
-            NSLog("[LlamaEngine] Checkpoint restored: turn=%d, promptEndPos=%d (matched=%d), suffix=%d tok",
+            let suffix = Array(newPromptTokens[matchLen...])
+            NSLog("[LlamaEngine] Checkpoint restored (token-prefix): turn=%d, promptEndPos=%d (matched=%d), suffix=%d tok",
                   Int32(cp.turnCount), Int32(cp.promptEndPos), Int32(matchLen), Int32(suffix.count))
             return (cp.promptEndPos, suffix)
         }
@@ -1179,9 +1220,8 @@ public actor LlamaEngine: LLMEngine {
 
                 let residentHadImages = sessionCache.hasImages
 
-                // 识别会话重发（Regenerate）：
-                // 语义级别：无论是重发最后一轮，还是更早历史中的任意一轮，
-                // 本次 kept 均为显存中已驻留轮次的严格前缀（Array(sessionCache.turns.prefix(kept.count)) == kept）
+                // 语义级别识别：
+                // 1. 同轮精确重发（Regenerate）：本次 kept 为显存驻留轮次的严格前缀，且 Prompt 在显存中完整存在
                 let isHistoricalPrefixTurn = !residentHadImages &&
                     !sessionCache.tokens.isEmpty &&
                     kept.count < sessionCache.turns.count &&
@@ -1191,8 +1231,56 @@ public actor LlamaEngine: LLMEngine {
                 // 则可以直接复用显存中已解码好的完整 prompt，无需受限于全局整体分词导致的 BPE 边界重组分叉。
                 let knownPromptEndPos = isHistoricalPrefixTurn ? sessionCache.turnPromptEndPositions[kept.count] : nil
 
+                // 2. 编辑重发（Edit-and-Resend）第一级：内存轮次闭合边界匹配（零磁盘 I/O）
+                // 寻找与显存中驻留轮次严格匹配的最长公共轮次前缀（且以已完成的 .assistant 轮次闭合），
+                // 直接复用该轮次在显存中的物理坐标，彻底避开裸 Token LCP 的 BPE 分词切分分歧。
+                var matchedTurnCount = 0
+                var matchedTurnEndPos = 0
+                var matchedTurnSuffixTokens: [llama_token] = []
+                if !residentHadImages && !sessionCache.tokens.isEmpty && kept.count > 1 {
+                    let maxCheck = min(kept.count - 1, sessionCache.turns.count)
+                    var t = maxCheck
+                    while t >= 2 {
+                        if kept[t - 1].role == .assistant,
+                           sessionCache.turns.count >= t,
+                           sessionCache.turns[t - 1].role == .assistant,
+                           let endPos = sessionCache.turnEndPositions[t],
+                           endPos > 0,
+                           endPos <= sessionCache.tokens.count,
+                           Array(kept.prefix(t)) == Array(sessionCache.turns.prefix(t)) {
+                            let remainingTurns = Array(kept[t...])
+                            let suffixText: String
+                            if let m = model,
+                               let prefixRendered = Self.autoPrompt(Array(kept.prefix(t)), modelPtr: m,
+                                                                    reasoning: reasoningStyle, thinking: wantThinking,
+                                                                    addGenerationPrompt: false) {
+                                let cleanPrefix = prefixRendered.hasSuffix("\n") ? String(prefixRendered.dropLast()) : prefixRendered
+                                if !cleanPrefix.isEmpty && fittedPromptText.hasPrefix(cleanPrefix) {
+                                    suffixText = String(fittedPromptText.dropFirst(cleanPrefix.count))
+                                } else {
+                                    let fallback = Self.buildPrompt(messages: remainingTurns, template: promptTemplate,
+                                                                    reasoning: reasoningStyle, thinking: wantThinking)
+                                    suffixText = fallback.hasPrefix("\n") ? fallback : ("\n" + fallback)
+                                }
+                            } else {
+                                let fallback = Self.buildPrompt(messages: remainingTurns, template: promptTemplate,
+                                                                reasoning: reasoningStyle, thinking: wantThinking)
+                                suffixText = fallback.hasPrefix("\n") ? fallback : ("\n" + fallback)
+                            }
+                            let sTokens = Self.tokenize(vocab: vocab, text: suffixText, addSpecial: false)
+                            if !sTokens.isEmpty {
+                                matchedTurnCount = t
+                                matchedTurnEndPos = endPos
+                                matchedTurnSuffixTokens = sTokens
+                            }
+                            break
+                        }
+                        t -= 1
+                    }
+                }
+
                 // Calculate Longest Common Prefix (LCP) between resident KV tokens and new prompt tokens.
-                // LCP matching itself is purely textual and independent of backend architecture capabilities.
+                // LCP matching itself is purely textual and serves as fallback when whole turn boundary doesn't match.
                 var commonCount = 0
                 if !residentHadImages && !sessionCache.tokens.isEmpty {
                     let maxLcp = min(sessionCache.tokens.count, promptTokens.count)
@@ -1219,6 +1307,13 @@ public actor LlamaEngine: LLMEngine {
                     effectiveCommon = knownEnd - 1
                     suffixTokensToDecode = [sessionCache.tokens[effectiveCommon]]
                     totalPromptCountForStats = knownEnd
+                } else if matchedTurnCount > 0 {
+                    // 第一级：语义轮次边界回滚命中！直接复用该闭合助手轮次在显存中的真实物理坐标
+                    effectiveCommon = matchedTurnEndPos
+                    suffixTokensToDecode = matchedTurnSuffixTokens
+                    totalPromptCountForStats = matchedTurnEndPos + matchedTurnSuffixTokens.count
+                    NSLog("[LlamaEngine][CacheHit] turn boundary matched: turn %d, reused %d pos, suffix %d tok",
+                          Int32(matchedTurnCount), Int32(matchedTurnEndPos), Int32(matchedTurnSuffixTokens.count))
                 } else if isFullPromptMatch {
                     effectiveCommon = min(commonCount, max(0, promptTokens.count - 1))
                     suffixTokensToDecode = Array(promptTokens[effectiveCommon...])
@@ -1274,6 +1369,8 @@ public actor LlamaEngine: LLMEngine {
                             let hitRateText = String(format: "%.1f%%", hitRatePct)
                             if isFullPromptMatch {
                                 rollbackDiagnosticMessage = "前缀回滚命中(重发): 复用 \(effectiveCommon) tok (\(hitRateText)), 仅刷新末尾Token"
+                            } else if matchedTurnCount > 0 {
+                                rollbackDiagnosticMessage = "轮次前缀回滚命中: 复用 \(effectiveCommon) tok (\(hitRateText)), 解码后缀 \(suffixTokens.count) tok"
                             } else {
                                 rollbackDiagnosticMessage = "前缀回滚命中: 复用 \(effectiveCommon) tok (\(hitRateText)), 解码后缀 \(suffixTokens.count) tok"
                             }
@@ -1295,7 +1392,11 @@ public actor LlamaEngine: LLMEngine {
                     // state file for the matching turn boundary and decode only the tokens after the edit
                     // point.
                     var restoreReason = ""
-                    if let restored = restoreCheckpoint(newPromptTokens: promptTokens,
+                    if let restored = restoreCheckpoint(kept: kept,
+                                                        fittedPromptText: fittedPromptText,
+                                                        vocab: vocab,
+                                                        thinking: wantThinking,
+                                                        newPromptTokens: promptTokens,
                                                         minCommon: 16,
                                                         reserve: incrementalReserve,
                                                         context: context,
@@ -1306,7 +1407,7 @@ public actor LlamaEngine: LLMEngine {
                             // (mirrors the isFullPromptMatch regenerate path). restored.pos >= 16 here.
                             suffixTokens = [promptTokens[promptTokens.count - 1]]
                         } else {
-                            suffixTokens = Array(restored.suffix)
+                            suffixTokens = restored.suffix
                         }
                         effectiveCommon = restored.pos
                         suffixTokensToDecode = suffixTokens
@@ -1317,7 +1418,9 @@ public actor LlamaEngine: LLMEngine {
                             cachedRollbackTokensCount = effectiveCommon
                             rollbackSucceeded = true
                             cachePathResult = .checkpoint
-                            rollbackDiagnosticMessage = "检查点恢复: 复用 \(effectiveCommon) tok, 解码后缀 \(suffixTokens.count) tok"
+                            let hitRatePct = (Double(effectiveCommon) / Double(totalPromptCountForStats)) * 100.0
+                            let hitRateText = String(format: "%.1f%%", hitRatePct)
+                            rollbackDiagnosticMessage = "检查点恢复: 复用 \(effectiveCommon) tok (\(hitRateText)), 解码后缀 \(suffixTokens.count) tok"
                             NSLog("[LlamaEngine][CacheHit] checkpoint restore: reused %d prompt tokens, decoded suffix %d tok",
                                   Int32(effectiveCommon), Int32(suffixTokens.count))
                         } else {
@@ -1806,7 +1909,8 @@ public actor LlamaEngine: LLMEngine {
                                         additionalTokens: suffixTokens + generatedTokens,
                                         additionalCount: suffixTokens.count + generatedTokens.count,
                                         promptEndPos: currentPromptEndPos,
-                                        promptTurnCount: kept.count)
+                                        promptTurnCount: kept.count,
+                                        completedTurnCount: updatedTurns.count)
                 } else if let promptTokens = prefilledPromptTokens {
                     let committedTokens: [llama_token]
                     if rollbackSucceeded && cachedRollbackTokensCount > 0 && sessionCache.tokens.count >= cachedRollbackTokensCount {
@@ -1818,7 +1922,8 @@ public actor LlamaEngine: LLMEngine {
                                         tokens: committedTokens,
                                         count: currentPromptEndPos + generatedTokens.count,
                                         promptEndPos: currentPromptEndPos,
-                                        promptTurnCount: kept.count)
+                                        promptTurnCount: kept.count,
+                                        completedTurnCount: updatedTurns.count)
                 } else {
                     // Multimodal evaluation (full or incremental):
                     // No purely textual tokens to match for Prefix Rollback, but the total logical
@@ -1826,7 +1931,8 @@ public actor LlamaEngine: LLMEngine {
                     // can incrementally continue with exact position and capacity accounting.
                     sessionCache.commitMultimodal(turns: updatedTurns,
                                                   count: currentPromptEndPos + generatedTokens.count,
-                                                  extraVisualTokens: pendingExtraVisualTokens)
+                                                  extraVisualTokens: pendingExtraVisualTokens,
+                                                  completedTurnCount: updatedTurns.count)
                 }
                 cont.finish()
                 // Save a turn-completed EOS base checkpoint after finishing the UI stream so the
@@ -2414,6 +2520,10 @@ public actor LlamaEngine: LLMEngine {
         /// Maps turn count (e.g. `kept.count`) to the exact physical KV position where that prompt's prefill ended.
         /// This allows instant 99.9% KV cache reuse on regenerate without re-tokenizing and risking BPE boundary divergence.
         private(set) var turnPromptEndPositions: [Int: Int] = [:]
+        /// Maps completed assistant turn count (e.g. `updatedTurns.count`) to the exact physical KV position
+        /// where that turn's generation ended naturally (EOS). This allows 99.9% KV cache reuse on edit-and-resend
+        /// without relying on fragile token-level LCP comparisons.
+        private(set) var turnEndPositions: [Int: Int] = [:]
 
         var physicalTokenCount: Int { tokenCount + extraVisualTokens }
         var isEmpty: Bool { turns.isEmpty && tokens.isEmpty && tokenCount == 0 }
@@ -2429,6 +2539,7 @@ public actor LlamaEngine: LLMEngine {
             tokenCount = 0
             extraVisualTokens = 0
             turnPromptEndPositions.removeAll()
+            turnEndPositions.removeAll()
         }
 
         /// Prune the session cache to `count` tokens by trimming the physical KV cache.
@@ -2461,6 +2572,7 @@ public actor LlamaEngine: LLMEngine {
                 tokenCount = count
                 extraVisualTokens = 0
                 turnPromptEndPositions = turnPromptEndPositions.filter { $0.value <= count }
+                turnEndPositions = turnEndPositions.filter { $0.value <= count }
                 // `turns` is intentionally left intact — see doc comment above.
                 return true
             } else {
@@ -2471,7 +2583,8 @@ public actor LlamaEngine: LLMEngine {
 
         /// Commit full turns, tokens, and count on natural completion.
         mutating func commit(turns: [ChatTurn], tokens: [llama_token], count: Int,
-                             promptEndPos: Int? = nil, promptTurnCount: Int? = nil) {
+                             promptEndPos: Int? = nil, promptTurnCount: Int? = nil,
+                             completedTurnCount: Int? = nil) {
             self.turns = turns
             self.tokens = tokens
             self.tokenCount = count
@@ -2479,11 +2592,15 @@ public actor LlamaEngine: LLMEngine {
             if let promptEndPos, let promptTurnCount {
                 self.turnPromptEndPositions[promptTurnCount] = promptEndPos
             }
+            if let completedTurnCount {
+                self.turnEndPositions[completedTurnCount] = count
+            }
         }
 
         /// Append tokens to existing session cache on incremental suffix turn.
         mutating func append(turns: [ChatTurn], additionalTokens: [llama_token], additionalCount: Int,
-                             promptEndPos: Int? = nil, promptTurnCount: Int? = nil) {
+                             promptEndPos: Int? = nil, promptTurnCount: Int? = nil,
+                             completedTurnCount: Int? = nil) {
             self.turns = turns
             if !tokens.isEmpty {
                 self.tokens.append(contentsOf: additionalTokens)
@@ -2492,14 +2609,21 @@ public actor LlamaEngine: LLMEngine {
             if let promptEndPos, let promptTurnCount {
                 self.turnPromptEndPositions[promptTurnCount] = promptEndPos
             }
+            if let completedTurnCount {
+                self.turnEndPositions[completedTurnCount] = self.tokenCount
+            }
         }
 
         /// Multimodal evaluation commit: logical position (`count`) and extra M-RoPE visual slot overhead tracked.
-        mutating func commitMultimodal(turns: [ChatTurn], count: Int, extraVisualTokens: Int = 0) {
+        mutating func commitMultimodal(turns: [ChatTurn], count: Int, extraVisualTokens: Int = 0,
+                                       completedTurnCount: Int? = nil) {
             self.turns = turns
             self.tokens.removeAll()
             self.tokenCount = count
             self.extraVisualTokens = extraVisualTokens
+            if let completedTurnCount {
+                self.turnEndPositions[completedTurnCount] = count
+            }
         }
 
         /// Roll the logical cache state back to a whole-sequence checkpoint boundary, used right after
@@ -2513,6 +2637,8 @@ public actor LlamaEngine: LLMEngine {
             self.extraVisualTokens = extraVisualTokens
             self.turnPromptEndPositions = self.turnPromptEndPositions.filter { $0.key <= turnCount }
             self.turnPromptEndPositions[turnCount] = promptEndPos
+            self.turnEndPositions = self.turnEndPositions.filter { $0.key <= turnCount }
+            self.turnEndPositions[turnCount] = count
         }
     }
 
