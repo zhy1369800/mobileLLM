@@ -2655,21 +2655,65 @@ public final class ChatStore {
 
     // MARK: - Context meter
 
+    private struct ContextHistoryCache {
+        let conversationID: UUID
+        let messages: [Message]
+        let compactionEnabled: Bool
+        let compactionCutoffID: UUID?
+        let compactionSummary: String?
+        let historyTokens: Int
+        let recentUserTurns: [String]
+    }
+    @ObservationIgnored private var contextHistoryCache: ContextHistoryCache?
+
     /// Tokens currently used by the active thread's context vs the cap (composer meter; DESIGN §4).
     public func contextUsage() -> (used: Int, cap: Int) {
         // The meter must show the cap the engine actually runs at, not the requested one.
         let cap = effectiveContextTokenCap
         guard let convo = activeConversation else { return (0, cap) }
-        let messagesToCount: [Message]
-        var summaryTokens = 0
-        if settings.autoCompactionEnabled, !isOnlineActive,
-           let summary = convo.compactionSummary, !summary.isEmpty,
-           let cutoff = convo.compactionCutoffMessageID,
-           let active = ContextCompactor.activeMessages(convo.messages, cutoffID: cutoff) {
-            messagesToCount = active
-            summaryTokens = ContextCompactor.tokens(in: ContextCompactor.summaryBlock(summary), role: .system)
+        let compactionEnabled = settings.autoCompactionEnabled && !isOnlineActive
+
+        let historyTokens: Int
+        let recentUserTurns: [String]
+        if let cache = contextHistoryCache,
+           cache.conversationID == convo.id,
+           cache.compactionEnabled == compactionEnabled,
+           cache.compactionCutoffID == convo.compactionCutoffMessageID,
+           cache.compactionSummary == convo.compactionSummary,
+           cache.messages == convo.messages {
+            historyTokens = cache.historyTokens
+            recentUserTurns = cache.recentUserTurns
         } else {
-            messagesToCount = convo.messages
+            let messagesToCount: [Message]
+            var summaryTokens = 0
+            if compactionEnabled,
+               let summary = convo.compactionSummary, !summary.isEmpty,
+               let cutoff = convo.compactionCutoffMessageID,
+               let active = ContextCompactor.activeMessages(convo.messages, cutoffID: cutoff) {
+                messagesToCount = active
+                summaryTokens = ContextCompactor.tokens(in: ContextCompactor.summaryBlock(summary), role: .system)
+            } else {
+                messagesToCount = convo.messages
+            }
+            var computedHistoryTokens = summaryTokens
+            for message in messagesToCount where !message.answer.isEmpty {
+                computedHistoryTokens += ContextCompactor.tokens(of: message)
+            }
+            let computedRecentUserTurns = messagesToCount
+                .filter { $0.role == .user && !$0.answer.isEmpty }
+                .suffix(2)
+                .map(\.answer)
+            contextHistoryCache = ContextHistoryCache(
+                conversationID: convo.id,
+                messages: convo.messages,
+                compactionEnabled: compactionEnabled,
+                compactionCutoffID: convo.compactionCutoffMessageID,
+                compactionSummary: convo.compactionSummary,
+                historyTokens: computedHistoryTokens,
+                recentUserTurns: computedRecentUserTurns
+            )
+            historyTokens = computedHistoryTokens
+            recentUserTurns = computedRecentUserTurns
         }
 
         // Measured with `ContextCompactor.tokens` — the runtime's own estimator — and the same fixed overhead
@@ -2680,14 +2724,14 @@ public final class ChatStore {
         // meter that warns you after the injection pushed you over the window is no warning at all. (So the
         // count can shift slightly as you type, when the draft brings different facts into range; the
         // block's cap bounds that to a few tokens.)
-        let system = composedSystemPrompt(query: Self.memoryQuery(draft: draft, history: messagesToCount))
+        let query = ([draft] + recentUserTurns).filter { !$0.isEmpty }.joined(separator: " ")
+        let system = composedSystemPrompt(query: query)
         var used = fixedPromptOverhead(
             systemPrompt: system.trimmingCharacters(in: .whitespacesAndNewlines),
             currentText: draft,
             cap: cap
         )
-        used += summaryTokens
-        for message in messagesToCount where !message.answer.isEmpty { used += ContextCompactor.tokens(of: message) }
+        used += historyTokens
         used += streaming.map {
             ContextCompactor.tokens(in: $0.answer, role: .assistant) + ContextCompactor.tokens(in: $0.reasoning, role: .assistant)
         } ?? 0

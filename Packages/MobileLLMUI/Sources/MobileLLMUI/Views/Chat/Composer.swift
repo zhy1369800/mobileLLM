@@ -44,9 +44,7 @@ struct Composer: View {
     /// Composer controls scale with Dynamic Type instead of a hard 44pt.
     @ScaledMetric(relativeTo: .body) private var controlSize: CGFloat = 44
 
-    private var usage: (used: Int, cap: Int) { chat.contextUsage() }
-
-    private var meterColor: Color {
+    private func meterColor(for usage: (used: Int, cap: Int)) -> Color {
         let ratio = usage.cap > 0 ? Double(usage.used) / Double(usage.cap) : 0
         if ratio >= 0.98 { return Theme.danger }
         if ratio >= 0.85 { return Theme.fitAmber }
@@ -185,16 +183,18 @@ struct Composer: View {
     // MARK: Context meter
 
     private var contextMeter: some View {
-        HStack(spacing: Theme.Space.xs) {
+        let currentUsage = chat.contextUsage()
+        let color = meterColor(for: currentUsage)
+        return HStack(spacing: Theme.Space.xs) {
             Spacer()
-            if usage.used > 0 {
+            if currentUsage.used > 0 {
                 Image(systemName: "gauge.with.dots.needle.33percent")
-                    .font(.caption2).foregroundStyle(meterColor)
-                Text(Format.context(usage.used, usage.cap))
+                    .font(.caption2).foregroundStyle(color)
+                Text(Format.context(currentUsage.used, currentUsage.cap))
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(meterColor)
+                    .foregroundStyle(color)
                     .accessibilityLabel("Context used")
-                    .accessibilityValue("\(usage.used) of \(usage.cap) tokens")
+                    .accessibilityValue("\(currentUsage.used) of \(currentUsage.cap) tokens")
             }
         }
         .frame(height: 14)
