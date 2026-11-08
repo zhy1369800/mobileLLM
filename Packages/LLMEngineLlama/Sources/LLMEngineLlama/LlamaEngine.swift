@@ -101,9 +101,10 @@ public actor LlamaEngine: LLMEngine {
     private var checkpointContextCap: Int = 0
     private var checkpointKVBits: Int = -1
     private var checkpointIsSpeculative: Bool = false
-    /// LRU cap: keep the 2 most recent per-turn snapshots. Covers "edit last or second-to-last turn"
-    /// (the vast majority of real edits) while bounding tmp-directory size to ~2 × 130–300 MiB.
-    private static let checkpointMaxSlots = 2
+    /// LRU cap: keep the 3 most recent snapshots (previous turn's completed EOS base + current
+    /// turn's prefilled prompt + current turn's completed EOS base), so both Regenerate and
+    /// Edit-Resend on the latest turn hit a matching prefix boundary.
+    private static let checkpointMaxSlots = 3
     /// Recurrent-state rollback snapshots (`n_rs_seq`) for hybrid architectures (Qwen 3.5 Gated
     /// DeltaNet). Lets `llama_memory_seq_rm` rewind up to this many tokens without recompute — covers
     /// single-token regenerates, but a message edit cuts hundreds+ tokens deep, which always exceeds
@@ -773,6 +774,14 @@ public actor LlamaEngine: LLMEngine {
                 return Self.buildPrompt(messages: msgs, template: promptTemplate,
                                         reasoning: reasoningStyle, thinking: wantThinking)
             }
+            func renderCompletedHistory(_ msgs: [ChatTurn]) -> String {
+                let carriesMedia = msgs.contains(where: { !$0.images.isEmpty })
+                if !carriesMedia, let m = model,
+                   let rendered = Self.autoPrompt(msgs, modelPtr: m, reasoning: reasoningStyle, thinking: wantThinking, addGenerationPrompt: false) {
+                    return rendered.hasSuffix("\n") ? String(rendered.dropLast()) : rendered
+                }
+                return Self.buildCompletedPrompt(messages: msgs, template: promptTemplate)
+            }
 
             // Fit the history into the KV window by dropping WHOLE oldest non-system turns and rebuilding —
             // NEVER by chopping tokens off the front, which would shear the system prompt and the template
@@ -901,7 +910,7 @@ public actor LlamaEngine: LLMEngine {
                 // Save a checkpoint for this turn boundary so an edit-resend can reuse the full
                 // resident KV state even when seq_rm is rejected. The complete prompt token list
                 // is the cache's existing tokens plus the newly decoded suffix.
-                if params.kvCheckpointsEnabled && !sessionCache.hasImages {
+                if params.kvCheckpointsEnabled && !sessionCache.hasImages && (checkpoints.isEmpty || suffixTokens.count > 1024) {
                     let fullPromptTokens = sessionCache.tokens + suffixTokens
                     saveCheckpoint(turnCount: kept.count,
                                    promptTokens: fullPromptTokens,
@@ -1118,7 +1127,8 @@ public actor LlamaEngine: LLMEngine {
             // can restore it instead of recomputing. The write is SYNCHRONOUS on the actor (see
             // saveCheckpoint) and skipped for short contexts (≤ 1024 tok) where full-prefill is
             // already fast enough.
-            if params.kvCheckpointsEnabled && !hasImages, let pt = prefilledPromptTokens, !pt.isEmpty {
+            if params.kvCheckpointsEnabled && !hasImages && (checkpoints.isEmpty || promptTokenCount > 1024),
+               let pt = prefilledPromptTokens, !pt.isEmpty {
                 let physicalTokens: [llama_token]
                 if rollbackSucceeded && cachedRollbackTokensCount > 0 && sessionCache.tokens.count >= cachedRollbackTokensCount {
                     physicalTokens = Array(sessionCache.tokens.prefix(cachedRollbackTokensCount)) + suffixTokensToDecode
@@ -1570,10 +1580,25 @@ public actor LlamaEngine: LLMEngine {
                     sessionCache.commitMultimodal(turns: updatedTurns,
                                                   count: baseKvPos + promptTokenCount + generatedTokens.count)
                 }
+                cont.finish()
+                // Save a turn-completed EOS base checkpoint after finishing the UI stream so the
+                // disk write never blocks the final token or completion state on the UI side.
+                if params.kvCheckpointsEnabled && !hasImages && !sessionCache.hasImages && !sessionCache.tokens.isEmpty {
+                    let completedRendered = Self.tokenize(vocab: vocab,
+                                                          text: renderCompletedHistory(updatedTurns),
+                                                          addSpecial: true)
+                    if !completedRendered.isEmpty {
+                        saveCheckpoint(turnCount: updatedTurns.count,
+                                       promptTokens: sessionCache.tokens,
+                                       renderedTokens: completedRendered,
+                                       turns: updatedTurns,
+                                       context: context)
+                    }
+                }
             } else {
                 sessionCache.reset(context: context)
+                cont.finish()
             }
-            cont.finish()
         } catch is CancellationError {
             // Only purely incremental continuations (where the verified session prefix was never modified or rolled back)
             // can safely prune back to `initialCachedSessionTokenCount`. Any prefix-rollback or full-recompute path
@@ -1750,6 +1775,52 @@ public actor LlamaEngine: LLMEngine {
         case .hunyuan:  return hunyuanPrompt(messages, reasoning: reasoning, thinking: thinking)
         case .gemma:    return gemmaPrompt(messages)
         case .auto:     return chatMLPrompt(messages, reasoning: reasoning, thinking: thinking)  // fallback
+        }
+    }
+
+    /// Serialize completed turns (ending with an `.assistant` turn closed by EOG, without trailing
+    /// newline or next-turn assistant opener) so the tokenized result matches the prefix of the next
+    /// turn's full prompt up to the assistant EOG boundary.
+    static func buildCompletedPrompt(messages: [ChatTurn], template: PromptTemplate) -> String {
+        switch template {
+        case .chatML, .auto:
+            var s = ""
+            for m in messages {
+                let role: String
+                switch m.role { case .system: role = "system"; case .user: role = "user"; case .assistant: role = "assistant" }
+                s += "<|im_start|>\(role)\n\(m.content)<|im_end|>\n"
+            }
+            return s.hasSuffix("\n") ? String(s.dropLast()) : s
+        case .deepSeek:
+            let eos = "<｜end▁of▁sentence｜>"
+            var s = coalescedSystemPrompt(messages)
+            for m in messages {
+                switch m.role {
+                case .system: break
+                case .user: s += "<｜User｜>\(m.content)<｜Assistant｜>"
+                case .assistant: s += "\(m.content)\(eos)"
+                }
+            }
+            return s
+        case .hunyuan:
+            let eos = "<｜hy_place▁holder▁no▁2｜>"
+            var s = coalescedSystemPrompt(messages)
+            for m in messages {
+                switch m.role {
+                case .system: break
+                case .user: s += "<｜hy_User｜>\(m.content)<｜hy_Assistant｜>"
+                case .assistant: s += "\(m.content)\(eos)"
+                }
+            }
+            return s
+        case .gemma:
+            var s = ""
+            for m in messages {
+                let role: String
+                switch m.role { case .system: role = "system"; case .user: role = "user"; case .assistant: role = "model" }
+                s += "<|turn>\(role)\n\(m.content)<turn|>\n"
+            }
+            return s.hasSuffix("\n") ? String(s.dropLast()) : s
         }
     }
 
