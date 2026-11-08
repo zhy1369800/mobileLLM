@@ -94,6 +94,13 @@ public actor LlamaEngine: LLMEngine {
     private var checkpoints: [Int: SessionCheckpoint] = [:]
     /// Insertion order of checkpoint keys (oldest first), used for LRU eviction.
     private var checkpointOrder: [Int] = []
+    /// Compatibility signature of the currently saved checkpoints. Snapshots survive transient
+    /// `unload()` calls (e.g. backgrounding / leaving chat) and are cleared only when a different
+    /// model/variant is loaded or when context capacity / KV dtype / speculative layout changes.
+    private var checkpointModelKey: String? = nil
+    private var checkpointContextCap: Int = 0
+    private var checkpointKVBits: Int = -1
+    private var checkpointIsSpeculative: Bool = false
     /// LRU cap: keep the 2 most recent per-turn snapshots. Covers "edit last or second-to-last turn"
     /// (the vast majority of real edits) while bounding tmp-directory size to ~2 × 130–300 MiB.
     private static let checkpointMaxSlots = 2
@@ -118,6 +125,7 @@ public actor LlamaEngine: LLMEngine {
         return "ckpt-\(String(scrubbed.prefix(48)))-"
     }
     private var loadedID: String?
+    private var loadedModelKey: String?
     private var thinkingCapable = true
     private var eosText = "<|im_end|>"
     private var promptTemplate: PromptTemplate = .chatML
@@ -201,6 +209,10 @@ public actor LlamaEngine: LLMEngine {
         guard Self.backendReady else { throw EngineError.backendUnavailable }
         let drain = await generationLifecycle.beginDrain()
         defer { generationLifecycle.endDrain(drain) }
+        let newModelKey = "\(modelSpec.id)|\(variant.id)"
+        if let existingKey = checkpointModelKey, existingKey != newModelKey {
+            clearCheckpoints()
+        }
         // Reloading over a resident model must free the predecessor first: llama_model_load_from_file
         // returns a fresh allocation, so overwriting the pointers would leak the old multi-GB model
         // (and `context = nil` below would leak its context — only llama_free releases it).
@@ -223,6 +235,7 @@ public actor LlamaEngine: LLMEngine {
         model = m
         vocab = llama_model_get_vocab(m)
         loadedID = modelSpec.id
+        loadedModelKey = newModelKey
         loadedGpuLayers = mp.n_gpu_layers
         thinkingCapable = modelSpec.architecture.thinkingCapable
         eosText = modelSpec.architecture.eos
@@ -296,12 +309,11 @@ public actor LlamaEngine: LLMEngine {
         if let model { llama_model_free(model) }
         mtmdContext = nil
         projectorPath = nil
-        context = nil; model = nil; vocab = nil; loadedID = nil; contextCap = 0; contextKVBits = -1; contextBatchSize = 0; contextRequestedBatchSize = 0
+        context = nil; model = nil; vocab = nil; loadedID = nil; loadedModelKey = nil; contextCap = 0; contextKVBits = -1; contextBatchSize = 0; contextRequestedBatchSize = 0
         loadedGpuLayers = 0
         hasMtpSupport = false
         supportsPartialTrim = true
         sessionCache.reset()
-        clearCheckpoints()
     }
 
     // MARK: - Session checkpoints (edit-resend whole-sequence reuse)
@@ -312,11 +324,12 @@ public actor LlamaEngine: LLMEngine {
     /// records for the seq_rm regenerate path. On restore the KV / recurrent state is reloaded and only
     /// the tokens after the edit point are decoded.
     private struct SessionCheckpoint {
-        let turnCount: Int           // kept.count at save time
-        let promptEndPos: Int        // physical KV position where the prompt ended == tokens.count
+        let turnCount: Int                   // kept.count at save time
+        let promptEndPos: Int                // physical KV position where the prompt ended == tokens.count
         let filePath: String
-        let tokens: [llama_token]    // full prompt tokens, for prefix validation against the new prompt
-        let turns: [ChatTurn]        // kept turns at save time, to rebuild sessionCache.turns on restore
+        let tokens: [llama_token]            // physical KV tokens saved in the file (for round-trip check)
+        let renderedTokens: [llama_token]    // canonical rendered prompt tokens (for prefix validation)
+        let turns: [ChatTurn]                // kept turns at save time, to rebuild sessionCache.turns on restore
     }
 
     private func checkpointDirectoryURL() -> URL? {
@@ -349,11 +362,15 @@ public actor LlamaEngine: LLMEngine {
         return dir
     }
 
-    /// Remove all checkpoint files and the in-memory index. Called on model unload and whenever the
-    /// context is rebuilt — the saved KV layout / dtype no longer matches a rebuilt context.
+    /// Remove all checkpoint files and the in-memory index. Called on model switch and whenever the
+    /// context layout / dtype changes — the saved KV layout / dtype no longer matches.
     private func clearCheckpoints() {
         checkpoints.removeAll()
         checkpointOrder.removeAll()
+        checkpointModelKey = nil
+        checkpointContextCap = 0
+        checkpointKVBits = -1
+        checkpointIsSpeculative = false
         if let dir = checkpointDirectory {
             try? FileManager.default.removeItem(at: dir)
             checkpointDirectory = nil
@@ -381,7 +398,12 @@ public actor LlamaEngine: LLMEngine {
     /// adds to TTFT and blocks other actor calls (unload/cancel) while it is in flight. TODO: move the
     /// write off the actor (snapshot state to memory first, then write from a background task) if the
     /// TTFT impact matters.
-    private func saveCheckpoint(turnCount: Int, promptTokens: [llama_token], turns: [ChatTurn], context: OpaquePointer) {
+    private func saveCheckpoint(turnCount: Int,
+                                promptTokens: [llama_token],
+                                renderedTokens: [llama_token]? = nil,
+                                turns: [ChatTurn],
+                                context: OpaquePointer) {
+        let canonicalTokens = (renderedTokens?.isEmpty == false) ? renderedTokens! : promptTokens
         guard !promptTokens.isEmpty, !turns.isEmpty else {
             NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: empty tokens or turns")
             return
@@ -392,7 +414,10 @@ public actor LlamaEngine: LLMEngine {
             return
         }
         // Same-turn boundary with identical prompt: already saved, skip the (potentially 100+ MB) write.
-        if let existing = checkpoints[turnCount], existing.tokens == promptTokens {
+        if let existing = checkpoints[turnCount],
+           existing.tokens == promptTokens,
+           existing.renderedTokens == canonicalTokens,
+           FileManager.default.fileExists(atPath: existing.filePath) {
             NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: turn %d identical to existing checkpoint", Int32(turnCount))
             return
         }
@@ -403,21 +428,32 @@ public actor LlamaEngine: LLMEngine {
         let filePath = dir.appendingPathComponent("\(checkpointFilePrefix)\(turnCount).bin").path
         let tokensCopy = promptTokens
         let turnsCopy = turns
-        if checkpoints[turnCount] == nil { checkpointOrder.append(turnCount) }
-        checkpoints[turnCount] = SessionCheckpoint(turnCount: turnCount,
-                                                   promptEndPos: promptTokens.count,
-                                                   filePath: filePath,
-                                                   tokens: promptTokens,
-                                                   turns: turnsCopy)
-        trimCheckpoints()
         let written = filePath.withCString { cPath in
             tokensCopy.withUnsafeBufferPointer { buf in
                 llama_state_seq_save_file(context, cPath, 0, buf.baseAddress, buf.count)
             }
         }
         if written == 0 {
+            if checkpoints[turnCount]?.filePath == filePath {
+                checkpoints.removeValue(forKey: turnCount)
+                checkpointOrder.removeAll { $0 == turnCount }
+            }
+            try? FileManager.default.removeItem(atPath: filePath)
             NSLog("[LlamaEngine][Checkpoint] Checkpoint save failed (turn=%d, tokens=%d, path=%@)", Int32(turnCount), Int32(promptTokens.count), filePath)
         } else {
+            checkpointOrder.removeAll { $0 == turnCount }
+            checkpointOrder.append(turnCount)
+            checkpoints[turnCount] = SessionCheckpoint(turnCount: turnCount,
+                                                       promptEndPos: promptTokens.count,
+                                                       filePath: filePath,
+                                                       tokens: promptTokens,
+                                                       renderedTokens: canonicalTokens,
+                                                       turns: turnsCopy)
+            checkpointModelKey = loadedModelKey
+            checkpointContextCap = contextCap
+            checkpointKVBits = contextKVBits
+            checkpointIsSpeculative = (contextSpeculativeMode != .off)
+            trimCheckpoints()
             NSLog("[LlamaEngine][Checkpoint] Checkpoint save succeeded (turn=%d, tokens=%d, bytes=%zu, path=%@)", Int32(turnCount), Int32(promptTokens.count), written, filePath)
             // New files do not inherit the directory's isExcludedFromBackup attribute; mark this one
             // so the fresh snapshot stays out of iCloud backup.
@@ -456,12 +492,12 @@ public actor LlamaEngine: LLMEngine {
         // most wants to know about. First-wins: a later, older candidate's failure must not overwrite
         // the newest match's reason in the logs UI.
         var loadFailureReason: String? = nil
-        let candidates = checkpoints.values.sorted { $0.promptEndPos > $1.promptEndPos }
+        let candidates = checkpoints.values.sorted { $0.renderedTokens.count > $1.renderedTokens.count }
         for cp in candidates {
-            guard cp.promptEndPos >= minCommon, cp.promptEndPos <= newPromptTokens.count else { continue }
-            // Prefix validation: the saved prompt must equal the head of the new prompt.
-            let prefix = Array(newPromptTokens.prefix(cp.promptEndPos))
-            guard prefix == cp.tokens else { continue }
+            let matchLen = cp.renderedTokens.count
+            guard matchLen >= minCommon, matchLen <= newPromptTokens.count else { continue }
+            // Prefix validation: the saved canonical prompt must equal the head of the new prompt.
+            guard newPromptTokens.prefix(matchLen).elementsEqual(cp.renderedTokens) else { continue }
 
             // Load and verify the file round-trips to the same token list (defensive: file may be stale).
             // Buffer is sized to the larger of the checkpoint token count and the new prompt, plus a
@@ -479,7 +515,7 @@ public actor LlamaEngine: LLMEngine {
                 }
                 continue
             }
-            guard Array(loaded.prefix(loadedCount)) == cp.tokens else {
+            guard loaded.prefix(loadedCount).elementsEqual(cp.tokens) else {
                 if loadFailureReason == nil {
                     loadFailureReason = "检查点文件内容校验失败 (turn=\(cp.turnCount))"
                 }
@@ -490,9 +526,9 @@ public actor LlamaEngine: LLMEngine {
             sessionCache.rollbackToCheckpoint(turns: cp.turns, tokens: cp.tokens, count: cp.promptEndPos,
                                               turnCount: cp.turnCount, promptEndPos: cp.promptEndPos)
 
-            let suffix = newPromptTokens[cp.promptEndPos...]
-            NSLog("[LlamaEngine] Checkpoint restored: turn=%d, promptEndPos=%d, suffix=%d tok",
-                  Int32(cp.turnCount), Int32(cp.promptEndPos), Int32(suffix.count))
+            let suffix = newPromptTokens[matchLen...]
+            NSLog("[LlamaEngine] Checkpoint restored: turn=%d, promptEndPos=%d (matched=%d), suffix=%d tok",
+                  Int32(cp.turnCount), Int32(cp.promptEndPos), Int32(matchLen), Int32(suffix.count))
             return (cp.promptEndPos, suffix)
         }
         if let loadFailureReason {
@@ -552,7 +588,11 @@ public actor LlamaEngine: LLMEngine {
             return
         }
         sessionCache.reset()
-        clearCheckpoints()
+        if !checkpoints.isEmpty,
+           checkpointContextCap != 0,
+           (checkpointContextCap != target || checkpointKVBits != kvBits || checkpointIsSpeculative != isSpeculative) {
+            clearCheckpoints()
+        }
         if let context { llama_free(context) }
         // Reset BEFORE the fallible init below: if llama_init_from_model throws out of this function,
         // `context` must not keep pointing at the freed allocation (a retry would double-free, and the
@@ -714,6 +754,9 @@ public actor LlamaEngine: LLMEngine {
                 }
             }
 
+            if !params.kvCheckpointsEnabled, !checkpoints.isEmpty || checkpointDirectory != nil {
+                clearCheckpoints()
+            }
             try ensureContext(cap: params.contextTokenCap, kvBits: params.kvBits, batchSize: params.prefillBatchSize, speculativeMode: params.speculativeMode)
             guard let context else { throw EngineError.contextInitFailed }
 
@@ -860,7 +903,11 @@ public actor LlamaEngine: LLMEngine {
                 // is the cache's existing tokens plus the newly decoded suffix.
                 if params.kvCheckpointsEnabled && !sessionCache.hasImages {
                     let fullPromptTokens = sessionCache.tokens + suffixTokens
-                    saveCheckpoint(turnCount: kept.count, promptTokens: fullPromptTokens, turns: kept, context: context)
+                    saveCheckpoint(turnCount: kept.count,
+                                   promptTokens: fullPromptTokens,
+                                   renderedTokens: fittedPromptTokens,
+                                   turns: kept,
+                                   context: context)
                 }
                 // Note: conversationTokens for speculative n-gram lookup is built lazily below,
                 // only when speculative mode is active and prompt lookup is actually in use.
@@ -998,9 +1045,6 @@ public actor LlamaEngine: LLMEngine {
                     if residentHadImages {
                         rollbackDiagnosticMessage = "检查点恢复跳过: 会话含多模态图片"
                         NSLog("[LlamaEngine][CacheMiss] Checkpoint restore skipped: session has images")
-                    } else if sessionCache.tokens.isEmpty {
-                        rollbackDiagnosticMessage = "检查点恢复跳过: 会话无历史Token"
-                        NSLog("[LlamaEngine][CacheMiss] Checkpoint restore skipped: no resident history")
                     } else {
                         var restoreReason = ""
                         if let restored = restoreCheckpoint(newPromptTokens: promptTokens,
@@ -1011,7 +1055,7 @@ public actor LlamaEngine: LLMEngine {
                             if restored.suffix.isEmpty {
                                 // Exact same prompt as the checkpoint: replay the last token to refresh logits
                                 // (mirrors the isFullPromptMatch regenerate path). restored.pos >= 16 here.
-                                suffixTokens = [promptTokens[restored.pos - 1]]
+                                suffixTokens = [promptTokens[promptTokens.count - 1]]
                             } else {
                                 suffixTokens = Array(restored.suffix)
                             }
@@ -1075,7 +1119,17 @@ public actor LlamaEngine: LLMEngine {
             // saveCheckpoint) and skipped for short contexts (≤ 1024 tok) where full-prefill is
             // already fast enough.
             if params.kvCheckpointsEnabled && !hasImages, let pt = prefilledPromptTokens, !pt.isEmpty {
-                saveCheckpoint(turnCount: kept.count, promptTokens: pt, turns: kept, context: context)
+                let physicalTokens: [llama_token]
+                if rollbackSucceeded && cachedRollbackTokensCount > 0 && sessionCache.tokens.count >= cachedRollbackTokensCount {
+                    physicalTokens = Array(sessionCache.tokens.prefix(cachedRollbackTokensCount)) + suffixTokensToDecode
+                } else {
+                    physicalTokens = pt
+                }
+                saveCheckpoint(turnCount: kept.count,
+                               promptTokens: physicalTokens,
+                               renderedTokens: pt,
+                               turns: kept,
+                               context: context)
             }
             let promptSecs = max(Date().timeIntervalSince(prefillStart), 0.0001)
             let cachedPromptTokensCount: Int = isIncrementalContinuation ? sessionCache.tokenCount : cachedRollbackTokensCount
