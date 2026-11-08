@@ -214,4 +214,24 @@ final class ContextCompactorTests: XCTestCase {
         XCTAssertFalse(plan.toSummarize.isEmpty, "Should summarize older turns to relieve tight history capacity")
         XCTAssertTrue(history.contains { $0.id == plan.newCutoffID })
     }
+
+    func testPlanNeverSwallowsLatestExchangeWhenOversizedTurnExceedsRecentBudget() throws {
+        var history = conversation(pairs: 3)
+        let latestUser = Message(role: .user, answer: "Please explain this in full detail.")
+        let hugeAssistant = Message(role: .assistant, answer: String(repeating: "long explanation ", count: 600))
+        history.append(latestUser)
+        history.append(hugeAssistant)
+
+        let plan = try XCTUnwrap(ContextCompactor.plan(
+            history: history,
+            cutoffID: nil,
+            summary: nil,
+            fixedTokens: 0,
+            contextLength: 2_048
+        ))
+        let activeAfter = try XCTUnwrap(ContextCompactor.activeMessages(history, cutoffID: plan.newCutoffID))
+        XCTAssertFalse(activeAfter.isEmpty, "An oversized latest turn must not cause compaction to swallow the entire visible conversation")
+        XCTAssertEqual(activeAfter.first?.id, latestUser.id, "At least the latest user/assistant exchange stays verbatim")
+        XCTAssertFalse(plan.toSummarize.contains { $0.id == latestUser.id || $0.id == hugeAssistant.id })
+    }
 }

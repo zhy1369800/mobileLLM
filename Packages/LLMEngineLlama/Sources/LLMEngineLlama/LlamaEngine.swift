@@ -899,7 +899,7 @@ public actor LlamaEngine: LLMEngine {
             // head mid-conversation. Reserve room for the answer; if even {system prefix + final user turn}
             // overflows, fail with a clear error rather than emit garbage from a half-formed prompt. Each
             // attached image also reserves ~600 tokens — its vision-encoder embeddings consume real context.
-            let reserve = Self.answerTokenReserve(maxTokens: params.maxTokens)
+            let reserve = Self.answerTokenReserve(maxTokens: params.maxTokens, contextCap: contextCap)
             let budget = contextCap - reserve
             var fittedPromptText = ""
             var fittedPromptTokens: [llama_token] = []
@@ -2106,11 +2106,14 @@ public actor LlamaEngine: LLMEngine {
         return tokenCount(minimal) <= budget ? minimal : nil
     }
 
-    /// Output space reserved by context fitting. A positive request is a hard promise and must be
-    /// reserved in full; `0` retains the existing "unbounded generation" meaning and uses a finite
-    /// 256-token planning reserve so a prompt can still be admitted.
-    static func answerTokenReserve(maxTokens: Int) -> Int {
-        max(8, maxTokens > 0 ? maxTokens : 256)
+    /// Output space reserved by context fitting. When `contextCap` is supplied, the planning reserve is
+    /// bounded by `ContextPolicy.reservedOutputTokens(for:)` so the engine never silently evicts older turns
+    /// before upper-layer compaction (`ContextCompactor` / `ContextCompiler`) considers the window full;
+    /// `0` retains the existing "unbounded generation" meaning and uses a finite 256-token planning reserve.
+    static func answerTokenReserve(maxTokens: Int, contextCap: Int? = nil) -> Int {
+        let raw = max(8, maxTokens > 0 ? maxTokens : 256)
+        guard let contextCap else { return raw }
+        return min(raw, ContextPolicy.reservedOutputTokens(for: contextCap))
     }
 
     /// Render the prompt with the template EMBEDDED IN THE GGUF via llama.cpp — the path for arbitrary

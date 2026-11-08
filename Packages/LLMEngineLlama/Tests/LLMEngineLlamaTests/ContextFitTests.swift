@@ -85,4 +85,10 @@ final class ContextFitTests: XCTestCase {
         XCTAssertEqual(LlamaEngine.answerTokenReserve(maxTokens: 0), 256,
                        "zero still means unbounded generation with the legacy finite planning reserve")
     }
+
+    func testAnswerReserveAlignsWithContextPolicyWhenContextCapSupplied() {
+        XCTAssertEqual(LlamaEngine.answerTokenReserve(maxTokens: 2_048, contextCap: 4_096), 1_024,
+                       "planning reserve is bounded by ContextPolicy.reservedOutputTokens(for:) to prevent silent turn eviction before compaction")
+        XCTAssertEqual(LlamaEngine.answerTokenReserve(maxTokens: 512, contextCap: 4_096), 512)
+    }
 }

@@ -2257,8 +2257,12 @@ public final class ChatStore {
                     query: memoryQuery,
                     memoryEnabled: turnMemoryEnabled
                 ) else { return }
+                let historyInputCap = max(
+                    256,
+                    params.contextTokenCap - ContextPolicy.reservedOutputTokens(for: params.contextTokenCap)
+                )
                 let turns = Self.chatTurns(messages: history, systemPrompt: systemPrompt,
-                                           cap: params.contextTokenCap,
+                                           cap: historyInputCap,
                                            images: { imagesByMessage[$0.id] ?? [] })
                 if toolsOn {
                     // Agent loop: the model may call the local calculator/clock, a Wikipedia lookup, or any
