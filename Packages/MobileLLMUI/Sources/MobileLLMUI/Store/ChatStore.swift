@@ -2741,7 +2741,7 @@ public final class ChatStore {
         used += streaming.map {
             ContextCompactor.tokens(in: $0.answer, role: .assistant) + ContextCompactor.tokens(in: $0.reasoning, role: .assistant)
         } ?? 0
-        return (used, cap)
+        return (min(used, cap), cap)
     }
 
     // MARK: - Toasts
