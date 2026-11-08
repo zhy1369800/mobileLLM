@@ -58,7 +58,10 @@ public final class ChatStore {
             // Every navigation path — row selection, back, delete fallback, Undo, erase — invalidates the
             // previous conversation's asynchronous model restore. Keeping this at the state boundary avoids
             // one forgotten assignment letting a slow native load switch models after the user moved on.
-            if activeID != oldValue { cancelModelRestore?() }
+            if activeID != oldValue {
+                contextHistoryCache = nil
+                cancelModelRestore?()
+            }
         }
     }
     public var draft: String = ""
@@ -2670,7 +2673,10 @@ public final class ChatStore {
     public func contextUsage() -> (used: Int, cap: Int) {
         // The meter must show the cap the engine actually runs at, not the requested one.
         let cap = effectiveContextTokenCap
-        guard let convo = activeConversation else { return (0, cap) }
+        guard let convo = activeConversation else {
+            contextHistoryCache = nil
+            return (0, cap)
+        }
         let compactionEnabled = settings.autoCompactionEnabled && !isOnlineActive
 
         let historyTokens: Int
