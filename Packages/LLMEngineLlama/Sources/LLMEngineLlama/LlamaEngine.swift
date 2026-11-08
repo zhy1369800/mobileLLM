@@ -524,6 +524,7 @@ public actor LlamaEngine: LLMEngine {
     /// `reason` (in-out) carries why, so the caller can surface the miss in the logs UI.
     private func restoreCheckpoint(newPromptTokens: [llama_token],
                                    minCommon: Int,
+                                   reserve: Int,
                                    context: OpaquePointer,
                                    reason: inout String) -> (pos: Int, suffix: ArraySlice<llama_token>)? {
         guard !checkpoints.isEmpty else {
@@ -541,6 +542,17 @@ public actor LlamaEngine: LLMEngine {
             guard matchLen >= minCommon, matchLen <= newPromptTokens.count else { continue }
             // Prefix validation: the saved canonical prompt must equal the head of the new prompt.
             guard newPromptTokens.prefix(matchLen).elementsEqual(cp.renderedTokens) else { continue }
+
+            // Physical KV capacity guard: in thinking mode `cp.promptEndPos` includes historical
+            // `<think>` blocks and is larger than `matchLen`. Ensure sufficient headroom remains
+            // for the suffix and answer reserve before loading the file.
+            let suffixCount = max(1, newPromptTokens.count - matchLen)
+            guard cp.promptEndPos + suffixCount + reserve <= contextCap else {
+                if loadFailureReason == nil {
+                    loadFailureReason = "检查点物理KV余量不足 (pos=\(cp.promptEndPos), suffix=\(suffixCount), reserve=\(reserve), cap=\(contextCap))"
+                }
+                continue
+            }
 
             guard loadCheckpointFile(cp, context: context, failureReason: &loadFailureReason) else {
                 continue
@@ -570,6 +582,7 @@ public actor LlamaEngine: LLMEngine {
     /// Attempt to restore the best matching checkpoint for a multimodal (`hasImages == true`) turn.
     private func restoreMultimodalCheckpoint(kept: [ChatTurn],
                                              vocab: OpaquePointer,
+                                             reserve: Int,
                                              renderPrompt: ([ChatTurn]) -> String,
                                              context: OpaquePointer,
                                              reason: inout String) -> MultimodalRestoreMatch? {
@@ -603,7 +616,12 @@ public actor LlamaEngine: LLMEngine {
                     guard let lastMarkerRange = fullText.range(of: marker, options: .backwards) else { continue }
                     let tailText = String(fullText[lastMarkerRange.upperBound...])
                     let tailTokens = Self.tokenize(vocab: vocab, text: tailText, addSpecial: false)
-                    guard !tailTokens.isEmpty, cp.promptEndPos + tailTokens.count < contextCap else { continue }
+                    guard !tailTokens.isEmpty, cp.promptEndPos + tailTokens.count + reserve <= contextCap else {
+                        if loadFailureReason == nil {
+                            loadFailureReason = "检查点物理KV余量不足 (pos=\(cp.promptEndPos), tail=\(tailTokens.count), reserve=\(reserve), cap=\(contextCap))"
+                        }
+                        continue
+                    }
                     guard loadCheckpointFile(cp, context: context, failureReason: &loadFailureReason) else { continue }
                     NSLog("[LlamaEngine] Multimodal visual-prefix checkpoint restored: turn=%d (kept=%d), pos=%d, tail=%d tok",
                           Int32(cp.turnCount), Int32(kept.count), Int32(cp.promptEndPos), Int32(tailTokens.count))
@@ -1047,6 +1065,7 @@ public actor LlamaEngine: LLMEngine {
                         var restoreReason = ""
                         if let match = restoreMultimodalCheckpoint(kept: kept,
                                                                    vocab: vocab,
+                                                                   reserve: incrementalReserve,
                                                                    renderPrompt: renderPrompt,
                                                                    context: context,
                                                                    reason: &restoreReason) {
@@ -1071,7 +1090,7 @@ public actor LlamaEngine: LLMEngine {
                                     let suffixText = (promptTemplate == .deepSeek || promptTemplate == .hunyuan || rawSuffix.hasPrefix("\n"))
                                         ? rawSuffix : ("\n" + rawSuffix)
                                     let suffixTokens = Self.tokenize(vocab: vocab, text: suffixText, addSpecial: false)
-                                    if !suffixTokens.isEmpty && pos + suffixTokens.count < contextCap,
+                                    if !suffixTokens.isEmpty && pos + suffixTokens.count + incrementalReserve <= contextCap,
                                        try await decodeSuffix(suffixTokens, from: pos,
                                                               nBatch: nBatch, context: context, governance: governance) {
                                         promptTokenCount = suffixTokens.count
@@ -1083,7 +1102,7 @@ public actor LlamaEngine: LLMEngine {
                                         NSLog("[LlamaEngine][CacheHit] multimodal turn-prefix checkpoint restore: reused %d tokens, decoded suffix %d tok",
                                               Int32(pos), Int32(suffixTokens.count))
                                     }
-                                } else if pos + Self.imageTokenCount(remainingTurns) < contextCap {
+                                } else if pos + Self.imageTokenCount(remainingTurns) + incrementalReserve <= contextCap {
                                     promptTokenCount = try await mtmdPrefill(turnsToEval: remainingTurns,
                                                                              fullKeptTurns: kept,
                                                                              startPos: pos,
@@ -1248,6 +1267,7 @@ public actor LlamaEngine: LLMEngine {
                     var restoreReason = ""
                     if let restored = restoreCheckpoint(newPromptTokens: promptTokens,
                                                         minCommon: 16,
+                                                        reserve: incrementalReserve,
                                                         context: context,
                                                         reason: &restoreReason) {
                         let suffixTokens: [llama_token]
@@ -1260,7 +1280,7 @@ public actor LlamaEngine: LLMEngine {
                         }
                         effectiveCommon = restored.pos
                         suffixTokensToDecode = suffixTokens
-                        totalPromptCountForStats = promptTokens.count
+                        totalPromptCountForStats = effectiveCommon + suffixTokens.count
                         if try await decodeSuffix(suffixTokens, from: effectiveCommon,
                                                   nBatch: nBatch, context: context, governance: governance) {
                             promptTokenCount = suffixTokens.count
