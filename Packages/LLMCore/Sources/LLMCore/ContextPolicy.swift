@@ -101,6 +101,17 @@ public enum ContextPolicy {
         min(1_024, maximumInputTokens(for: contextLength) / 8)
     }
 
+    /// Tool overhead tokens including bounded schema allocation and tool turn reserve tokens.
+    public static func toolOverheadTokens(
+        measuredSchema: Int,
+        contextLength: Int,
+        online: Bool
+    ) -> Int {
+        let ceiling = maximumToolSchemaBudget(for: contextLength, online: online, toolsEnabled: true)
+        let schema = min(ceiling, max(0, measuredSchema))
+        return schema > 0 ? (schema + toolTurnReserveTokens(for: contextLength)) : 0
+    }
+
     /// Fixed overhead tokens consumed before conversation history: system prompt, current user input,
     /// reserved generation output, and tool schemas (`toolSchemaTokens` is the caller's measured schema
     /// cost, capped here by the same ceiling the runtime enforces) plus the tool-turn reserve when any
@@ -112,11 +123,8 @@ public enum ContextPolicy {
         contextLength: Int,
         online: Bool
     ) -> Int {
-        let ceiling = maximumToolSchemaBudget(for: contextLength, online: online, toolsEnabled: true)
-        let schema = min(ceiling, max(0, toolSchemaTokens))
         return systemPromptTokens + currentUserTokens
             + reservedOutputTokens(for: contextLength)
-            + schema
-            + (schema > 0 ? toolTurnReserveTokens(for: contextLength) : 0)
+            + toolOverheadTokens(measuredSchema: toolSchemaTokens, contextLength: contextLength, online: online)
     }
 }

@@ -541,10 +541,13 @@ public actor LlamaEngine: LLMEngine {
             return nil
         }
         var loadFailureReason: String? = nil
-        let candidates = checkpoints.values.sorted { $0.promptEndPos > $1.promptEndPos }
-
         // Strategy 1: Semantic turn-boundary matching (bypasses token-level divergence).
-        for cp in candidates {
+        // Semantic candidates must be sorted by turnCount descending (most recent completed turn first)
+        // so that edit-resend maximizes semantic conversation history reuse rather than physical position
+        // (which in thinking mode can be artificially larger on older turns due to historical <think> blocks).
+        let semanticCandidates = checkpoints.values.sorted { $0.turnCount > $1.turnCount }
+
+        for cp in semanticCandidates {
             guard !cp.hasImages else { continue }
             if cp.turnCount < kept.count,
                cp.turns.count == cp.turnCount,
@@ -569,8 +572,21 @@ public actor LlamaEngine: LLMEngine {
                                                     reasoning: reasoningStyle, thinking: thinking)
                     suffixText = fallback.hasPrefix("\n") ? fallback : ("\n" + fallback)
                 }
-                let suffixTokens = vocab != nil ? Self.tokenize(vocab: vocab!, text: suffixText, addSpecial: false) : []
+                var suffixTokens = vocab != nil ? Self.tokenize(vocab: vocab!, text: suffixText, addSpecial: false) : []
                 guard !suffixTokens.isEmpty else { continue }
+
+                // Token alignment check: eliminate subtle boundary BPE divergence by aligning
+                // with the canonical prompt tokens tail slice when the body matches and start position exactly aligns.
+                if suffixTokens.count > 2,
+                   newPromptTokens.count - suffixTokens.count == cp.physicalEndPos {
+                    let canonicalSuffix = Array(newPromptTokens[(newPromptTokens.count - suffixTokens.count)...])
+                    if canonicalSuffix != suffixTokens,
+                       canonicalSuffix.suffix(from: 2) == suffixTokens.suffix(from: 2) {
+                        NSLog("[LlamaEngine] Aligned boundary BPE token divergence in restoreCheckpoint to canonical prompt tokens")
+                        suffixTokens = canonicalSuffix
+                    }
+                }
+
                 guard cp.physicalEndPos + suffixTokens.count + reserve <= contextCap else {
                     if loadFailureReason == nil {
                         loadFailureReason = "检查点物理KV余量不足 (pos=\(cp.physicalEndPos), suffix=\(suffixTokens.count), reserve=\(reserve), cap=\(contextCap))"
@@ -586,8 +602,9 @@ public actor LlamaEngine: LLMEngine {
             }
         }
 
-        // Strategy 2: Fallback to token-level prefix matching.
-        for cp in candidates {
+        // Strategy 2: Fallback to token-level prefix matching (sorted by canonical prefix length descending).
+        let tokenCandidates = checkpoints.values.sorted { $0.renderedTokens.count > $1.renderedTokens.count }
+        for cp in tokenCandidates {
             guard !cp.hasImages else { continue }
             let matchLen = cp.renderedTokens.count
             guard matchLen >= minCommon, matchLen <= newPromptTokens.count else { continue }
@@ -1267,8 +1284,17 @@ public actor LlamaEngine: LLMEngine {
                                                                 reasoning: reasoningStyle, thinking: wantThinking)
                                 suffixText = fallback.hasPrefix("\n") ? fallback : ("\n" + fallback)
                             }
-                            let sTokens = Self.tokenize(vocab: vocab, text: suffixText, addSpecial: false)
+                            var sTokens = Self.tokenize(vocab: vocab, text: suffixText, addSpecial: false)
                             if !sTokens.isEmpty {
+                                if sTokens.count > 2,
+                                   promptTokens.count - sTokens.count == endPos {
+                                    let canonicalSuffix = Array(promptTokens[(promptTokens.count - sTokens.count)...])
+                                    if canonicalSuffix != sTokens,
+                                       canonicalSuffix.suffix(from: 2) == sTokens.suffix(from: 2) {
+                                        NSLog("[LlamaEngine] Aligned boundary BPE token divergence in memory rollback to canonical prompt tokens")
+                                        sTokens = canonicalSuffix
+                                    }
+                                }
                                 matchedTurnCount = t
                                 matchedTurnEndPos = endPos
                                 matchedTurnSuffixTokens = sTokens
@@ -1942,7 +1968,9 @@ public actor LlamaEngine: LLMEngine {
                 // past the latest saved checkpoint (avoids writing twice per image turn or on every short text follow-up).
                 if params.kvCheckpointsEnabled && sessionCache.tokenCount > 0 {
                     let isMultimodalSession = hasImages || sessionCache.hasImages
-                    let maxSavedPos = checkpoints.values.map(\.promptEndPos).max() ?? 0
+                    let maxSavedPos = checkpoints.values
+                        .filter { $0.turnCount <= updatedTurns.count }
+                        .map(\.promptEndPos).max() ?? 0
                     let shouldSaveEos = !isMultimodalSession || (sessionCache.tokenCount - maxSavedPos > 1024)
                     if shouldSaveEos {
                         let completedRendered = Self.tokenize(vocab: vocab,
@@ -2638,7 +2666,9 @@ public actor LlamaEngine: LLMEngine {
             self.turnPromptEndPositions = self.turnPromptEndPositions.filter { $0.key <= turnCount }
             self.turnPromptEndPositions[turnCount] = promptEndPos
             self.turnEndPositions = self.turnEndPositions.filter { $0.key <= turnCount }
-            self.turnEndPositions[turnCount] = count
+            if turns.last?.role == .assistant {
+                self.turnEndPositions[turnCount] = count
+            }
         }
     }
 

@@ -2257,9 +2257,18 @@ public final class ChatStore {
                     query: memoryQuery,
                     memoryEnabled: turnMemoryEnabled
                 ) else { return }
+                let effectiveCap = self?.effectiveContextTokenCap ?? params.contextTokenCap
+                let isOnline = self?.isOnlineActive ?? false
+                let toolOverhead = toolsOn
+                    ? ContextPolicy.toolOverheadTokens(
+                        measuredSchema: self?.agentToolSchemaTokens?() ?? 0,
+                        contextLength: effectiveCap,
+                        online: isOnline
+                    )
+                    : 0
                 let historyInputCap = max(
                     256,
-                    params.contextTokenCap - ContextPolicy.reservedOutputTokens(for: params.contextTokenCap)
+                    effectiveCap - ContextPolicy.reservedOutputTokens(for: effectiveCap) - toolOverhead
                 )
                 let turns = Self.chatTurns(messages: history, systemPrompt: systemPrompt,
                                            cap: historyInputCap,
