@@ -1596,7 +1596,6 @@ public final class ChatStore {
         persist(conversations[idx])
         // A successful run proves the current target works — never let an older failure memo block it.
         compactionFailedConversations[conversationID] = nil
-        showToast(Toast("Compacted earlier messages to keep replies fast", autoDismiss: 3))
     }
 
     private func runResidentCompaction(plan: ContextCompactor.Plan, conversationIndex ci: Int) async throws -> String {
