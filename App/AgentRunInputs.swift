@@ -342,26 +342,29 @@ struct AppFrozenInputBuilder: Sendable {
     /// Finite runtime output ceiling + wire budget mode for one frozen run.
     ///
     /// Local runs always send an explicit budget. Online auto mode keeps a finite accounting
-    /// ceiling (the model's declared max when known, else the conversation context window) while
+    /// ceiling (the model's declared max when known, bounded by the conversation context window) while
     /// telling the provider to OMIT the wire limit so the service uses its own model default.
     private func outputBudget(
-        snapshot: AgentRunRequestSnapshot
+        snapshot: AgentRunRequestSnapshot,
+        contextCap: UInt64
     ) -> (mode: AgentOutputBudgetMode, maximumOutputTokens: UInt64) {
         guard Self.isOnline(snapshot: snapshot) else {
             let requested = UInt64(snapshot.maxTokens > 0 ? snapshot.maxTokens : 2_048)
-            return (.explicit, requested)
+            return (.explicit, min(requested, contextCap))
         }
         // Online models report generous ceilings (up to 200k context). For online runs, reasoning chains
-        // and large generation output should not be clamped by local context bounds.
+        // and large generation output should not be clamped by local context bounds, but must remain
+        // bounded by the attempt's finite context window.
         let defaultOnlineCap: UInt64 = snapshot.onlineReasoningEnabled ? 128_000 : 64_000
         let serviceCap = snapshot.onlineMaximumOutputTokens
             .flatMap { $0 > 0 ? UInt64($0) : nil }
             ?? defaultOnlineCap
+        let boundedCap = min(serviceCap, contextCap)
         if snapshot.onlineOutputBudgetAuto {
-            return (.auto, serviceCap)
+            return (.auto, boundedCap)
         }
         let requested = UInt64(snapshot.maxTokens > 0 ? snapshot.maxTokens : 2_048)
-        return (.explicit, min(requested, serviceCap))
+        return (.explicit, min(requested, boundedCap))
     }
 
     func frozenInputs(
@@ -392,7 +395,7 @@ struct AppFrozenInputBuilder: Sendable {
         let thinkingMode: AgentModelThinkingMode = online
             ? (snapshot.onlineReasoningEnabled ? .enabled : .disabled)
             : (snapshot.thinkingEnabled ? .enabled : .disabled)
-        let outputBudget = outputBudget(snapshot: snapshot)
+        let outputBudget = outputBudget(snapshot: snapshot, contextCap: effectiveContext)
         let generationParameters = try AgentModelGenerationParameters(
             maximumOutputTokens: outputBudget.maximumOutputTokens,
             maximumContextTokens: effectiveContext,
@@ -562,7 +565,7 @@ struct AppFrozenInputBuilder: Sendable {
         let activeMilliseconds: UInt64 = online ? (60 * 60 * 1_000) : (15 * 60 * 1_000)
         let budget = try AgentBudget.firstReleaseDefaults(
             contextTokensPerAttempt: effectiveContext,
-            outputTokens: outputBudget(snapshot: snapshot).maximumOutputTokens,
+            outputTokens: outputBudget(snapshot: snapshot, contextCap: effectiveContext).maximumOutputTokens,
             peakMemoryBytes: peakMemoryCeiling,
             activeMilliseconds: activeMilliseconds
         )
