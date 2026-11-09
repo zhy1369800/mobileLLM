@@ -25,7 +25,6 @@ struct SettingsView: View {
     @State private var showLocalLogs = false
     @State private var newShortcutName = ""
     @State private var newShortcutTarget = ""
-    @State private var idleTimerActual = false
     @FocusState private var isShortcutFieldFocused: Bool
 
     init(container: AppContainer) {
@@ -176,24 +175,13 @@ struct SettingsView: View {
             }
             Divider().background(Theme.hairline)
             Toggle(isOn: $settings.toolsEnabled) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Allow selected tools").font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("Only tools selected below are exposed to the model. The model decides whether "
-                         + "to call one; every call adds another model pass, and network tools such as web "
-                         + "search, Wikipedia, and remote MCP also wait for the network.")
-                        .font(.caption).foregroundStyle(Theme.textTertiary)
-                }
+                Text("Allow selected tools").font(.subheadline).foregroundStyle(Theme.textPrimary)
             }
             .tint(Theme.accent)
             manageToolsRow
             Divider().background(Theme.hairline)
             Toggle(isOn: $settings.autoCompactionEnabled) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Auto-compact conversations").font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("When a chat nears the context limit, older messages are summarized and compressed "
-                         + "to keep the prefix stable and fast.")
-                        .font(.caption).foregroundStyle(Theme.textTertiary)
-                }
+                Text("Auto-compact conversations").font(.subheadline).foregroundStyle(Theme.textPrimary)
             }
             .tint(Theme.accent)
             if settings.autoCompactionEnabled {
@@ -201,12 +189,7 @@ struct SettingsView: View {
             }
             Divider().background(Theme.hairline)
             Toggle(isOn: $settings.localModelLoggingEnabled) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Record local model logs")
-                        .font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("Captures requests, generation parameters, and responses for on-device models.")
-                        .font(.caption).foregroundStyle(Theme.textTertiary)
-                }
+                Text("Record local model logs").font(.subheadline).foregroundStyle(Theme.textPrimary)
             }
             .tint(Theme.accent)
             localModelLogsRow
@@ -225,10 +208,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Continue work in background (iOS 26)")
                         .font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("When available, an active finite run may keep processing after you leave "
-                         + "the app, with progress shown by the system. Ordinary chat is never "
-                         + "submitted unless you turn this on, and a rejected submission pauses "
-                         + "the run until you resume it in the foreground.")
+                    Text("Keep active generation runs processing after leaving the app.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                 }
             }
@@ -255,7 +235,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Quick notification assistant")
                         .font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("Presents an actionable notification when backgrounded. Pull down to ask questions via keyboard and receive in-place multi-turn replies. Tip: Set Banner Style to 'Persistent' in iOS Notification Settings to keep the card pinned indefinitely.")
+                    Text("Interactive notification for multi-turn chat when in background.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                 }
             }
@@ -274,7 +254,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Picture-in-Picture floating window")
                         .font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("Presents a floating window on the home screen when backgrounded, showing live thinking states and model responses.")
+                    Text("Floating window showing live thinking and response.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                 }
             }
@@ -285,7 +265,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Use domestic mirror for models")
                         .font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("Routes Hugging Face downloads and model exploration through hf-mirror.com for faster speed in China.")
+                    Text("Accelerate model downloads via hf-mirror.com.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                 }
             }
@@ -390,9 +370,6 @@ struct SettingsView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Online services")
             .accessibilityValue("\(settings.onlineServices.count) services")
-            Text("Add one or more OpenAI-compatible services. Each key lives in the device Keychain "
-                 + "only — never synced, backed up, or committed. Sends use the active service.")
-                .font(.caption).foregroundStyle(Theme.textTertiary)
         }
     }
 
@@ -626,8 +603,6 @@ struct SettingsView: View {
                 }
                 .fixedSize()
             }
-            Text("Caps how many tokens the model spends inside <think> before automatically closing reasoning and starting the final answer.")
-                .font(.caption).foregroundStyle(Theme.textTertiary)
             if settings.openAIOnlineEnabled {
                 HStack {
                     Text("Online max output").font(.subheadline).foregroundStyle(Theme.textSecondary)
@@ -646,8 +621,6 @@ struct SettingsView: View {
                     }
                     .fixedSize()
                 }
-                Text("Auto omits the limit so the service uses the model's own maximum; explicit values are sent as max_output_tokens.")
-                    .font(.caption).foregroundStyle(Theme.textTertiary)
             }
             contextRow
             DisclosureGroup("Advanced") {
@@ -670,10 +643,7 @@ struct SettingsView: View {
                         }
                         .fixedSize()
                     }
-                    Text("8-bit KV preserves high attention accuracy with low memory footprint (default). "
-                         + "4-bit reduces RAM further, 6-bit splits K to 4-bit while keeping V at 8-bit (V is most "
-                         + "quality-sensitive) for a ~20% smaller snapshot than 8-bit, and Full provides unquantized "
-                         + "precision. Takes effect from your next message.")
+                    Text("8-bit recommended (balanced quality & RAM); 4-bit saves memory.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                     HStack {
                         Text("Speculative decoding").font(.subheadline).foregroundStyle(Theme.textSecondary)
@@ -688,7 +658,7 @@ struct SettingsView: View {
                         }
                         .fixedSize()
                     }
-                    Text("Off generates one token at a time (standard). Prompt Lookup drafts tokens using repeated patterns. Native MTP prioritizes built-in MTP layers when available, falling back to Prompt Lookup.")
+                    Text("Accelerates generation speed via draft token speculation.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                     HStack {
                         Text("Prefill Batch").font(.subheadline).foregroundStyle(Theme.textSecondary)
@@ -707,12 +677,12 @@ struct SettingsView: View {
                         }
                         .fixedSize()
                     }
-                    Text("Controls llama.cpp n_batch and n_ubatch during prompt prefill. Larger values speed up first-turn prefill at the cost of higher peak compute buffer memory (512 default).")
+                    Text("Larger batch speeds up prompt evaluation but increases peak memory.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                     Toggle(isOn: $settings.kvCheckpointsEnabled) {
                         Text("KV Checkpoints").font(.subheadline).foregroundStyle(Theme.textPrimary)
                     }
-                    Text("Saves per-turn KV snapshots to temporary disk for long conversations (>1024 tok). Allows instant prefix reuse when editing earlier questions with hybrid/SSM models (e.g. Qwen 3.5), at the cost of background disk writes.")
+                    Text("Cache KV snapshots to disk for instant multi-turn editing reuse.")
                         .font(.caption).foregroundStyle(Theme.textTertiary)
                 }
                 .padding(.top, Theme.Space.xs)
@@ -785,25 +755,9 @@ struct SettingsView: View {
 
     private var contextFootnote: String {
         if container.chat.isOnlineActive {
-            let window = Format.shortCount(OnlineModelIdentity.maximumContextTokens)
-            return "Online services use the setting as-is, up to the service window (\(window)); device "
-                + "RAM doesn't bind it. Longer context costs more tokens on the service."
+            return "Longer context uses more tokens on the service."
         }
-        guard let model = contextModel else {
-            return "How much conversation the model can see at once."
-        }
-        let native = Format.shortCount(model.architecture.nativeContext)
-        let variant = AppSettings.preferredVariant(for: model, device: container.models.device,
-                                                   preference: settings.enginePreference,
-                                                   context: settings.contextLength)
-        let fits = Format.shortCount(ContextPolicy.largestFitting(model: model, variant: variant,
-                                                                  device: container.models.device))
-        let clamped = ContextPolicy.effective(requested: settings.contextLength, model: model) < settings.contextLength
-        let head = clamped
-            ? "\(model.displayName) tops out at \(native), so that's what it runs at."
-            : "\(model.displayName) supports up to \(native); this device holds about \(fits)."
-        return head + " Longer context costs memory (it's the KV cache) and slows the first token — "
-             + "it doesn't make the model smarter."
+        return "Longer context uses more memory and increases initial latency."
     }
 
     // MARK: Appearance
@@ -811,8 +765,6 @@ struct SettingsView: View {
     private var appearanceSection: some View {
         section("Appearance", icon: "circle.lefthalf.filled") {
             Segmented(selection: $settings.appearance, options: AppearanceMode.allCases) { $0.label }
-            Text("Match your system, or pin to Light or Dark.")
-                .font(.caption).foregroundStyle(Theme.textTertiary)
             #if os(iOS)
             Divider().background(Theme.hairline)
             Toggle(isOn: $settings.keepScreenAwake) {
@@ -823,18 +775,6 @@ struct SettingsView: View {
                 }
             }
             .tint(Theme.accent)
-            // 诊断显示：系统实际接受的 isIdleTimerDisabled（每秒刷新；定位常亮问题用，确认后可删）
-            HStack(spacing: 4) {
-                Circle()
-                    .fill(idleTimerActual ? Color.green : Color.red)
-                    .frame(width: 8, height: 8)
-                Text("System idle-timer: \(idleTimerActual ? "disabled (awake)" : "ENABLED (may sleep)")")
-                    .font(.caption2).foregroundStyle(Theme.textTertiary)
-            }
-            .onAppear { idleTimerActual = UIApplication.shared.isIdleTimerDisabled }
-            .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
-                idleTimerActual = UIApplication.shared.isIdleTimerDisabled
-            }
             #endif
         }
     }
@@ -847,38 +787,54 @@ struct SettingsView: View {
                 .font(.caption).foregroundStyle(Theme.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             row("Conversations on disk", Format.bytes(storageBytes))
+            Divider().background(Theme.hairline)
             Button { Task { await exportAll() } } label: {
-                Label("Export all chats (JSON)", systemImage: "square.and.arrow.up")
+                HStack(spacing: Theme.Space.sm) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.subheadline).foregroundStyle(Theme.accent).frame(width: 22)
+                    Text("Export all chats (JSON)").font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(Theme.textTertiary)
+                }
+                .contentShape(Rectangle())
             }
-            .buttonStyle(StudioButtonStyle(.secondary))
+            .buttonStyle(.plain)
+            Divider().background(Theme.hairline)
             Button(role: .destructive) { confirmDeleteChats = true } label: {
-                Label("Delete all chats", systemImage: "trash")
+                HStack(spacing: Theme.Space.sm) {
+                    Image(systemName: "trash")
+                        .font(.subheadline).foregroundStyle(Theme.danger).frame(width: 22)
+                    Text("Delete all chats").font(.subheadline).foregroundStyle(Theme.danger)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
             }
-            .buttonStyle(StudioButtonStyle(.secondary))
+            .buttonStyle(.plain)
+            Divider().background(Theme.hairline)
             Button(role: .destructive) { confirmEraseAll = true } label: {
-                Label("Erase all app data", systemImage: "externaldrive.badge.xmark")
+                HStack(spacing: Theme.Space.sm) {
+                    Image(systemName: "externaldrive.badge.xmark")
+                        .font(.subheadline).foregroundStyle(Theme.danger).frame(width: 22)
+                    Text("Erase all app data").font(.subheadline).foregroundStyle(Theme.danger)
+                    Spacer()
+                }
+                .contentShape(Rectangle())
             }
-            .buttonStyle(StudioButtonStyle(.secondary))
+            .buttonStyle(.plain)
         }
     }
 
-    /// Honest privacy copy: local by default, but tell the truth about what Tools can send and only when.
-    /// Claiming "nothing is sent to a server" is false the moment a tool call reaches Wikipedia or an MCP
-    /// server, so the sentence changes with the Tools setting.
     private var privacyBlurb: String {
-        let base = "Your chats, prompts, and the models stay on this device — there's no account and no telemetry."
-        guard settings.toolsEnabled else {
-            return base + " Nothing is sent to a server. (Turning on Tools lets the model reach the web — "
-                 + "search, a webpage reader, Wikipedia — or an MCP server you configure, and lets tools you "
-                 + "enable touch your calendar, reminders, or location, but only when it invokes that tool.)"
+        let base = "Your chats, prompts, and models stay on this device — no account and no telemetry."
+        var additions: [String] = []
+        if settings.toolsEnabled {
+            additions.append("Tools allow the model to query external sources (web search, Wikipedia, MCP, system calendars) when explicitly invoked.")
         }
-        let hasMCP = settings.mcpServers.contains(where: \.isEnabled)
-        return base + " Tools are on: when the model uses a web tool it sends that query or its arguments to "
-             + "that endpoint — a search engine, a page you link, or Wikipedia"
-             + (hasMCP ? ", or an MCP server you've enabled." : " (and any MCP server you add).")
-             + " The calendar, reminders, and location tools read or write that system data only when the "
-             + "model calls them, each asks the system for permission when selected, and only if you select "
-             + "it in Choose tools."
+        if !settings.onlineServices.isEmpty {
+            additions.append("Online model requests are sent to configured provider endpoints.")
+        }
+        guard !additions.isEmpty else { return base }
+        return base + " " + additions.joined(separator: " ")
     }
 
     // MARK: About
@@ -887,10 +843,7 @@ struct SettingsView: View {
         section("About", icon: "info.circle") {
             row("Version", appVersion)
             row("Engine", "Pure Swift · MLX + llama.cpp")
-            Text("A private, open-source runner for open-weight language models — everything runs on your "
-                 + "device by default, with no account. The optional Tools feature can reach Wikipedia or "
-                 + "MCP servers you configure, only when the model calls them. Each model's provider and "
-                 + "license are shown on its card in Models.")
+            Text("A private, open-source LLM & agent runner for iOS and macOS.")
                 .font(.caption).foregroundStyle(Theme.textTertiary)
         }
     }
