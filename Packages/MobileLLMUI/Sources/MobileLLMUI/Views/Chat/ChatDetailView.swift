@@ -60,7 +60,6 @@ struct ChatDetailView: View {
                     {
                         AgentDockedBar(store: agentRuns, conversationID: activeID)
                     }
-                    ConversationModeBar(chat: container.chat)
                     Composer(chat: container.chat,
                              settings: container.settings,
                              // Online reasoning is per-conversation (the composer toggle persists a thread

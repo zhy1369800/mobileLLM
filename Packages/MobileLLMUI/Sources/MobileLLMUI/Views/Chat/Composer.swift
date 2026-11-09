@@ -46,23 +46,18 @@ struct Composer: View {
 
     var body: some View {
         VStack(spacing: Theme.Space.xs) {
-            ContextMeterBar(chat: chat)
-            if let skill = chat.activeSkill { activeSkillChip(skill) }
-            if !chat.pendingImages.isEmpty { pendingImageChips }
+            ConversationModeBar(chat: chat)
             if chat.agentRuntimeUnavailableReason != nil {
                 runtimeUnavailableBar
             } else if chat.hasModel {
-                HStack(alignment: .bottom, spacing: Theme.Space.sm) {
-                    plusMenu
-                    field
-                    micButton
-                    sendOrStop
-                }
+                inputCard
             } else {
                 noModelBar
             }
         }
-        .padding(Theme.Space.md)
+        .padding(.horizontal, Theme.Space.md)
+        .padding(.top, Theme.Space.xs)
+        .padding(.bottom, Theme.Space.sm)
         .background(.ultraThinMaterial)
         .overlay(alignment: .top) { Divider().background(Theme.hairline) }
         .photosPicker(isPresented: $showPhotoPicker, selection: $pickerItems,
@@ -173,6 +168,44 @@ struct Composer: View {
         .accessibilityHint(isLoadingModel ? "" : "Choose a model to start chatting")
     }
 
+    // MARK: Input Card
+
+    private var inputCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if let skill = chat.activeSkill {
+                activeSkillChip(skill)
+                    .padding(.horizontal, Theme.Space.sm)
+                    .padding(.top, Theme.Space.sm)
+            }
+            if !chat.pendingImages.isEmpty {
+                pendingImageChips
+                    .padding(.horizontal, Theme.Space.sm)
+                    .padding(.top, Theme.Space.sm)
+            }
+            field
+                .padding(.horizontal, Theme.Space.sm)
+                .padding(.top, (chat.activeSkill != nil || !chat.pendingImages.isEmpty) ? 4 : Theme.Space.sm)
+                .padding(.bottom, 4)
+
+            HStack(alignment: .center, spacing: Theme.Space.xs) {
+                plusMenu
+                Spacer(minLength: 0)
+                micButton
+                sendOrStop
+            }
+            .padding(.horizontal, 6)
+            .padding(.bottom, 6)
+        }
+        .background(
+            Theme.surface,
+            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Theme.hairline)
+        )
+    }
+
     // MARK: Field
 
     private var field: some View {
@@ -180,12 +213,9 @@ struct Composer: View {
             .textFieldStyle(.plain)
             .font(.body)
             .foregroundStyle(Theme.textPrimary)
-            .lineLimit(1...6)
+            .lineLimit(1...5)
             .focused($focused)
-            .padding(.horizontal, Theme.Space.md)
-            .padding(.vertical, Theme.Space.sm)
-            .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous).strokeBorder(Theme.hairline))
+            .padding(.vertical, 4)
             #if os(macOS)
             .onSubmit { if chat.canSend { focused = false; chat.send() } }   // ⏎ sends on Mac; ⇧⏎ inserts a newline
             #endif
@@ -221,12 +251,12 @@ struct Composer: View {
             }
         } label: {
             Image(systemName: dictation.isRecording ? "mic.fill" : "mic")
-                .font(.body)
-                .foregroundStyle(dictation.isRecording ? Theme.accent : Theme.textTertiary)
-                .frame(width: controlSize, height: controlSize)
-                .background(dictation.isRecording ? Theme.accentSoft : Theme.surface2,
-                            in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
+                .font(.system(size: 15))
+                .foregroundStyle(dictation.isRecording ? Theme.accent : Theme.textSecondary)
+                .frame(width: 32, height: 32)
+                .background(dictation.isRecording ? Theme.accentSoft : Color.clear, in: Circle())
                 .overlay(alignment: .topTrailing) { if dictation.isRecording { RecordingDot() } }
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         // Long-press: pick the recognition language (persisted; applies from the next recording).
@@ -362,11 +392,11 @@ struct Composer: View {
                 || (thinkingCapable && chat.composerThinkingEnabled)
                 || chat.activeSkill != nil
             Image(systemName: "plus")
-                .font(.body.weight(.medium))
-                .foregroundStyle(active ? Theme.accent : Theme.textTertiary)
-                .frame(width: controlSize, height: controlSize)
-                .background(active ? Theme.accentSoft : Theme.surface2,
-                            in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(active ? Theme.accent : Theme.textSecondary)
+                .frame(width: 32, height: 32)
+                .background(active ? Theme.accentSoft : Color.clear, in: Circle())
+                .contentShape(Circle())
         }
         .menuIndicator(.hidden)
         .accessibilityLabel("Chat options")
@@ -543,12 +573,19 @@ struct Composer: View {
                 chat.send()
             }
         } label: {
-            Image(systemName: chat.isStreaming ? "stop.fill" : "arrow.up")
-                .font(.body.weight(.semibold))
-                .foregroundStyle(Theme.onAccent)
-                .frame(width: controlSize, height: controlSize)
-                .background(sendBackground, in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
-                .contentTransition(.symbolEffect(.replace))
+            Group {
+                if chat.isStreaming {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 11, weight: .bold))
+                } else {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+            }
+            .foregroundStyle(sendForeground)
+            .frame(width: 32, height: 32)
+            .background(sendBackground, in: Circle())
+            .contentTransition(.symbolEffect(.replace))
         }
         .buttonStyle(.plain)
         // The button morphs Send→Stop under the finger while the keyboard collapse shifts the layout —
@@ -566,41 +603,14 @@ struct Composer: View {
         .accessibilityLabel(chat.isStreaming ? "Stop" : "Send")
     }
 
+    private var sendForeground: Color {
+        if chat.isStreaming { return Theme.onAccent }
+        return chat.canSend ? Theme.onAccent : Theme.textTertiary
+    }
+
     private var sendBackground: Color {
         if chat.isStreaming { return Theme.danger }
-        return chat.canSend ? Theme.accent : Theme.fitGray
-    }
-}
-
-/// Isolated subview for the context meter so `chat.contextUsage()` reading `chat.streaming` only
-/// invalidates this 14pt gauge row during streaming generation, rather than re-evaluating the entire
-/// `Composer` body (text field, menus, and buttons) on every 20fps flush.
-private struct ContextMeterBar: View {
-    let chat: ChatStore
-
-    private func meterColor(for usage: (used: Int, cap: Int)) -> Color {
-        let ratio = usage.cap > 0 ? Double(usage.used) / Double(usage.cap) : 0
-        if ratio >= 0.98 { return Theme.danger }
-        if ratio >= 0.85 { return Theme.fitAmber }
-        return Theme.textTertiary
-    }
-
-    var body: some View {
-        let currentUsage = chat.contextUsage()
-        let color = meterColor(for: currentUsage)
-        HStack(spacing: Theme.Space.xs) {
-            Spacer()
-            if currentUsage.used > 0 {
-                Image(systemName: "gauge.with.dots.needle.33percent")
-                    .font(.caption2).foregroundStyle(color)
-                Text(Format.context(currentUsage.used, currentUsage.cap))
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(color)
-                    .accessibilityLabel("Context used")
-                    .accessibilityValue("\(currentUsage.used) of \(currentUsage.cap) tokens")
-            }
-        }
-        .frame(height: 14)
+        return chat.canSend ? Theme.accent : Theme.surface2
     }
 }
 
