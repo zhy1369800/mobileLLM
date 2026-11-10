@@ -170,40 +170,58 @@ struct Composer: View {
 
     // MARK: Input Card
 
+    private var isTyping: Bool {
+        !chat.draft.isEmpty && !dictation.isRecording
+    }
+
+    private var showSendOrStop: Bool {
+        chat.isStreaming || !chat.draft.isEmpty || !chat.pendingImages.isEmpty
+    }
+
     private var inputCard: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 4) {
             if let skill = chat.activeSkill {
                 activeSkillChip(skill)
                     .padding(.horizontal, Theme.Space.sm)
-                    .padding(.top, Theme.Space.sm)
+                    .padding(.top, Theme.Space.xs)
             }
             if !chat.pendingImages.isEmpty {
                 pendingImageChips
                     .padding(.horizontal, Theme.Space.sm)
-                    .padding(.top, Theme.Space.sm)
+                    .padding(.top, Theme.Space.xs)
             }
-            field
-                .padding(.horizontal, Theme.Space.sm)
-                .padding(.top, (chat.activeSkill != nil || !chat.pendingImages.isEmpty) ? 4 : Theme.Space.sm)
-                .padding(.bottom, 4)
 
-            HStack(alignment: .center, spacing: Theme.Space.xs) {
-                plusMenu
-                Spacer(minLength: 0)
-                micButton
-                sendOrStop
+            HStack(alignment: .bottom, spacing: Theme.Space.xs) {
+                if !isTyping {
+                    plusMenu
+                        .transition(.scale(scale: 0.8).combined(with: .opacity))
+                }
+
+                field
+                    .padding(.leading, isTyping ? 10 : 2)
+                    .padding(.trailing, 2)
+
+                if showSendOrStop {
+                    sendOrStop
+                        .transition(.scale(scale: 0.8).combined(with: .opacity))
+                } else {
+                    micButton
+                        .transition(.scale(scale: 0.8).combined(with: .opacity))
+                }
             }
-            .padding(.horizontal, 6)
-            .padding(.bottom, 6)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 4)
         }
         .background(
             Theme.surface,
-            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .strokeBorder(Theme.hairline)
         )
+        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: isTyping)
+        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: showSendOrStop)
     }
 
     // MARK: Field
@@ -215,7 +233,7 @@ struct Composer: View {
             .foregroundStyle(Theme.textPrimary)
             .lineLimit(1...5)
             .focused($focused)
-            .padding(.vertical, 4)
+            .padding(.vertical, 5)
             #if os(macOS)
             .onSubmit { if chat.canSend { focused = false; chat.send() } }   // ⏎ sends on Mac; ⇧⏎ inserts a newline
             #endif
