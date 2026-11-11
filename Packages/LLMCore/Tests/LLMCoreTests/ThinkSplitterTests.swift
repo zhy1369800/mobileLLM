@@ -127,15 +127,32 @@ final class ThinkSplitterTests: XCTestCase {
         XCTAssertEqual(a, "the answer", "the split </think> must be consumed, not leaked into the answer")
     }
 
-    /// Once the boundary is resolved, a SECOND </think> is literal answer text (we only defend the first,
-    /// unseen-open case) — so a normal single-token answer that happens to contain the string is intact.
-    func testSecondCloseAfterDefenseIsLiteral() {
+    /// Once the boundary is resolved, a SECOND </think> inside answer text indicates repetition
+    /// or model degradation: per configuration it is retained for visual inspection while flagged
+    /// so the engine can halt generation immediately.
+    func testSecondCloseAfterDefenseIsRetainedAndFlagged() {
         var s = ThinkSplitter()
         var out = s.feed("reason</think>ans</think>more")
         out += s.finish()
         let (r, a) = collect(out)
         XCTAssertEqual(r, "reason")
         XCTAssertEqual(a, "ans</think>more")
+        XCTAssertTrue(s.sawSpuriousCloseInAnswer)
+    }
+
+    /// Spurious </think> tag arriving split across chunk boundaries inside answer text
+    /// is also retained intact and flagged.
+    func testSpuriousCloseInAnswerSplitAcrossChunks() {
+        var s = ThinkSplitter(startInThink: true)
+        var out = s.feed("reason</think>first answer")
+        XCTAssertFalse(s.sawSpuriousCloseInAnswer)
+        out += s.feed(" </thi")
+        out += s.feed("nk>repeated answer")
+        out += s.finish()
+        let (r, a) = collect(out)
+        XCTAssertEqual(r, "reason")
+        XCTAssertEqual(a, "first answer </think>repeated answer")
+        XCTAssertTrue(s.sawSpuriousCloseInAnswer)
     }
 
     /// Regression: a proper <think>…</think> block is unaffected by the defense (the open is seen first,

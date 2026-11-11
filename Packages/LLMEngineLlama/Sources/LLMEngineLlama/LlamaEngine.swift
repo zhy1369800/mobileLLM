@@ -1689,6 +1689,17 @@ public actor LlamaEngine: LLMEngine {
                 generatedTokens.append(tokenID)
                 if useSpeculative { conversationTokens.append(tokenID) }
 
+                // Check for spurious </think> detected by ThinkSplitter during answer generation.
+                // When reasoning has already concluded and non-empty answer text has been produced,
+                // a subsequent </think> indicates model degradation or repetition loop.
+                // Immediately halt decoding with EOS so the spurious tag and duplicate responses
+                // are not written to KV cache or emitted.
+                if splitter.sawSpuriousCloseInAnswer && !fullGeneratedAnswer.isEmpty {
+                    NSLog("[LlamaEngine] Spurious </think> encountered during answer generation. Halting decoding as EOS.")
+                    stop = .eos
+                    break
+                }
+
                 if splitter.isInsideThink && !forcedThinkClose && thinkingTokens >= effectiveThinkingBudget {
                     forcedThinkClose = true
                     let closeTag = "\n</think>\n\n"

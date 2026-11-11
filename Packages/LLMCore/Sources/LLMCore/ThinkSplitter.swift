@@ -33,6 +33,11 @@ public struct ThinkSplitter {
     private var sawOpen = false   // has an opening <think> been consumed (or did we start in-think)?
     private var buffer = ""   // unclassified pending characters, including a possible partial-tag tail
 
+    /// Set to `true` when a stray `</think>` is detected and dropped while streaming answer text
+    /// after reasoning has already concluded. Callers can use this as an early-stopping signal
+    /// to halt repetition loops before duplicates are generated.
+    public private(set) var sawSpuriousCloseInAnswer = false
+
     /// `startInThink` handles the "implicit-open" reasoning convention (DeepSeek-R1 distills): the chat
     /// template pre-fills the opening `<think>` in the PROMPT, so the generated stream begins inside the
     /// reasoning block and emits only the closing `</think>`. Starting in-think routes everything up to
@@ -71,6 +76,21 @@ public struct ThinkSplitter {
                     continue
                 }
             }
+            // Spurious close detection: after reasoning has concluded (!inThink && sawOpen),
+            // a subsequent </think> indicates model degradation or a repetition loop.
+            // Retain the </think> tag in answer text for visual inspection per user preference,
+            // while setting the flag so callers (e.g. LlamaEngine) can halt generation immediately.
+            if !inThink, sawOpen, let rClose = buffer.range(of: Self.close) {
+                let rOpen = buffer.range(of: Self.open)
+                if rOpen == nil || rClose.lowerBound < rOpen!.lowerBound {
+                    let before = String(buffer[buffer.startIndex..<rClose.lowerBound])
+                    if !before.isEmpty { out.append(.answer(before)) }
+                    out.append(.answer(Self.close))
+                    buffer.removeSubrange(buffer.startIndex..<rClose.upperBound)
+                    sawSpuriousCloseInAnswer = true
+                    continue
+                }
+            }
             let tag = inThink ? Self.close : Self.open
             if let r = buffer.range(of: tag) {
                 // Everything before the tag belongs to the CURRENT region (emit before toggling).
@@ -98,8 +118,8 @@ public struct ThinkSplitter {
 
     /// The number of trailing characters to withhold because they might be the start of the next tag:
     /// the longest suffix of `buffer` that is a prefix of any tag we're currently scanning for. Outside a
-    /// think block and before any open has been seen we scan for BOTH the open and a bare close, so a
-    /// `</think>` split across chunks isn't emitted as answer before the bare-close defense can fire.
+    /// think block we scan for BOTH the open and close tags, so a `</think>` split across chunks isn't
+    /// emitted as answer text.
     private func withheldTail() -> Int {
         var tags = [inThink ? Self.close : Self.open]
         if !inThink, !sawOpen { tags.append(Self.close) }
