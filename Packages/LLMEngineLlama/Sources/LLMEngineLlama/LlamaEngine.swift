@@ -1019,8 +1019,7 @@ public actor LlamaEngine: LLMEngine {
             let prefixMatched = !newTurns.isEmpty &&
                 Array(kept.prefix(previousCount)) == sessionCache.turns
             let newTurnsCarryImages = newTurns.contains(where: { !$0.images.isEmpty })
-            let thinkingReserve = (wantThinking && params.thinkingBudget > 0) ? min(params.thinkingBudget, 1024) : 0
-            let incrementalReserve = min(reserve, max(256, thinkingReserve + 256))
+            let incrementalReserve = min(reserve, 256)
 
             var incrementalSuffixTokens: [llama_token]? = nil
             var canIncrementalMultimodal = false
@@ -1615,7 +1614,7 @@ public actor LlamaEngine: LLMEngine {
             let effectiveKvPosCap = max(0, contextCap - pendingExtraVisualTokens)
             let physicalHeadroom = max(0, effectiveKvPosCap - Int(kvPos))
             let effectiveMaxTokens = (maxTokens > 0) ? min(maxTokens, physicalHeadroom) : physicalHeadroom
-            let answerReserve = min(256, max(64, effectiveMaxTokens / 4))
+            let answerReserve = min(256, max(128, effectiveMaxTokens / 2))
             let maxAllowedThinking = max(32, effectiveMaxTokens - answerReserve)
             let effectiveThinkingBudget = params.thinkingBudget > 0
                 ? min(params.thinkingBudget, maxAllowedThinking)
@@ -1694,14 +1693,13 @@ public actor LlamaEngine: LLMEngine {
                 }
                 genTokens += 1
 
-                // Check for spurious </think> detected by ThinkSplitter during answer generation.
-                // When reasoning has already concluded and non-empty answer text has been produced,
-                // a subsequent </think> indicates model degradation or repetition loop.
-                // Immediately halt decoding with EOS before appending or decoding the spurious token,
-                // and synthesize a clean EOG token in KV cache so subsequent incremental turns stay aligned.
-                if (splitter.sawSpuriousCloseInAnswer && !fullGeneratedAnswer.isEmpty) || splitter.spuriousCloseCount >= 2 {
-                    NSLog("[LlamaEngine] Spurious </think> encountered during answer generation. Halting decoding as EOS.")
-                    stop = .eos
+                // Check for persistent repetition loops indicated by repeated stray </think> tags.
+                // Single stray tags are stripped transparently by ThinkSplitter so normal output continues;
+                // only halt decoding when the model exhibits an unrecoverable repetition loop (>= 3 stray tags).
+                if splitter.spuriousCloseCount >= 3 {
+                    NSLog("[LlamaEngine] Repetition loop with multiple stray </think> tags (%d) detected. Halting decoding as repetition.",
+                          Int32(splitter.spuriousCloseCount))
+                    stop = .repetition
                     let eot = llama_vocab_eot(vocab)
                     let eogToken = (eot != LLAMA_TOKEN_NULL) ? eot : llama_vocab_eos(vocab)
                     if eogToken != LLAMA_TOKEN_NULL && Int(kvPos) < effectiveKvPosCap {
@@ -1978,7 +1976,7 @@ public actor LlamaEngine: LLMEngine {
             // If KV rollback failed during speculative decoding or physical kvPos diverged, the physical KV cache is dirty and must not be reused.
             let currentPromptEndPos = baseKvPos + effectivePromptPosAdvance
             let kvPositionsAligned = Int(kvPos) == currentPromptEndPos + generatedTokens.count
-            if stop == .eos && supportsKvRollback && kvPositionsAligned && answerStripper.isNoop && !fullGeneratedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if (stop == .eos || stop == .repetition) && supportsKvRollback && kvPositionsAligned && answerStripper.isNoop && !fullGeneratedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let updatedTurns = kept + [ChatTurn(role: .assistant, content: fullGeneratedAnswer)]
                 if let suffixTokens = incrementalSuffixTokens {
                     sessionCache.append(turns: updatedTurns,

@@ -63,6 +63,8 @@ enum Format {
         }
         if stats.stopReason == .maxTokens {
             parts.append("stop: maxTokens ⚠︎ 已达上限 · 可能截断")
+        } else if stats.stopReason == .repetition {
+            parts.append("stop: repetition ⚠︎ 异常复读拦截")
         } else {
             parts.append("stop: \(stats.stopReason.rawValue)")
         }

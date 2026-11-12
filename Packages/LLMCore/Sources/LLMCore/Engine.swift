@@ -45,6 +45,7 @@ public enum StopReason: String, Sendable, Equatable, Codable {
     case maxTokens      // hit `Sampling.maxTokens`
     case stopSequence   // hit a caller-supplied stop string
     case cancelled      // the caller cancelled (partial answer is still committed)
+    case repetition     // hit repetition loop / stray tag loop defense
 }
 
 /// Speculative decoding runtime statistics for performance tracking and logging.
