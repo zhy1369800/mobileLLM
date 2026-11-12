@@ -99,6 +99,12 @@ public struct Stats: Sendable, Equatable, Codable {
     public var rollbackDiagnostic: String?
     /// Actual effective n_batch / n_ubatch allocated on the live context (may be 512 if Attempt 3 fallback triggered).
     public var effectiveBatchSize: Int?
+    /// Live KV context window size (n_ctx) allocated on the engine.
+    public var contextCap: Int?
+    /// Remaining physical KV slots before decode began (effectiveKvPosCap - kvPos).
+    public var physicalHeadroom: Int?
+    /// Effective output token cap for this turn (min of requested maxTokens and physicalHeadroom).
+    public var effectiveMaxTokens: Int?
 
     /// Cache hit rate (0.0 ... 1.0) of prompt tokens.
     public var cacheHitRate: Double {
@@ -116,7 +122,10 @@ public struct Stats: Sendable, Equatable, Codable {
                 gpuLayers: Int? = nil,
                 backend: String? = nil,
                 rollbackDiagnostic: String? = nil,
-                effectiveBatchSize: Int? = nil) {
+                effectiveBatchSize: Int? = nil,
+                contextCap: Int? = nil,
+                physicalHeadroom: Int? = nil,
+                effectiveMaxTokens: Int? = nil) {
         self.promptTokens = promptTokens
         self.genTokens = genTokens
         self.promptTPS = promptTPS
@@ -131,11 +140,15 @@ public struct Stats: Sendable, Equatable, Codable {
         self.backend = backend
         self.rollbackDiagnostic = rollbackDiagnostic
         self.effectiveBatchSize = effectiveBatchSize
+        self.contextCap = contextCap
+        self.physicalHeadroom = physicalHeadroom
+        self.effectiveMaxTokens = effectiveMaxTokens
     }
 
     enum CodingKeys: String, CodingKey {
         case promptTokens, genTokens, promptTPS, tokensPerSecond, peakMemoryBytes, stopReason, speculativeStats
         case ttftSeconds, cachedPromptTokens, cachePath, gpuLayers, backend, rollbackDiagnostic, effectiveBatchSize
+        case contextCap, physicalHeadroom, effectiveMaxTokens
     }
 
     public init(from decoder: Decoder) throws {
@@ -154,6 +167,9 @@ public struct Stats: Sendable, Equatable, Codable {
         backend = try container.decodeIfPresent(String.self, forKey: .backend)
         rollbackDiagnostic = try container.decodeIfPresent(String.self, forKey: .rollbackDiagnostic)
         effectiveBatchSize = try container.decodeIfPresent(Int.self, forKey: .effectiveBatchSize)
+        contextCap = try container.decodeIfPresent(Int.self, forKey: .contextCap)
+        physicalHeadroom = try container.decodeIfPresent(Int.self, forKey: .physicalHeadroom)
+        effectiveMaxTokens = try container.decodeIfPresent(Int.self, forKey: .effectiveMaxTokens)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -172,6 +188,9 @@ public struct Stats: Sendable, Equatable, Codable {
         try container.encodeIfPresent(backend, forKey: .backend)
         try container.encodeIfPresent(rollbackDiagnostic, forKey: .rollbackDiagnostic)
         try container.encodeIfPresent(effectiveBatchSize, forKey: .effectiveBatchSize)
+        try container.encodeIfPresent(contextCap, forKey: .contextCap)
+        try container.encodeIfPresent(physicalHeadroom, forKey: .physicalHeadroom)
+        try container.encodeIfPresent(effectiveMaxTokens, forKey: .effectiveMaxTokens)
     }
 }
 

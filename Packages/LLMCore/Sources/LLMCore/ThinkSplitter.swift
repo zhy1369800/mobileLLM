@@ -37,6 +37,8 @@ public struct ThinkSplitter {
     /// after reasoning has already concluded. Callers can use this as an early-stopping signal
     /// to halt repetition loops before duplicates are generated.
     public private(set) var sawSpuriousCloseInAnswer = false
+    /// Count of stray `</think>` tags detected and stripped during answer generation.
+    public private(set) var spuriousCloseCount = 0
 
     /// `startInThink` handles the "implicit-open" reasoning convention (DeepSeek-R1 distills): the chat
     /// template pre-fills the opening `<think>` in the PROMPT, so the generated stream begins inside the
@@ -78,16 +80,17 @@ public struct ThinkSplitter {
             }
             // Spurious close detection: after reasoning has concluded (!inThink && sawOpen),
             // a subsequent </think> indicates model degradation or a repetition loop.
-            // Retain the </think> tag in answer text for visual inspection per user preference,
-            // while setting the flag so callers (e.g. LlamaEngine) can halt generation immediately.
+            // Strip the spurious </think> tag so it does not leak into the answer or corrupt
+            // multi-turn chat template rendering, while setting the flag so callers (e.g. LlamaEngine)
+            // can halt generation immediately.
             if !inThink, sawOpen, let rClose = buffer.range(of: Self.close) {
                 let rOpen = buffer.range(of: Self.open)
                 if rOpen == nil || rClose.lowerBound < rOpen!.lowerBound {
                     let before = String(buffer[buffer.startIndex..<rClose.lowerBound])
                     if !before.isEmpty { out.append(.answer(before)) }
-                    out.append(.answer(Self.close))
                     buffer.removeSubrange(buffer.startIndex..<rClose.upperBound)
                     sawSpuriousCloseInAnswer = true
+                    spuriousCloseCount += 1
                     continue
                 }
             }
@@ -121,8 +124,7 @@ public struct ThinkSplitter {
     /// think block we scan for BOTH the open and close tags, so a `</think>` split across chunks isn't
     /// emitted as answer text.
     private func withheldTail() -> Int {
-        var tags = [inThink ? Self.close : Self.open]
-        if !inThink, !sawOpen { tags.append(Self.close) }
+        let tags = inThink ? [Self.close] : [Self.open, Self.close]
         var best = 0
         for tag in tags {
             var k = min(tag.count - 1, buffer.count)

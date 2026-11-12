@@ -1019,7 +1019,8 @@ public actor LlamaEngine: LLMEngine {
             let prefixMatched = !newTurns.isEmpty &&
                 Array(kept.prefix(previousCount)) == sessionCache.turns
             let newTurnsCarryImages = newTurns.contains(where: { !$0.images.isEmpty })
-            let incrementalReserve = min(reserve, 256)
+            let thinkingReserve = (wantThinking && params.thinkingBudget > 0) ? min(params.thinkingBudget, 1024) : 0
+            let incrementalReserve = min(reserve, max(256, thinkingReserve + 256))
 
             var incrementalSuffixTokens: [llama_token]? = nil
             var canIncrementalMultimodal = false
@@ -1350,7 +1351,6 @@ public actor LlamaEngine: LLMEngine {
                     totalPromptCountForStats = promptTokens.count
                 }
 
-                let incrementalReserve = min(reserve, 256)
                 let canRollback = (supportsPartialTrim || isFullPromptMatch) &&
                                   !residentHadImages &&
                                   !sessionCache.tokens.isEmpty &&
@@ -1620,6 +1620,8 @@ public actor LlamaEngine: LLMEngine {
             let effectiveThinkingBudget = params.thinkingBudget > 0
                 ? min(params.thinkingBudget, maxAllowedThinking)
                 : maxAllowedThinking
+            NSLog("[LlamaEngine] Decode budget: kvPos=%d, contextCap=%d, physicalHeadroom=%d, maxTokens=%d, effectiveMaxTokens=%d, thinkingBudget=%d",
+                  Int32(kvPos), Int32(contextCap), Int32(physicalHeadroom), Int32(maxTokens), Int32(effectiveMaxTokens), Int32(effectiveThinkingBudget))
             var thinkingTokens = 0
             var forcedThinkClose = false
             var supportsKvRollback = true
@@ -1669,10 +1671,15 @@ public actor LlamaEngine: LLMEngine {
                     if Int(kvPos) < effectiveKvPosCap {
                         Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: tokenID, pos: kvPos, logits: false)
                         specBatch.n_tokens = 1
-                        _ = llama_decode(context, specBatch)
-                        kvPos += 1
+                        if llama_decode(context, specBatch) == 0 {
+                            kvPos += 1
+                            generatedTokens.append(tokenID)
+                        } else {
+                            supportsKvRollback = false
+                        }
+                    } else {
+                        supportsKvRollback = false
                     }
-                    generatedTokens.append(tokenID)
                     break
                 }
 
@@ -1686,19 +1693,34 @@ public actor LlamaEngine: LLMEngine {
                     thinkingTokens += 1
                 }
                 genTokens += 1
-                generatedTokens.append(tokenID)
-                if useSpeculative { conversationTokens.append(tokenID) }
 
                 // Check for spurious </think> detected by ThinkSplitter during answer generation.
                 // When reasoning has already concluded and non-empty answer text has been produced,
                 // a subsequent </think> indicates model degradation or repetition loop.
-                // Immediately halt decoding with EOS so the spurious tag and duplicate responses
-                // are not written to KV cache or emitted.
-                if splitter.sawSpuriousCloseInAnswer && !fullGeneratedAnswer.isEmpty {
+                // Immediately halt decoding with EOS before appending or decoding the spurious token,
+                // and synthesize a clean EOG token in KV cache so subsequent incremental turns stay aligned.
+                if (splitter.sawSpuriousCloseInAnswer && !fullGeneratedAnswer.isEmpty) || splitter.spuriousCloseCount >= 2 {
                     NSLog("[LlamaEngine] Spurious </think> encountered during answer generation. Halting decoding as EOS.")
                     stop = .eos
+                    let eot = llama_vocab_eot(vocab)
+                    let eogToken = (eot != LLAMA_TOKEN_NULL) ? eot : llama_vocab_eos(vocab)
+                    if eogToken != LLAMA_TOKEN_NULL && Int(kvPos) < effectiveKvPosCap {
+                        Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: eogToken, pos: kvPos, logits: false)
+                        specBatch.n_tokens = 1
+                        if llama_decode(context, specBatch) == 0 {
+                            kvPos += 1
+                            generatedTokens.append(eogToken)
+                        } else {
+                            supportsKvRollback = false
+                        }
+                    } else {
+                        supportsKvRollback = false
+                    }
                     break
                 }
+
+                generatedTokens.append(tokenID)
+                if useSpeculative { conversationTokens.append(tokenID) }
 
                 if splitter.isInsideThink && !forcedThinkClose && thinkingTokens >= effectiveThinkingBudget {
                     forcedThinkClose = true
@@ -1731,8 +1753,13 @@ public actor LlamaEngine: LLMEngine {
                     if Int(kvPos) < effectiveKvPosCap {
                         Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: tokenID, pos: kvPos, logits: false)
                         specBatch.n_tokens = 1
-                        _ = llama_decode(context, specBatch)
-                        kvPos += 1
+                        if llama_decode(context, specBatch) == 0 {
+                            kvPos += 1
+                        } else {
+                            supportsKvRollback = false
+                        }
+                    } else {
+                        supportsKvRollback = false
                     }
                     stop = .maxTokens
                     break
@@ -1845,9 +1872,17 @@ public actor LlamaEngine: LLMEngine {
                                 if discardFromPos < contextCap {
                                     Self.setBatchItem(&specBatch, at: 0, maxCapacity: batchCapacity, token: actual, pos: discardFromPos, logits: !actualIsEog)
                                     specBatch.n_tokens = 1
-                                    _ = llama_decode(context, specBatch)
-                                    kvPos = discardFromPos + 1
+                                    if llama_decode(context, specBatch) == 0 {
+                                        kvPos = discardFromPos + 1
+                                    } else {
+                                        supportsKvRollback = false
+                                        kvPos = discardFromPos
+                                        if !actualIsEog {
+                                            throw EngineError.decodeFailed
+                                        }
+                                    }
                                 } else {
+                                    supportsKvRollback = false
                                     kvPos = discardFromPos
                                 }
                                 break
@@ -1934,13 +1969,17 @@ public actor LlamaEngine: LLMEngine {
                 gpuLayers: Int(loadedGpuLayers),
                 backend: loadedGpuLayers > 0 ? "Metal GPU" : "CPU",
                 rollbackDiagnostic: rollbackDiagnosticMessage,
-                effectiveBatchSize: nBatch)))
+                effectiveBatchSize: nBatch,
+                contextCap: contextCap,
+                physicalHeadroom: physicalHeadroom,
+                effectiveMaxTokens: effectiveMaxTokens)))
 
             // Multi-turn and multimodal reuse: record valid conversational turn on natural EOS completion.
-            // If KV rollback failed during speculative decoding, the physical KV cache is dirty and must not be reused.
-            if stop == .eos && supportsKvRollback && answerStripper.isNoop && !fullGeneratedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            // If KV rollback failed during speculative decoding or physical kvPos diverged, the physical KV cache is dirty and must not be reused.
+            let currentPromptEndPos = baseKvPos + effectivePromptPosAdvance
+            let kvPositionsAligned = Int(kvPos) == currentPromptEndPos + generatedTokens.count
+            if stop == .eos && supportsKvRollback && kvPositionsAligned && answerStripper.isNoop && !fullGeneratedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let updatedTurns = kept + [ChatTurn(role: .assistant, content: fullGeneratedAnswer)]
-                let currentPromptEndPos = baseKvPos + effectivePromptPosAdvance
                 if let suffixTokens = incrementalSuffixTokens {
                     sessionCache.append(turns: updatedTurns,
                                         additionalTokens: suffixTokens + generatedTokens,

@@ -1352,6 +1352,9 @@ public final class ChatStore {
         attachmentRollback: AttachmentSendRollback?,
         agentRuns: AgentRunStore
     ) {
+        if let previousRunID = agentRuns.presentation(for: conversationID)?.runID {
+            StopReasonBoard.shared.clear(for: previousRunID.description)
+        }
         let store = self.store
         let imageRefs = user.attachments ?? []
         // A due auto-compaction needs an LLM call first, and the run snapshot freezes the conversation's
@@ -1872,15 +1875,24 @@ public final class ChatStore {
         pauseReasoningClock()
         var message = conversations[ci].messages[mi]
         message.answer = text
+        let rawReasoning: String?
         if streamingMessageID == assistantMessageID,
            let streamedReasoning = streaming?.reasoning,
            streamedReasoning.count > (reasoning?.count ?? 0) {
-            message.reasoning = streamedReasoning
+            rawReasoning = streamedReasoning
         } else {
-            message.reasoning = reasoning
+            rawReasoning = reasoning
         }
-        if let duration = streaming?.thinkingDuration, duration > 0 {
-            message.thinkingSeconds = duration
+        let trimmedReasoning = rawReasoning?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let trimmedAnswer = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedReasoning.isEmpty || trimmedReasoning == trimmedAnswer {
+            message.reasoning = nil
+            message.thinkingSeconds = nil
+        } else {
+            message.reasoning = rawReasoning
+            if let duration = streaming?.thinkingDuration, duration > 0 {
+                message.thinkingSeconds = duration
+            }
         }
         let toolRuns = steps.compactMap { step -> ToolRun? in
             guard step.kind == .toolCall else { return nil }
@@ -1896,7 +1908,9 @@ public final class ChatStore {
         }
         if !toolRuns.isEmpty { message.toolRuns = toolRuns }
         if let generation = currentGenerationModel() { message.generatedBy = generation }
-        if let usage = agentRuns?.presentation(for: conversationID)?.usage {
+        let presentation = agentRuns?.presentation(for: conversationID)
+        let realStopReason = presentation.flatMap { StopReasonBoard.shared.take(for: $0.runID.description) } ?? .eos
+        if let usage = presentation?.usage {
             let outputTokens = usage.quantities[.outputTokens]
             let activeMilliseconds = usage.quantities[.activeMilliseconds]
             let seconds = max(1, Double(activeMilliseconds) / 1_000)
@@ -1906,7 +1920,7 @@ public final class ChatStore {
                 promptTPS: 0,
                 tokensPerSecond: Double(outputTokens) / seconds,
                 peakMemoryBytes: Int64(usage.quantities[.peakMemoryBytes]),
-                stopReason: .eos
+                stopReason: realStopReason
             )
         }
         conversations[ci].messages[mi] = message
@@ -1930,6 +1944,9 @@ public final class ChatStore {
         assistantMessageID: UUID,
         message: String
     ) {
+        if let runID = agentRuns?.presentation(for: conversationID)?.runID {
+            StopReasonBoard.shared.clear(for: runID.description)
+        }
         finalizeAgentRun(
             conversationID: conversationID,
             assistantMessageID: assistantMessageID,
@@ -1946,6 +1963,9 @@ public final class ChatStore {
         reason: AgentTerminalReason,
         message: String?
     ) {
+        if let runID = agentRuns?.presentation(for: conversationID)?.runID {
+            StopReasonBoard.shared.clear(for: runID.description)
+        }
         flushStreamingBuffer()
         pauseReasoningClock()
         guard let ci = conversations.firstIndex(where: { $0.id == conversationID }),
@@ -1962,11 +1982,14 @@ public final class ChatStore {
         var turn = conversations[ci].messages[mi]
         turn.emptyOutcome = reason == .cancelledByUser ? .stopped : .failed
         if let currentStreaming = streaming, streamingMessageID == assistantMessageID {
-            if !currentStreaming.answer.isEmpty {
+            if !currentStreaming.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 turn.answer = currentStreaming.answer
             }
-            if !currentStreaming.reasoning.isEmpty {
+            if !currentStreaming.reasoning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 turn.reasoning = currentStreaming.reasoning
+                if let duration = currentStreaming.thinkingDuration, duration > 0 {
+                    turn.thinkingSeconds = duration
+                }
             }
         }
         conversations[ci].messages[mi] = turn

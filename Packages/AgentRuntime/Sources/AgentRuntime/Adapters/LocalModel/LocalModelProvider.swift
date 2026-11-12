@@ -349,6 +349,7 @@ private enum LocalModelGeneration {
         }
         try await emitter.emit(.usage(usage), responseBytes: 0)
         if stats.stopReason == .cancelled {
+            StopReasonBoard.shared.clear(for: request.runID.description)
             return AgentModelBoundaryCompletion(outcome: .interrupted(usage))
         }
 
@@ -410,6 +411,7 @@ private enum LocalModelGeneration {
                 emitter: emitter
             )
         }
+        StopReasonBoard.shared.record(stats.stopReason, for: request.runID.description)
         return try await complete(action, usage: usage, emitter: emitter)
     }
 

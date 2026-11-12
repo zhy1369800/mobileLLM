@@ -339,6 +339,16 @@ struct LocalModelLogDetailView: View {
                     let layersValue = layers >= 999 ? "All layers (Full Offload)" : (layers == 0 ? "0 layers (CPU only)" : "\(layers) layers")
                     metricRow("Execution Backend", value: backendName)
                     metricRow("GPU Offload Layers", value: layersValue)
+                    if let contextCap = stats.contextCap {
+                        metricRow("Context Cap", value: "\(contextCap) tok")
+                    }
+                    if let headroom = stats.physicalHeadroom {
+                        metricRow("KV Headroom", value: "\(headroom) tok", isError: headroom <= 256)
+                    }
+                    if let effMax = stats.effectiveMaxTokens {
+                        let clamped = entry.sampling.maxTokens > 0 && effMax < entry.sampling.maxTokens
+                        metricRow("Effective Max Tokens", value: clamped ? "\(effMax) (受 KV 余量限制，原 \(entry.sampling.maxTokens))" : "\(effMax)", isError: clamped)
+                    }
                     metricRow("Prompt Tokens", value: "\(stats.promptTokens)")
                     if let cached = stats.cachedPromptTokens {
                         if cached > 0 {

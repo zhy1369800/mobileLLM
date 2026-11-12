@@ -61,7 +61,11 @@ enum Format {
                 parts.append(String(format: "%.1f tok/s", stats.tokensPerSecond))
             }
         }
-        parts.append("stop: \(stats.stopReason.rawValue)")
+        if stats.stopReason == .maxTokens {
+            parts.append("stop: maxTokens ⚠︎ 已达上限 · 可能截断")
+        } else {
+            parts.append("stop: \(stats.stopReason.rawValue)")
+        }
         return parts.joined(separator: " · ")
     }
 

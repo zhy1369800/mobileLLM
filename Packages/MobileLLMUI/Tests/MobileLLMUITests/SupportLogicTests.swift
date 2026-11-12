@@ -76,6 +76,15 @@ final class SupportLogicTests: XCTestCase {
         )
     }
 
+    func testStatsFooterMarksMaxTokensTruncation() {
+        let truncated = Stats(promptTokens: 8, genTokens: 4, promptTPS: 3,
+                              tokensPerSecond: 12.4, peakMemoryBytes: 0, stopReason: .maxTokens)
+        XCTAssertEqual(
+            Format.statsFooter(truncated, modelName: "Qwen3.5 4B"),
+            "Qwen3.5 4B · 4 tok · 12.4 tok/s · stop: maxTokens ⚠︎ 已达上限 · 可能截断"
+        )
+    }
+
     private func stats(tokensPerSecond: Double) -> Stats {
         Stats(promptTokens: 8, genTokens: 4, promptTPS: 3,
               tokensPerSecond: tokensPerSecond, peakMemoryBytes: 0, stopReason: .eos)

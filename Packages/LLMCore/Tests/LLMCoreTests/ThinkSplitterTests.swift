@@ -128,20 +128,20 @@ final class ThinkSplitterTests: XCTestCase {
     }
 
     /// Once the boundary is resolved, a SECOND </think> inside answer text indicates repetition
-    /// or model degradation: per configuration it is retained for visual inspection while flagged
-    /// so the engine can halt generation immediately.
+    /// or model degradation: the spurious tag is stripped while flagged so the engine can halt
+    /// generation immediately.
     func testSecondCloseAfterDefenseIsRetainedAndFlagged() {
         var s = ThinkSplitter()
         var out = s.feed("reason</think>ans</think>more")
         out += s.finish()
         let (r, a) = collect(out)
         XCTAssertEqual(r, "reason")
-        XCTAssertEqual(a, "ans</think>more")
+        XCTAssertEqual(a, "ansmore")
         XCTAssertTrue(s.sawSpuriousCloseInAnswer)
     }
 
     /// Spurious </think> tag arriving split across chunk boundaries inside answer text
-    /// is also retained intact and flagged.
+    /// is also stripped and flagged.
     func testSpuriousCloseInAnswerSplitAcrossChunks() {
         var s = ThinkSplitter(startInThink: true)
         var out = s.feed("reason</think>first answer")
@@ -151,8 +151,21 @@ final class ThinkSplitterTests: XCTestCase {
         out += s.finish()
         let (r, a) = collect(out)
         XCTAssertEqual(r, "reason")
-        XCTAssertEqual(a, "first answer </think>repeated answer")
+        XCTAssertEqual(a, "first answer repeated answer")
         XCTAssertTrue(s.sawSpuriousCloseInAnswer)
+        XCTAssertEqual(s.spuriousCloseCount, 1)
+    }
+
+    /// Repeated spurious </think> tags with no answer text still increment spuriousCloseCount.
+    func testRepeatedSpuriousCloseWithoutAnswerIncrementsCount() {
+        var s = ThinkSplitter(startInThink: true)
+        var out = s.feed("reason</think></think></think>")
+        out += s.finish()
+        let (r, a) = collect(out)
+        XCTAssertEqual(r, "reason")
+        XCTAssertEqual(a, "")
+        XCTAssertTrue(s.sawSpuriousCloseInAnswer)
+        XCTAssertEqual(s.spuriousCloseCount, 2)
     }
 
     /// Regression: a proper <think>…</think> block is unaffected by the defense (the open is seen first,

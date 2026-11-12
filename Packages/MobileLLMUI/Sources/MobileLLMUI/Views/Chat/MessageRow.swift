@@ -471,7 +471,7 @@ struct AssistantView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.sm) {
-            if !reasoning.isEmpty {
+            if reasoning.contains(where: { !$0.isWhitespace }) {
                 ThinkingDisclosure(reasoning: reasoning, phase: disclosurePhase, displayMode: displayMode)
             }
             if !toolRuns.isEmpty {
