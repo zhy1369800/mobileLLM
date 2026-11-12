@@ -103,7 +103,15 @@ struct MarkdownBlock: Identifiable, Equatable {
                 let header = tableCells(line)
                 i += 2
                 var rows: [[String]] = []
-                while i < lines.count, isTableRow(lines[i]) { rows.append(tableCells(lines[i])); i += 1 }
+                while i < lines.count, isTableRow(lines[i]) {
+                    // Tolerate redundant delimiter lines between body rows
+                    if isTableDelimiter(lines[i]) {
+                        i += 1
+                        continue
+                    }
+                    rows.append(tableCells(lines[i]))
+                    i += 1
+                }
                 blocks.append(MarkdownBlock(id: blocks.count, kind: .table(header: header, rows: rows)))
                 continue
             }
@@ -202,11 +210,9 @@ struct MarkdownBlock: Identifiable, Equatable {
         let cells = splitPipes(trimmed)
         guard !cells.isEmpty else { return false }
         return cells.allSatisfy { cell in
-            var c = Substring(cell.trimmingCharacters(in: .whitespaces))
-            guard !c.isEmpty else { return false }
-            if c.first == ":" { c = c.dropFirst() }
-            if c.last == ":" { c = c.dropLast() }
-            return !c.isEmpty && c.allSatisfy { $0 == "-" }
+            let c = cell.trimmingCharacters(in: .whitespaces)
+            guard !c.isEmpty, c.contains("-") else { return false }
+            return c.allSatisfy { $0 == "-" || $0 == ":" }
         }
     }
     private static func tableCells(_ line: String) -> [String] {

@@ -80,6 +80,24 @@ final class MarkdownParsingTests: XCTestCase {
                        [.table(header: ["Name", "Age"], rows: [["Alice", "30"]])])
     }
 
+    func testTableToleratesImperfectDelimiters() {
+        // 模型输出常见的非标准分隔行：内嵌冒号对齐、单通栏分隔行、数据行间夹杂冗余分割线
+        let md = """
+        | 作品类型 | 代表篇目 |
+        |--:---------------------|
+        | 小说 → 《孔乙己》 | ✅ "短小精悍"代表作 |
+        | --- | --- |
+        | 散文诗/杂文集 → 《野草》 | 🌱 深邃的思想与孤独感！ |
+        """
+        let kinds = MarkdownBlock.parse(md).map(\.kind)
+        XCTAssertEqual(kinds, [
+            .table(header: ["作品类型", "代表篇目"], rows: [
+                ["小说 → 《孔乙己》", "✅ \"短小精悍\"代表作"],
+                ["散文诗/杂文集 → 《野草》", "🌱 深邃的思想与孤独感！"]
+            ])
+        ])
+    }
+
     // MARK: Code (kept working)
 
     func testCodeFenceStillParses() {
