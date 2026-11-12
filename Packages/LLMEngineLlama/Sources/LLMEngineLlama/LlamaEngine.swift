@@ -2026,10 +2026,13 @@ public actor LlamaEngine: LLMEngine {
     // MARK: - Vision (mtmd)
 
     /// Tokens reserved per attached image in the context-fit math. A vision encoder emits on the order of a
-    /// few hundred embedding tokens per image (it varies with the model's tiling / input resolution); ~600
-    /// is a deliberately safe upper bound that keeps the KV budget honest without starving the text. It is
-    /// a reservation for FITTING only — the true image-token count comes back from mtmd after tokenization.
-    static let imageTokenBudget = 600
+    /// few hundred embedding tokens per image (it varies with the model's tiling / input resolution).
+    /// Historical calibration:
+    /// - Max dimension 1024 (legacy): produced ~500 visual tokens, reserved ~600 tokens as upper bound.
+    /// - Max dimension 512 (commit 23c9648): produces ~100-130 visual tokens; reserving 200 tokens provides a
+    ///   deliberately safe upper bound (covering non-square aspect ratios) while releasing ~400 tokens per image.
+    /// It is a reservation for FITTING only — the true image-token count comes back from mtmd after tokenization.
+    static let imageTokenBudget = 200
 
     /// Total image-token reservation for a set of turns: `imageTokenBudget` per attached image. Zero for a
     /// text-only history, so adding this term to the fit's token count is a no-op on the text path.

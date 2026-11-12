@@ -66,36 +66,36 @@ final class VisionPrefillTests: XCTestCase {
     // MARK: - Per-image token budget
 
     func testImageTokenBudgetIsReserved() {
-        XCTAssertEqual(LlamaEngine.imageTokenBudget, 600)
+        XCTAssertEqual(LlamaEngine.imageTokenBudget, 200)
     }
 
     func testImageTokenCountSumsAcrossTurns() {
         let convo = [sys("S"), usr("a", images: [img(1)]), usr("b", images: [img(1), img(1)])]  // 3 images
-        XCTAssertEqual(LlamaEngine.imageTokenCount(convo), 3 * 600)
+        XCTAssertEqual(LlamaEngine.imageTokenCount(convo), 3 * 200)
         XCTAssertEqual(LlamaEngine.imageTokenCount([sys("S"), usr("text")]), 0)
     }
 
-    /// The overflow fitter, fed the same image-aware cost the engine uses (text chars + 600/image), drops an
+    /// The overflow fitter, fed the same image-aware cost the engine uses (text chars + 200/image), drops an
     /// older turn to make room for an attached image's tokens that a text-only fit would have kept whole.
     func testFitMessagesReservesPerImageTokens() {
-        // text cost = 1 char per content char; plus 600 per attached image.
+        // text cost = 1 char per content char; plus 200 per attached image.
         let cost: ([ChatTurn]) -> Int = { $0.reduce(0) { $0 + $1.content.count } + LlamaEngine.imageTokenCount($0) }
         let convo = [sys("S"), usr("OLD"), ChatTurn(role: .assistant, content: "A"), usr("Q", images: [img(1)])]
-        // Text-only cost of the whole convo = 1+3+1+1 = 6; with the image = 606.
-        XCTAssertEqual(cost(convo), 606)
-        // Budget 605: the image's 600 tokens force dropping the oldest droppable turn ("OLD").
-        let kept = LlamaEngine.fitMessages(convo, budget: 605, tokenCount: cost)
+        // Text-only cost of the whole convo = 1+3+1+1 = 6; with the image = 206.
+        XCTAssertEqual(cost(convo), 206)
+        // Budget 205: the image's 200 tokens force dropping the oldest droppable turn ("OLD").
+        let kept = LlamaEngine.fitMessages(convo, budget: 205, tokenCount: cost)
         XCTAssertEqual(kept, [sys("S"), ChatTurn(role: .assistant, content: "A"), usr("Q", images: [img(1)])])
-        // Without the image the same budget keeps everything (text cost 6 ≤ 605).
+        // Without the image the same budget keeps everything (text cost 6 ≤ 205).
         let textConvo = [sys("S"), usr("OLD"), ChatTurn(role: .assistant, content: "A"), usr("Q")]
-        XCTAssertEqual(LlamaEngine.fitMessages(textConvo, budget: 605, tokenCount: cost), textConvo)
+        XCTAssertEqual(LlamaEngine.fitMessages(textConvo, budget: 205, tokenCount: cost), textConvo)
     }
 
     /// An image whose reservation cannot fit even after dropping all droppable history overflows to nil (the
     /// caller raises `.contextWindowExceeded`) rather than silently dropping the image.
     func testUnfittableImageOverflowsToNil() {
         let cost: ([ChatTurn]) -> Int = { $0.reduce(0) { $0 + $1.content.count } + LlamaEngine.imageTokenCount($0) }
-        let convo = [sys("S"), usr("Q", images: [img(1)])]     // 1 + 1 + 600 = 602, nothing droppable
-        XCTAssertNil(LlamaEngine.fitMessages(convo, budget: 500, tokenCount: cost))
+        let convo = [sys("S"), usr("Q", images: [img(1)])]     // 1 + 1 + 200 = 202, nothing droppable
+        XCTAssertNil(LlamaEngine.fitMessages(convo, budget: 150, tokenCount: cost))
     }
 }
