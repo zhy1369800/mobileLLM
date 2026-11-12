@@ -658,6 +658,7 @@ public actor LlamaEngine: LLMEngine {
         var loadFailureReason: String? = nil
         let candidates = checkpoints.values.sorted { $0.promptEndPos > $1.promptEndPos }
         let marker = String(cString: mtmd_default_marker())
+        var cachedInjectedFullText: String? = nil
 
         for cp in candidates {
             // Case 1: Visual-prefix checkpoint (saved right after the last image chunk of turn `cp.turnCount`).
@@ -677,7 +678,14 @@ public actor LlamaEngine: LLMEngine {
                    targetTurn.role == cpLast.role,
                    targetTurn.images == cpLast.images,
                    Array(kept.prefix(cp.turnCount - 1)) == Array(cp.turns.dropLast()) {
-                    let fullText = renderPrompt(Self.injectMediaMarkers(kept, marker: marker))
+                    let fullText: String
+                    if let cached = cachedInjectedFullText {
+                        fullText = cached
+                    } else {
+                        let rendered = renderPrompt(Self.injectMediaMarkers(kept, marker: marker))
+                        cachedInjectedFullText = rendered
+                        fullText = rendered
+                    }
                     guard let lastMarkerRange = fullText.range(of: marker, options: .backwards) else { continue }
                     let tailText = String(fullText[lastMarkerRange.upperBound...])
                     let tailTokens = Self.tokenize(vocab: vocab, text: tailText, addSpecial: false)
@@ -2019,7 +2027,13 @@ public actor LlamaEngine: LLMEngine {
                     let maxSavedPos = checkpoints.values
                         .filter { $0.turnCount <= updatedTurns.count }
                         .map(\.promptEndPos).max() ?? 0
-                    let shouldSaveEos = !isMultimodalSession || (sessionCache.tokenCount - maxSavedPos > 1024)
+                    let maxSavedTurn = checkpoints.values
+                        .filter { $0.turnCount <= updatedTurns.count }
+                        .map(\.turnCount).max() ?? 0
+                    // For multimodal sessions, save an EOS base snapshot whenever a new conversational turn
+                    // concludes (or token delta >= 64) so subsequent regenerate / edit-resend can restore
+                    // immediately from the latest turn boundary rather than rewinding all the way back to the image prefix.
+                    let shouldSaveEos = !isMultimodalSession || (sessionCache.tokenCount - maxSavedPos >= 64) || (updatedTurns.count > maxSavedTurn)
                     if shouldSaveEos {
                         let completedRendered = Self.tokenize(vocab: vocab,
                                                               text: renderCompletedHistory(updatedTurns),
