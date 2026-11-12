@@ -26,6 +26,7 @@ struct MarkdownBlock: Identifiable, Equatable {
         case html(String)
         case diagram(type: String, code: String)
         case image(source: MarkdownImageSource, alt: String?)
+        case divider
     }
 
     /// Stable position-based id so SwiftUI reuses the block views across streaming re-parses — a random
@@ -116,6 +117,14 @@ struct MarkdownBlock: Identifiable, Equatable {
                 continue
             }
 
+            // Thematic break (horizontal rule) — e.g. `---`, `***`, `___`
+            if isThematicBreak(line) {
+                flushProse()
+                blocks.append(MarkdownBlock(id: blocks.count, kind: .divider))
+                i += 1
+                continue
+            }
+
             // Blockquote — consecutive `>` lines collapse into one quote.
             if isQuote(line) {
                 flushProse()
@@ -199,6 +208,14 @@ struct MarkdownBlock: Identifiable, Equatable {
         guard let sp = after.first, sp == " " || sp == "\t" else { return nil }
         let text = after.trimmingCharacters(in: .whitespaces)
         return text.isEmpty ? nil : ListRow(level: level, ordered: true, number: Int(digits), text: text)
+    }
+
+    private static func isThematicBreak(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.count >= 3 else { return false }
+        let nonSpace = trimmed.filter { !$0.isWhitespace }
+        guard nonSpace.count >= 3, let first = nonSpace.first, first == "-" || first == "*" || first == "_" else { return false }
+        return nonSpace.allSatisfy { $0 == first }
     }
 
     private static func isTableRow(_ line: String) -> Bool {
@@ -477,6 +494,7 @@ private struct MarkdownBlockRow: View, Equatable {
         case let .html(code): HTMLCardView(code: code)
         case let .diagram(type, code): DiagramCardView(type: type, code: code)
         case let .image(source, alt): MarkdownImageView(source: source, alt: alt)
+        case .divider: MarkdownDivider()
         }
     }
 }
@@ -662,6 +680,24 @@ struct MarkdownList: View {
 
     private func marker(_ row: MarkdownBlock.ListRow) -> String {
         row.ordered ? "\(row.number ?? 1)." : "•"
+    }
+}
+
+/// A thematic break / horizontal rule — subtle frosted-glass capsule bar separating document sections.
+struct MarkdownDivider: View {
+    var body: some View {
+        Capsule()
+            #if os(iOS) || os(macOS)
+            .fill(.ultraThinMaterial)
+            #else
+            .fill(Theme.surface2.opacity(0.5))
+            #endif
+            .overlay(
+                Capsule()
+                    .strokeBorder(Theme.hairline, lineWidth: 0.5)
+            )
+            .frame(height: 2)
+            .padding(.vertical, Theme.Space.xs)
     }
 }
 

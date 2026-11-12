@@ -98,6 +98,32 @@ final class MarkdownParsingTests: XCTestCase {
         ])
     }
 
+    // MARK: Thematic Breaks (Dividers)
+
+    func testThematicBreakParsesAsDivider() {
+        let md = """
+        First section
+
+        ---
+
+        Second section
+        ***
+        Third section
+        ___
+        Final section
+        """
+        let kinds = MarkdownBlock.parse(md).map(\.kind)
+        XCTAssertEqual(kinds, [
+            .prose("First section"),
+            .divider,
+            .prose("Second section"),
+            .divider,
+            .prose("Third section"),
+            .divider,
+            .prose("Final section")
+        ])
+    }
+
     // MARK: Code (kept working)
 
     func testCodeFenceStillParses() {
