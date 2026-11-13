@@ -1053,7 +1053,17 @@ public actor LlamaEngine: LLMEngine {
                     suffixText = fallback.hasPrefix("\n") ? fallback : ("\n" + fallback)
                 }
                 let tokens = Self.tokenize(vocab: vocab, text: suffixText, addSpecial: false)
-                if !tokens.isEmpty && sessionCache.physicalTokenCount + tokens.count + incrementalReserve <= contextCap {
+                let unstrippedThinkBloat = (!hasImages && !sessionCache.hasImages && !fittedPromptTokens.isEmpty)
+                    ? max(0, (sessionCache.tokenCount + tokens.count) - fittedPromptTokens.count)
+                    : 0
+                let maxAllowedThinkBloat = 1536
+                if unstrippedThinkBloat > maxAllowedThinkBloat {
+                    sessionCache.reset(context: context)
+                    clearCheckpoints()
+                    rollbackDiagnosticMessage = "增量缓存净化: 已清理累积的 \(unstrippedThinkBloat) tok 历史思考草稿，重置SSM/KV状态"
+                    NSLog("[LlamaEngine][CachePurge] Incremental continuation skipped to purge %d tokens of accumulated historical <think> bloat (cleanPrompt=%d).",
+                          Int32(unstrippedThinkBloat), Int32(fittedPromptTokens.count))
+                } else if !tokens.isEmpty && sessionCache.physicalTokenCount + tokens.count + incrementalReserve <= contextCap {
                     incrementalSuffixTokens = tokens
                 } else {
                     NSLog("[LlamaEngine][CacheMiss] Incremental continuation skipped: KV cache headroom exceeded or empty tokens (used=%d, suffix=%d, reserve=%d, cap=%d). Falling back to full evaluation.",
@@ -1364,7 +1374,7 @@ public actor LlamaEngine: LLMEngine {
                                   effectiveCommon >= 16 &&
                                   (totalPromptCountForStats + incrementalReserve <= contextCap)
 
-                if !canRollback {
+                if !canRollback, rollbackDiagnosticMessage == nil {
                     if !supportsPartialTrim && !isFullPromptMatch {
                         rollbackDiagnosticMessage = "跳过回滚: 当前模型架构不支持局部显存截断 (SSM/Recurrent状态已记录)"
                     } else if residentHadImages {
@@ -1461,7 +1471,9 @@ public actor LlamaEngine: LLMEngine {
                             NSLog("[LlamaEngine][CacheMiss] Checkpoint restore decode failed, falling back to clean slate")
                         }
                     } else {
-                        rollbackDiagnosticMessage = "检查点恢复未命中: \(restoreReason)，回退全量重算"
+                        if rollbackDiagnosticMessage == nil {
+                            rollbackDiagnosticMessage = "检查点恢复未命中: \(restoreReason)，回退全量重算"
+                        }
                         NSLog("[LlamaEngine][CacheMiss] Checkpoint restore missed: %@", restoreReason)
                     }
                 }
@@ -1528,6 +1540,29 @@ public actor LlamaEngine: LLMEngine {
                 reasoningStyle == .thinkTagsImplicitOpen
                 || fittedPromptText.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("<think>")
             )
+            // Warm up the sampler's repetition-penalty ring buffer with recent assistant response tokens
+            // so the model is actively discouraged from repeating catchphrases, slogans, or identical
+            // closing lines from its immediately preceding turn(s).
+            // When reasoning is active, the `<think>` block can easily exceed 100–256 tokens and flush
+            // these prior tokens out of the penalty window before the visible answer begins; therefore
+            // we also re-seed `priorAssistantTokens` right when the stream transitions from `<think>`
+            // into `.answer`.
+            let priorAssistantTokens: [llama_token] = {
+                guard params.repetitionPenalty > 1.0 else { return [] }
+                let recentAssistantText = kept
+                    .filter { $0.role == .assistant && !$0.content.isEmpty }
+                    .suffix(2)
+                    .map(\.content)
+                    .joined(separator: "\n")
+                guard !recentAssistantText.isEmpty else { return [] }
+                let toks = Self.tokenize(vocab: vocab, text: recentAssistantText, addSpecial: false)
+                return Array(toks.suffix(160))
+            }()
+            for tok in priorAssistantTokens {
+                llama_sampler_accept(sampler, tok)
+            }
+            var reseededAnswerPenalty = !promptOpenedThink || priorAssistantTokens.isEmpty
+
             var splitter = ThinkSplitter(startInThink: promptOpenedThink)
             var decoder = PieceDecoder()
             var answerStripper = LiteralStripper(tags: Self.answerStripTags(for: promptTemplate))
@@ -1541,6 +1576,12 @@ public actor LlamaEngine: LLMEngine {
                         cont.yield(.reasoning(s))
                     }
                 case .answer(let s):
+                    if !reseededAnswerPenalty {
+                        reseededAnswerPenalty = true
+                        for tok in priorAssistantTokens {
+                            llama_sampler_accept(sampler, tok)
+                        }
+                    }
                     let out = answerStripper.isNoop ? s : answerStripper.feed(s)
                     if !out.isEmpty {
                         if firstTokenTime == nil { firstTokenTime = Date() }
@@ -1630,6 +1671,7 @@ public actor LlamaEngine: LLMEngine {
             NSLog("[LlamaEngine] Decode budget: kvPos=%d, contextCap=%d, physicalHeadroom=%d, maxTokens=%d, effectiveMaxTokens=%d, thinkingBudget=%d",
                   Int32(kvPos), Int32(contextCap), Int32(physicalHeadroom), Int32(maxTokens), Int32(effectiveMaxTokens), Int32(effectiveThinkingBudget))
             var thinkingTokens = 0
+            var answerTokensAfterThink = 0
             var forcedThinkClose = false
             var supportsKvRollback = true
             var consecutiveMisses = 0
@@ -1698,15 +1740,31 @@ public actor LlamaEngine: LLMEngine {
                 }
                 if splitter.isInsideThink {
                     thinkingTokens += 1
+                } else {
+                    answerTokensAfterThink += 1
                 }
                 genTokens += 1
 
-                // Check for persistent repetition loops indicated by repeated stray </think> tags.
-                // Single stray tags are stripped transparently by ThinkSplitter so normal output continues;
-                // only halt decoding when the model exhibits an unrecoverable repetition loop (>= 3 stray tags).
-                if splitter.spuriousCloseCount >= 3 {
-                    NSLog("[LlamaEngine] Repetition loop with multiple stray </think> tags (%d) detected. Halting decoding as repetition.",
-                          Int32(splitter.spuriousCloseCount))
+                // Detect degenerate post-answer loops signaled by stray `</think>` tags in the answer phase:
+                // 1. Natural thinking closure (`!forcedThinkClose`): once the model has closed `<think>` on its
+                //    own and emitted non-empty answer text, any subsequent `</think>` means it has finished its
+                //    response and is wrapping around to regurgitate historical catchphrases or self-repeat.
+                // 2. Forced budget closure (`forcedThinkClose`): the model's `<think>` was closed synthetically,
+                //    so it may emit 1 immediate inertia `</think>` within the first ~32 answer tokens; tolerate
+                //    that single tag, but halt immediately if a stray `</think>` appears later in the answer or
+                //    if >= 2 stray tags occur.
+                let hasNonEmptyAnswer = !fullGeneratedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let shouldHaltOnSpuriousThinkClose: Bool
+                if !forcedThinkClose {
+                    shouldHaltOnSpuriousThinkClose = (splitter.sawSpuriousCloseInAnswer && hasNonEmptyAnswer)
+                        || splitter.spuriousCloseCount >= 2
+                } else {
+                    shouldHaltOnSpuriousThinkClose = splitter.spuriousCloseCount >= 2
+                        || (splitter.spuriousCloseCount >= 1 && answerTokensAfterThink > 32 && hasNonEmptyAnswer)
+                }
+                if shouldHaltOnSpuriousThinkClose {
+                    NSLog("[LlamaEngine] Spurious </think> in answer phase (count=%d, forcedClose=%@, answerTokens=%d) detected. Halting decoding as repetition.",
+                          Int32(splitter.spuriousCloseCount), forcedThinkClose ? "true" : "false", Int32(answerTokensAfterThink))
                     stop = .repetition
                     let eot = llama_vocab_eot(vocab)
                     let eogToken = (eot != LLAMA_TOKEN_NULL) ? eot : llama_vocab_eos(vocab)
@@ -1980,11 +2038,13 @@ public actor LlamaEngine: LLMEngine {
                 physicalHeadroom: physicalHeadroom,
                 effectiveMaxTokens: effectiveMaxTokens)))
 
-            // Multi-turn and multimodal reuse: record valid conversational turn on natural EOS completion.
-            // If KV rollback failed during speculative decoding or physical kvPos diverged, the physical KV cache is dirty and must not be reused.
+            // Multi-turn and multimodal reuse: record valid conversational turn ONLY on natural EOS completion.
+            // Never commit `.repetition` turns into `sessionCache` or checkpoints: when a repetition / stray `</think>`
+            // loop occurs, partial multi-token tag prefixes and degenerate tokens have already been decoded into the
+            // physical KV / recurrent state, and committing them would permanently poison subsequent incremental turns.
             let currentPromptEndPos = baseKvPos + effectivePromptPosAdvance
             let kvPositionsAligned = Int(kvPos) == currentPromptEndPos + generatedTokens.count
-            if (stop == .eos || stop == .repetition) && supportsKvRollback && kvPositionsAligned && answerStripper.isNoop && !fullGeneratedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if stop == .eos && supportsKvRollback && kvPositionsAligned && answerStripper.isNoop && !fullGeneratedAnswer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 let updatedTurns = kept + [ChatTurn(role: .assistant, content: fullGeneratedAnswer)]
                 if let suffixTokens = incrementalSuffixTokens {
                     sessionCache.append(turns: updatedTurns,
@@ -2052,7 +2112,19 @@ public actor LlamaEngine: LLMEngine {
                     }
                 }
             } else {
-                sessionCache.reset(context: context)
+                if isIncrementalContinuation, !hasImages, !sessionCache.hasImages,
+                   initialCachedSessionTokenCount > 0 && initialCachedSessionTokensCount > 0 {
+                    if sessionCache.prune(to: initialCachedSessionTokenCount, context: context) {
+                        NSLog("[LlamaEngine] Non-EOS stop (%@): pruned uncommitted turn, retained %d clean prefix tokens",
+                              stop.rawValue, Int32(initialCachedSessionTokenCount))
+                    } else {
+                        supportsPartialTrim = false
+                        NSLog("[LlamaEngine] Non-EOS stop (%@): hybrid/recurrent state cannot partial-trim, cleared session cache for clean next turn",
+                              stop.rawValue)
+                    }
+                } else {
+                    sessionCache.reset(context: context)
+                }
                 cont.finish()
             }
         } catch is CancellationError {
@@ -2525,7 +2597,12 @@ public actor LlamaEngine: LLMEngine {
         let chain = llama_sampler_chain_init(llama_sampler_chain_default_params())!
         if params.repetitionPenalty > 1.0 {
             let nVocab = llama_vocab_n_tokens(vocab)
-            llama_sampler_chain_add(chain, llama_sampler_init_penalties(nVocab, 64, Float(params.repetitionPenalty), 0, 0))
+            // Use a 256-token penalty window (up from 64) plus mild frequency/presence penalties so
+            // paragraph-level and cross-turn catchphrase repetitions are penalized across the full response.
+            llama_sampler_chain_add(
+                chain,
+                llama_sampler_init_penalties(nVocab, 256, Float(params.repetitionPenalty), 0.08, 0.04)
+            )
         }
         if params.temperature <= 0 {
             llama_sampler_chain_add(chain, llama_sampler_init_greedy())
