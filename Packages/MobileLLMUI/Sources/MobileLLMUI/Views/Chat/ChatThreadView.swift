@@ -153,7 +153,8 @@ struct ChatThreadView: View {
                                 performInitialScrollIfNeeded(proxy)
                                 return
                             }
-                            guard !userScrolledUp && !isUserDragging else { return }
+                            // 仅在生成/运行期间（isBusy）自动跟随滚底；静态阅读时展开/折叠卡片绝不抢夺 ScrollView 控制权，防止动画冲突卡死
+                            guard isBusy, !userScrolledUp && !isUserDragging else { return }
                             if metrics.isOverflowing && newHeight > oldHeight + 0.5 {
                                 // 1. 流式输出增长或回复完成帧挂载底部按钮栏/统计栏且总高已超出全屏视口：
                                 // 仅在软键盘已收起时跟随到底部；若发送瞬间键盘尚未收起，交由视口展开完成回调对齐，避免先瞬移到半屏再跌落回全屏的闪烁
