@@ -1147,6 +1147,7 @@ public actor LlamaEngine: LLMEngine {
 
             var prefilledPromptTokens: [llama_token]? = nil
             var savedCleanAnchorDuringPrefill = false
+            var trailingThinkOpenerCount: Int = 0
             if let suffixTokens = incrementalSuffixTokens {
                 isIncrementalContinuation = true
                 // MULTI-TURN CONTINUATION (text or multimodal):
@@ -1492,7 +1493,7 @@ public actor LlamaEngine: LLMEngine {
                 // Including the preceding newline (`\n` after `<|im_start|>assistant`) in the opener ensures the
                 // Clean Anchor ends on the `assistant` role token rather than a trailing `\n` token that could
                 // otherwise BPE-merge with leading whitespace/newlines of future assistant responses.
-                let trailingThinkOpenerCount: Int = {
+                trailingThinkOpenerCount = {
                     guard params.kvCheckpointsEnabled, !hasImages else { return 0 }
                     let dynamicSuffix = Self.thinkSuffix(reasoningStyle, thinking: wantThinking)
                     var baseCandidates: [String] = []
