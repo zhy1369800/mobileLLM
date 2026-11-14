@@ -64,7 +64,18 @@ public final class ChatStore {
             }
         }
     }
-    public var draft: String = ""
+    public var draft: String = "" {
+        didSet {
+            let nonEmpty = !draft.isEmpty
+            if hasDraft != nonEmpty { hasDraft = nonEmpty }
+            let sendable = nonEmpty && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            if hasSendableDraft != sendable { hasSendableDraft = sendable }
+        }
+    }
+    /// Published separately from `draft` so `Composer` only re-evaluates on empty↔non-empty transitions
+    /// instead of on every keystroke / IME composition character.
+    public private(set) var hasDraft: Bool = false
+    public private(set) var hasSendableDraft: Bool = false
     /// Live in-flight turn; `nil` when idle.
     public private(set) var streaming: StreamingState?
     /// The id of the assistant message currently streaming, published separately from `streaming` so the
@@ -677,7 +688,7 @@ public final class ChatStore {
     public var canSend: Bool {
         acceptingNewActions && !conversationEraseInProgress && agentRuntimeUnavailableReason == nil
             && hasModel && streamingMessageID == nil
-            && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !pendingImages.isEmpty)
+            && (hasSendableDraft || !pendingImages.isEmpty)
     }
 
     /// Marks the production agent path unavailable. This is intentionally sticky for the process:
@@ -2708,7 +2719,6 @@ public final class ChatStore {
         let conversationID: UUID
         let cap: Int
         let isOnline: Bool
-        let draft: String
         let recentUserTurns: [String]
         let baseSystemPrompt: String
         let activeSkill: Skill?
@@ -2775,11 +2785,10 @@ public final class ChatStore {
         }
 
         // Measured with `ContextCompactor.tokens` — the runtime's own estimator — and the same fixed overhead
-        // as the compaction trigger (system prompt, draft, output reserve, tool schemas), so the meter,
-        // compaction and the runtime's truncation all agree on what "full" means. Cached across streaming
-        // ticks so the 20fps meter update does not re-run `MemoryRanking.rank` or re-tokenize the system
-        // prompt on the main thread when nothing in the fixed inputs changed.
-        let currentDraft = draft
+        // as the compaction trigger (system prompt, output reserve, tool schemas), so the meter,
+        // compaction and the runtime's truncation all agree on what "full" means. Does not read `draft`,
+        // so typing in the composer never invalidates `ContextMeterBar` or re-runs `MemoryRanking.rank`
+        // on the main thread on every keystroke.
         let baseSystemPrompt = settings.systemPrompt
         let skill = activeSkill
         let memoryOn = settings.memoryEnabled
@@ -2791,7 +2800,6 @@ public final class ChatStore {
            cache.conversationID == convo.id,
            cache.cap == cap,
            cache.isOnline == online,
-           cache.draft == currentDraft,
            cache.recentUserTurns == recentUserTurns,
            cache.baseSystemPrompt == baseSystemPrompt,
            cache.activeSkill == skill,
@@ -2800,13 +2808,13 @@ public final class ChatStore {
            cache.toolSchemaTokens == toolSchemaTokens {
             fixedOverhead = cache.fixedOverheadTokens
         } else {
-            let query = ([currentDraft] + recentUserTurns).filter { !$0.isEmpty }.joined(separator: " ")
+            let query = recentUserTurns.filter { !$0.isEmpty }.joined(separator: " ")
             let memBlock = (!facts.isEmpty) ? Self.memoryBlock(facts, query: query) : nil
             let system = Self.systemPrompt(base: baseSystemPrompt, skill: skill, memoryBlock: memBlock)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let computedOverhead = ContextPolicy.fixedOverheadTokens(
                 systemPromptTokens: ContextCompactor.tokens(in: system, role: .system),
-                currentUserTokens: ContextCompactor.tokens(in: currentDraft),
+                currentUserTokens: 0,
                 toolSchemaTokens: toolSchemaTokens,
                 contextLength: cap,
                 online: online
@@ -2815,7 +2823,6 @@ public final class ChatStore {
                 conversationID: convo.id,
                 cap: cap,
                 isOnline: online,
-                draft: currentDraft,
                 recentUserTurns: recentUserTurns,
                 baseSystemPrompt: baseSystemPrompt,
                 activeSkill: skill,

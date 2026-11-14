@@ -422,12 +422,12 @@ public actor LlamaEngine: LLMEngine {
             NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: empty tokens or turns")
             return
         }
-        // Short-context skip for pure text: clean anchor snapshots use 0 threshold (always save) so
-        // periodic `<think>` bloat purges can always relay from a clean anchor, whereas regular EOS
-        // snapshots skip <= 1024 tokens where full-prefill is already < 0.5 s.
+        // Short-context skip for pure text: clean anchor snapshots use a lower 256-token threshold so
+        // periodic `<think>` bloat purges can always relay from a clean anchor without stalling short
+        // prompts on synchronous disk writes, whereas regular EOS snapshots skip <= 1024 tokens.
         // Multimodal checkpoints are ALWAYS saved regardless of token count because ViT image encoding
         // takes 2–5 seconds even on a short 1-turn prompt.
-        let minTokensForCheckpoint = isCleanAnchor ? 0 : 1024
+        let minTokensForCheckpoint = isCleanAnchor ? 256 : 1024
         if !hasImages && effectiveEndPos <= minTokensForCheckpoint {
             NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: tokens=%d <= %d", Int32(effectiveEndPos), Int32(minTokensForCheckpoint))
             return
@@ -1525,7 +1525,7 @@ public actor LlamaEngine: LLMEngine {
                         let shouldSplitForCleanAnchor = isZeroBloatRestore
                             && trailingThinkOpenerCount > 0
                             && cleanAnchorTargetPos > effectiveCommon
-                            && cleanAnchorTargetPos > 16
+                            && cleanAnchorTargetPos > 256
                             && suffixTokens.count > trailingThinkOpenerCount
 
                         let decodeOK: Bool
@@ -1589,7 +1589,7 @@ public actor LlamaEngine: LLMEngine {
                     let shouldSplitForCleanAnchor = params.kvCheckpointsEnabled
                         && !hasImages
                         && trailingThinkOpenerCount > 0
-                        && cleanAnchorTargetPos > 16
+                        && cleanAnchorTargetPos > 256
 
                     if shouldSplitForCleanAnchor {
                         let bodyTokens = Array(promptTokens.prefix(cleanAnchorTargetPos))
@@ -1620,7 +1620,7 @@ public actor LlamaEngine: LLMEngine {
             }
             // Save a "prompt fully prefilled" checkpoint for this turn boundary when not already saved
             // as a split Clean Anchor above (e.g. non-thinking models where `trailingThinkOpenerCount == 0`).
-            if params.kvCheckpointsEnabled && !hasImages && !savedCleanAnchorDuringPrefill && (checkpoints.isEmpty || promptTokenCount > 16),
+            if params.kvCheckpointsEnabled && !hasImages && !savedCleanAnchorDuringPrefill && (checkpoints.isEmpty || promptTokenCount > 256),
                let pt = prefilledPromptTokens, !pt.isEmpty {
                 let physicalTokens: [llama_token]
                 if rollbackSucceeded && cachedRollbackTokensCount > 0 && sessionCache.tokens.count >= cachedRollbackTokensCount {

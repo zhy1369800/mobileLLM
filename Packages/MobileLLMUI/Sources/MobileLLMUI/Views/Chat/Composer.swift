@@ -171,11 +171,11 @@ struct Composer: View {
     // MARK: Input Card
 
     private var isTyping: Bool {
-        !chat.draft.isEmpty && !dictation.isRecording
+        chat.hasDraft && !dictation.isRecording
     }
 
     private var showSendOrStop: Bool {
-        chat.isStreaming || !chat.draft.isEmpty || !chat.pendingImages.isEmpty
+        chat.isStreaming || chat.hasDraft || !chat.pendingImages.isEmpty
     }
 
     private var inputCard: some View {

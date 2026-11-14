@@ -684,14 +684,12 @@ struct MarkdownList: View {
 }
 
 /// A thematic break / horizontal rule — subtle frosted-glass capsule bar separating document sections.
+/// Uses alpha-blended surface fill rather than runtime backdrop blur (`.ultraThinMaterial`) to guarantee
+/// 120fps scrolling with zero offscreen rendering passes in long message threads.
 struct MarkdownDivider: View {
     var body: some View {
         Capsule()
-            #if os(iOS) || os(macOS)
-            .fill(.ultraThinMaterial)
-            #else
-            .fill(Theme.surface2.opacity(0.5))
-            #endif
+            .fill(Theme.surface2.opacity(0.75))
             .overlay(
                 Capsule()
                     .strokeBorder(Theme.hairline, lineWidth: 0.5)
