@@ -57,6 +57,40 @@ final class SettingsPersistenceTests: XCTestCase {
         XCTAssertEqual(AppSettings(defaults: defaults).systemPrompt, "Answer only in haiku.")
     }
 
+    func testSystemPromptPresetsLifecycleAndPersistence() {
+        let settings = AppSettings(defaults: defaults)
+        XCTAssertEqual(settings.systemPromptPresets.count, 1)
+        XCTAssertTrue(settings.systemPromptPresets[0].isBuiltin)
+
+        // Add a preset
+        let custom = settings.addSystemPromptPreset(name: "Code Reviewer", prompt: "You are a code reviewer.")
+        XCTAssertEqual(settings.systemPromptPresets.count, 2)
+
+        // Select it
+        settings.selectedSystemPromptID = custom.id
+        XCTAssertEqual(settings.systemPrompt, "You are a code reviewer.")
+
+        // Relaunch app
+        let reloaded = AppSettings(defaults: defaults)
+        XCTAssertEqual(reloaded.systemPromptPresets.count, 2)
+        XCTAssertEqual(reloaded.selectedSystemPromptID, custom.id)
+        XCTAssertEqual(reloaded.systemPrompt, "You are a code reviewer.")
+
+        // Effective prompt for conversation
+        XCTAssertEqual(reloaded.effectiveSystemPrompt(id: nil), "You are a code reviewer.")
+        XCTAssertEqual(reloaded.effectiveSystemPrompt(id: SystemPrompt.standardPresetID), SystemPrompt.standard)
+
+        // Delete custom preset
+        reloaded.deleteSystemPromptPreset(id: custom.id)
+        XCTAssertEqual(reloaded.systemPromptPresets.count, 1)
+        XCTAssertEqual(reloaded.selectedSystemPromptID, SystemPrompt.standardPresetID)
+        XCTAssertEqual(reloaded.systemPrompt, SystemPrompt.standard)
+
+        // Attempting to delete builtin standard preset should fail safely
+        reloaded.deleteSystemPromptPreset(id: SystemPrompt.standardPresetID)
+        XCTAssertEqual(reloaded.systemPromptPresets.count, 1)
+    }
+
     // MARK: MCP back-compat (through the whole snapshot)
 
     /// `MCPServer` grew fields after v1. Decoding is all-or-nothing inside the snapshot, so a server

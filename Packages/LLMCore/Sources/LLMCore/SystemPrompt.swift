@@ -31,4 +31,32 @@ public enum SystemPrompt {
         text.trimmingCharacters(in: .whitespacesAndNewlines)
             == standard.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    public static let standardPresetID = "standard"
+
+    public static var defaultPresets: [SystemPromptPreset] {
+        [
+            SystemPromptPreset(
+                id: standardPresetID,
+                name: "Standard",
+                prompt: standard,
+                isBuiltin: true
+            )
+        ]
+    }
+}
+
+/// A named preset for a system prompt that can be managed globally and assigned per conversation.
+public struct SystemPromptPreset: Identifiable, Codable, Equatable, Sendable {
+    public let id: String
+    public var name: String
+    public var prompt: String
+    public var isBuiltin: Bool
+
+    public init(id: String = UUID().uuidString, name: String, prompt: String, isBuiltin: Bool = false) {
+        self.id = id
+        self.name = name
+        self.prompt = prompt
+        self.isBuiltin = isBuiltin
+    }
 }

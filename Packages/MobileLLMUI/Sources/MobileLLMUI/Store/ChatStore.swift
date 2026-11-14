@@ -583,6 +583,22 @@ public final class ChatStore {
         conversationReasoningEffort ?? .medium
     }
 
+    /// The active thread's per-conversation system prompt preset override (nil = follow global default).
+    public var conversationSystemPromptID: String? {
+        get { activeConversation?.systemPromptID }
+        set {
+            guard let convo = activeConversation,
+                  let idx = conversations.firstIndex(where: { $0.id == convo.id }) else { return }
+            conversations[idx].systemPromptID = newValue
+            persist(conversations[idx])
+        }
+    }
+
+    /// The effective base system prompt for the active thread.
+    public var effectiveBaseSystemPrompt: String {
+        settings.effectiveSystemPrompt(id: conversationSystemPromptID)
+    }
+
     /// The active thread's sampling overrides (nil field = follow the global setting).
     public var conversationSamplingOverride: ConversationSampling? { activeConversation?.sampling }
 
@@ -2674,7 +2690,7 @@ public final class ChatStore {
     /// generation path (`startGeneration`) and the context meter (`contextUsage`) route through this, so
     /// every part is charged to the window exactly once and shown honestly.
     func composedSystemPrompt(query: String = "", memoryEnabled: Bool? = nil) -> String {
-        Self.systemPrompt(base: settings.systemPrompt, skill: activeSkill,
+        Self.systemPrompt(base: effectiveBaseSystemPrompt, skill: activeSkill,
                           memoryBlock: memoryBlock(for: query, enabled: memoryEnabled))
     }
 
@@ -2789,7 +2805,7 @@ public final class ChatStore {
         // compaction and the runtime's truncation all agree on what "full" means. Does not read `draft`,
         // so typing in the composer never invalidates `ContextMeterBar` or re-runs `MemoryRanking.rank`
         // on the main thread on every keystroke.
-        let baseSystemPrompt = settings.systemPrompt
+        let baseSystemPrompt = effectiveBaseSystemPrompt
         let skill = activeSkill
         let memoryOn = settings.memoryEnabled
         let facts = memoryOn ? (memoryBook?.facts ?? []) : []

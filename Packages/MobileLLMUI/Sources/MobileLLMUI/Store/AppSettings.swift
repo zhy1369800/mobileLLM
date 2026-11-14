@@ -72,7 +72,83 @@ public final class AppSettings {
     public var enginePreference: EnginePreference { didSet { persist() } }
 
     // MARK: Behavior
-    public var systemPrompt: String { didSet { persist() } }
+    public var systemPromptPresets: [SystemPromptPreset] { didSet { persist() } }
+    public var selectedSystemPromptID: String { didSet { persist() } }
+    /// Backward-compatible accessor for the currently active system prompt text.
+    public var systemPrompt: String {
+        get { effectiveSystemPrompt(id: selectedSystemPromptID) }
+        set { updateSelectedSystemPrompt(newValue) }
+    }
+
+    // MARK: - System Prompt Presets Management
+
+    public func effectiveSystemPrompt(id: String?) -> String {
+        if let id, let preset = systemPromptPresets.first(where: { $0.id == id }) {
+            return preset.prompt
+        }
+        if let current = systemPromptPresets.first(where: { $0.id == selectedSystemPromptID }) {
+            return current.prompt
+        }
+        return SystemPrompt.standard
+    }
+
+    public func preset(for id: String?) -> SystemPromptPreset? {
+        guard let id else { return nil }
+        return systemPromptPresets.first(where: { $0.id == id })
+    }
+
+    public var selectedSystemPromptPreset: SystemPromptPreset {
+        systemPromptPresets.first(where: { $0.id == selectedSystemPromptID })
+            ?? systemPromptPresets.first(where: { $0.id == SystemPrompt.standardPresetID })
+            ?? SystemPrompt.defaultPresets[0]
+    }
+
+    public func updateSelectedSystemPrompt(_ text: String) {
+        if let index = systemPromptPresets.firstIndex(where: { $0.id == selectedSystemPromptID }) {
+            systemPromptPresets[index].prompt = text
+            persist()
+        } else {
+            let newPreset = SystemPromptPreset(name: "Custom", prompt: text)
+            systemPromptPresets.append(newPreset)
+            selectedSystemPromptID = newPreset.id
+        }
+    }
+
+    @discardableResult
+    public func addSystemPromptPreset(name: String, prompt: String) -> SystemPromptPreset {
+        let preset = SystemPromptPreset(name: name, prompt: prompt, isBuiltin: false)
+        systemPromptPresets.append(preset)
+        persist()
+        return preset
+    }
+
+    public func updateSystemPromptPreset(id: String, name: String, prompt: String) {
+        if let index = systemPromptPresets.firstIndex(where: { $0.id == id }) {
+            if !systemPromptPresets[index].isBuiltin {
+                systemPromptPresets[index].name = name
+            }
+            systemPromptPresets[index].prompt = prompt
+            persist()
+        }
+    }
+
+    public func deleteSystemPromptPreset(id: String) {
+        guard let index = systemPromptPresets.firstIndex(where: { $0.id == id }),
+              !systemPromptPresets[index].isBuiltin else { return }
+        systemPromptPresets.remove(at: index)
+        if selectedSystemPromptID == id {
+            selectedSystemPromptID = SystemPrompt.standardPresetID
+        }
+        persist()
+    }
+
+    public func resetPresetToStandard(id: String) {
+        if let index = systemPromptPresets.firstIndex(where: { $0.id == id }) {
+            systemPromptPresets[index].prompt = SystemPrompt.standard
+            persist()
+        }
+    }
+
     public var thinkingDefault: Bool { didSet { persist() } }
     public var thinkingDisplay: ThinkingDisplayMode { didSet { persist() } }
     /// Let the model call on-device tools (calculator, date/time) via the agent loop. Off by default —
@@ -398,12 +474,31 @@ public final class AppSettings {
         // The stock prompt arrived after v1 shipped with no prompt at all, so seed it once into installs
         // that predate it. `systemPromptSeeded` is what makes that a migration and not a bug: without it,
         // "" is indistinguishable from "the user cleared it on purpose" and every launch would undo them.
-        if let snap {
-            systemPrompt = (snap.systemPromptSeeded != true && snap.systemPrompt.isEmpty)
-                ? SystemPrompt.standard : snap.systemPrompt
-        } else {
-            systemPrompt = SystemPrompt.standard
+        var loadedPresets = snap?.systemPromptPresets ?? []
+        var loadedSelectedID = snap?.selectedSystemPromptID ?? SystemPrompt.standardPresetID
+
+        if !loadedPresets.contains(where: { $0.id == SystemPrompt.standardPresetID }) {
+            loadedPresets.insert(SystemPrompt.defaultPresets[0], at: 0)
         }
+
+        if snap?.systemPromptPresets == nil, let snap {
+            let legacyPrompt = (snap.systemPromptSeeded != true && snap.systemPrompt.isEmpty)
+                ? SystemPrompt.standard : snap.systemPrompt
+            if !SystemPrompt.isStandard(legacyPrompt) {
+                let custom = SystemPromptPreset(name: "Custom Prompt", prompt: legacyPrompt, isBuiltin: false)
+                loadedPresets.append(custom)
+                loadedSelectedID = custom.id
+            } else {
+                loadedSelectedID = SystemPrompt.standardPresetID
+            }
+        }
+
+        if !loadedPresets.contains(where: { $0.id == loadedSelectedID }) {
+            loadedSelectedID = SystemPrompt.standardPresetID
+        }
+
+        self.systemPromptPresets = loadedPresets
+        self.selectedSystemPromptID = loadedSelectedID
         thinkingDefault = snap?.thinkingDefault ?? true
         thinkingDisplay = snap?.thinkingDisplay ?? .autoCollapse
         toolsEnabled = snap?.toolsEnabled ?? false
@@ -609,6 +704,8 @@ public final class AppSettings {
         var systemPrompt: String
         /// One-time marker that the stock prompt has been offered; absent in pre-v1.1 snapshots.
         var systemPromptSeeded: Bool? = true
+        var systemPromptPresets: [SystemPromptPreset]? = nil
+        var selectedSystemPromptID: String? = nil
         var thinkingDefault: Bool
         var thinkingDisplay: ThinkingDisplayMode
         var toolsEnabled: Bool? = false   // optional → old snapshots decode
@@ -666,6 +763,8 @@ public final class AppSettings {
         let defaultService = onlineServices.first
         let snap = Snapshot(defaultModelID: defaultModelID, enginePreference: enginePreference,
                             systemPrompt: systemPrompt, systemPromptSeeded: true,
+                            systemPromptPresets: systemPromptPresets,
+                            selectedSystemPromptID: selectedSystemPromptID,
                             thinkingDefault: thinkingDefault, thinkingDisplay: thinkingDisplay,
                             toolsEnabled: toolsEnabled,
                             alwaysExposeTools: alwaysExposeTools,
@@ -722,7 +821,8 @@ public final class AppSettings {
         loading = true
         defaultModelID = fallbackDefaultModelID
         enginePreference = .auto
-        systemPrompt = SystemPrompt.standard
+        systemPromptPresets = SystemPrompt.defaultPresets
+        selectedSystemPromptID = SystemPrompt.standardPresetID
         thinkingDefault = true
         thinkingDisplay = .autoCollapse
         toolsEnabled = false

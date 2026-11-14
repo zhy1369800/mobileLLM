@@ -90,9 +90,9 @@ struct SettingsView: View {
             #endif
         }
         .sheet(isPresented: $showSystemPrompt) {
-            NavigationStack { SystemPromptEditor(settings: settings) }
+            NavigationStack { SystemPromptManagementView(settings: settings) }
             #if os(macOS)
-            .frame(minWidth: 480, minHeight: 420)
+            .frame(minWidth: 520, minHeight: 520)
             #endif
         }
         .sheet(isPresented: $showSkills) {
@@ -125,12 +125,14 @@ struct SettingsView: View {
         }
     }
 
-    /// One-line status for the system-prompt row: the stock prompt, off, or a custom preview.
+    /// One-line status for the system-prompt row: the active preset and preview.
     private var systemPromptSummary: String {
-        let text = settings.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        if text.isEmpty { return "Off — no instructions are sent" }
-        if SystemPrompt.isStandard(settings.systemPrompt) { return "Standard prompt" }
-        return "Custom · \(text.replacingOccurrences(of: "\n", with: " ").prefix(60))"
+        let preset = settings.selectedSystemPromptPreset
+        let text = preset.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty { return "\(preset.name) · Off" }
+        if preset.isBuiltin && SystemPrompt.isStandard(text) { return "Standard prompt" }
+        let preview = text.replacingOccurrences(of: "\n", with: " ").prefix(40)
+        return "\(preset.name) · \(preview)"
     }
 
     // MARK: Model
@@ -975,46 +977,6 @@ public struct MacSettingsWindow: View {
     }
 }
 #endif
-
-/// The system-prompt editor, in its own sheet — full-height editing space without eating the settings
-/// screen. Reset restores the stock prompt; clearing it entirely is a valid "off" state that sticks.
-struct SystemPromptEditor: View {
-    @Bindable var settings: AppSettings
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.Space.md) {
-                Text("Prepended to every chat. Keep it short — it's charged to the context window on "
-                     + "every turn, and small models follow three sharp rules better than ten soft ones.")
-                    .font(.caption).foregroundStyle(Theme.textSecondary)
-                TextEditor(text: $settings.systemPrompt)
-                    .font(.callout)
-                    .foregroundStyle(Theme.textPrimary)
-                    .frame(minHeight: 280)
-                    .scrollContentBackground(.hidden)
-                    .padding(Theme.Space.xs)
-                    .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous)
-                        .strokeBorder(Theme.hairline))
-                    .accessibilityLabel("System prompt")
-                if !SystemPrompt.isStandard(settings.systemPrompt) {
-                    Button("Reset to the standard prompt") { settings.systemPrompt = SystemPrompt.standard }
-                        .buttonStyle(.plain).font(.subheadline.weight(.medium)).foregroundStyle(Theme.accent)
-                }
-            }
-            .padding(Theme.Space.lg)
-            .frame(maxWidth: 640).frame(maxWidth: .infinity)
-        }
-        .scrollDismissesKeyboard(.interactively)
-        .background(Theme.bg)
-        .navigationTitle("System prompt")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #endif
-        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
-    }
-}
 
 #if DEBUG
 #Preview("Settings") {

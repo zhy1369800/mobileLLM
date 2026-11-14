@@ -20,6 +20,7 @@ struct ConversationSettingsView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Space.xl) {
+                    systemPromptSection
                     reasoningSection
                     approvalSection
                     contextSection
@@ -50,6 +51,69 @@ struct ConversationSettingsView: View {
         Text(text.uppercased())
             .font(.caption2.weight(.semibold))
             .foregroundStyle(Theme.textTertiary)
+    }
+
+    // MARK: System Prompt
+
+    private var systemPromptSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.md) {
+            sectionTitle("System Prompt")
+            HStack {
+                Text("Preset").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                Spacer()
+                Menu {
+                    Button {
+                        chat.conversationSystemPromptID = nil
+                    } label: {
+                        if chat.conversationSystemPromptID == nil {
+                            Label("Follow default (\(settings.selectedSystemPromptPreset.name))", systemImage: "checkmark")
+                        } else {
+                            Text("Follow default (\(settings.selectedSystemPromptPreset.name))")
+                        }
+                    }
+
+                    Divider()
+
+                    ForEach(settings.systemPromptPresets) { preset in
+                        Button {
+                            chat.conversationSystemPromptID = preset.id
+                        } label: {
+                            if chat.conversationSystemPromptID == preset.id {
+                                Label(preset.name, systemImage: "checkmark")
+                            } else {
+                                Text(preset.name)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(currentSystemPromptLabel)
+                            .lineLimit(1)
+                        Image(systemName: "chevron.up.chevron.down").font(.caption2)
+                    }
+                    .foregroundStyle(Theme.accent)
+                }
+            }
+
+            let previewText = chat.effectiveBaseSystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\n", with: " ")
+            if !previewText.isEmpty {
+                Text(previewText)
+                    .font(.caption)
+                    .foregroundStyle(Theme.textTertiary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(Theme.Space.md)
+        .studioCard()
+    }
+
+    private var currentSystemPromptLabel: String {
+        if let id = chat.conversationSystemPromptID,
+           let preset = settings.preset(for: id) {
+            return preset.name
+        }
+        return "Follow default (\(settings.selectedSystemPromptPreset.name))"
     }
 
     // MARK: Reasoning

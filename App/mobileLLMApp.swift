@@ -1065,7 +1065,7 @@ func makeAgentSnapshot(
     // Auto-compaction (local runs only): messages up to the persisted cutoff are replaced by their summary
     // in the system prompt. Disabled, online, or a stale cutoff leaves history exactly as it was.
     var historyMessages = conversation.messages
-    var systemPrompt = container.settings.systemPrompt
+    var systemPrompt = container.settings.effectiveSystemPrompt(id: conversation.systemPromptID)
     if container.settings.autoCompactionEnabled, onlineParts == nil,
        let summary = conversation.compactionSummary, !summary.isEmpty,
        let cutoff = conversation.compactionCutoffMessageID,
