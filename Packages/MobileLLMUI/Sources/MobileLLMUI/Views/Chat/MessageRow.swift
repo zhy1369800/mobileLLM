@@ -135,7 +135,7 @@ struct ToolActivityPresentation: Equatable {
             if run.result == nil {
                 state = .running
                 title = "Saving to memory…"
-            } else if run.result.map(Self.isFailureResult) == true {
+            } else if run.result.map({ Self.isFailureResult($0.prefix(256)) }) == true {
                 state = .failed
                 title = "Couldn't save to memory"
             } else if run.result == "Already in memory." {
@@ -154,7 +154,7 @@ struct ToolActivityPresentation: Equatable {
         let summary = Self.argumentSummary(run.arguments)
         let invocation = prettyName + (summary.isEmpty ? "" : "(\(summary))")
         if let result = run.result {
-            let failed = Self.isFailureResult(result)
+            let failed = Self.isFailureResult(result.prefix(256))
             state = failed ? .failed : .succeeded
             title = failed ? "\(invocation) failed" : invocation
             detail = "→ \(result)"
@@ -169,7 +169,7 @@ struct ToolActivityPresentation: Equatable {
 
     /// Tools intentionally report recoverable failures as strings so the model can correct its call. Keep
     /// that transport contract, but do not paint those results with a green success seal in chat.
-    private static func isFailureResult(_ result: String) -> Bool {
+    private static func isFailureResult(_ result: Substring) -> Bool {
         let normalized = result.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return normalized.hasPrefix("error:")
             || normalized.hasPrefix("tool error:")
@@ -194,8 +194,17 @@ struct ToolActivityPresentation: Equatable {
 /// it returns. Tapping the row opens a bottom sheet with complete arguments and results.
 struct ToolActivityRow: View {
     let run: ToolRun
+    var stackCount: Int? = nil
     var onSelect: (() -> Void)? = nil
     @State private var showingDetail = false
+
+    private func displaySubtitle(for presentation: ToolActivityPresentation) -> String {
+        if let detail = presentation.detail {
+            let snippet = detail.prefix(256).replacingOccurrences(of: "\n", with: " ")
+            return snippet.isEmpty ? " " : snippet
+        }
+        return presentation.state == .running ? "Executing…" : " "
+    }
 
     var body: some View {
         let presentation = ToolActivityPresentation(run: run)
@@ -207,25 +216,43 @@ struct ToolActivityRow: View {
             }
         } label: {
             HStack(spacing: Theme.Space.sm) {
-                if presentation.state == .running {
-                    ProgressView().controlSize(.mini).tint(Theme.accent)
-                } else {
-                    Image(systemName: presentation.state == .failed
-                          ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
-                        .font(.caption)
-                        .foregroundStyle(presentation.state == .failed ? Theme.danger : Theme.accent)
-                }
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(presentation.title)
-                        .font(.caption.weight(.medium)).foregroundStyle(Theme.textSecondary).lineLimit(1)
-                    if let detail = presentation.detail {
-                        Text(detail).font(.caption2.monospaced()).foregroundStyle(Theme.textTertiary).lineLimit(2)
+                Group {
+                    if presentation.state == .running {
+                        ProgressView().controlSize(.mini).tint(Theme.accent)
+                    } else {
+                        Image(systemName: presentation.state == .failed
+                              ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
+                            .font(.caption)
+                            .foregroundStyle(presentation.state == .failed ? Theme.danger : Theme.fitGreen)
                     }
                 }
+                .frame(width: 16, height: 16)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(presentation.title)
+                        .font(.caption.weight(.medium)).foregroundStyle(Theme.textSecondary).lineLimit(1)
+                    Text(displaySubtitle(for: presentation))
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(presentation.state == .running ? Theme.textTertiary.opacity(0.8) : Theme.textTertiary)
+                        .lineLimit(1)
+                }
                 Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(Theme.textTertiary)
+                if let count = stackCount {
+                    HStack(spacing: 3) {
+                        Text("\(count)")
+                            .font(.caption2.weight(.semibold))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8, weight: .bold))
+                    }
+                    .foregroundStyle(Theme.accent)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2.5)
+                    .background(Theme.accent.opacity(0.12), in: Capsule())
+                } else {
+                    Image(systemName: "chevron.right")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Theme.textTertiary)
+                }
             }
             .padding(.horizontal, Theme.Space.md).padding(.vertical, Theme.Space.sm)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -242,6 +269,91 @@ struct ToolActivityRow: View {
             set: { showingDetail = $0 }
         )) {
             ToolDetailSheet(run: run)
+        }
+    }
+}
+
+/// An iOS lock-screen-notification style stacked container for multiple tool invocations.
+/// When collapsed (default for >= 2 tools), displays the top card with adaptive stacked cards behind it and a count badge.
+/// Tapping it expands into the full list with a smooth spring animation.
+struct StackedToolActivityView: View {
+    let runs: [ToolRun]
+    var onSelect: (ToolRun) -> Void
+
+    @State private var isExpanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            if runs.count <= 1 {
+                if let single = runs.first {
+                    ToolActivityRow(run: single) {
+                        onSelect(single)
+                    }
+                }
+            } else if isExpanded {
+                VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                    ForEach(runs) { run in
+                        ToolActivityRow(run: run) {
+                            onSelect(run)
+                        }
+                    }
+                }
+                .transition(.opacity)
+
+                Button {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                        isExpanded = false
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.up")
+                            .font(.caption2.weight(.bold))
+                        Text("Fold \(runs.count) tools")
+                            .font(.caption2.weight(.medium))
+                    }
+                    .foregroundStyle(Theme.textTertiary)
+                    .padding(.horizontal, Theme.Space.sm)
+                    .padding(.vertical, 4)
+                    .background(Theme.surface2, in: Capsule())
+                    .overlay(Capsule().strokeBorder(Theme.hairline))
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.top, 2)
+            } else {
+                let displayRun = runs.first(where: { $0.result == nil }) ?? runs.last ?? runs[0]
+                let hiddenRuns = runs.filter { $0.id != displayRun.id }
+                ToolActivityRow(run: displayRun, stackCount: runs.count) {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.82)) {
+                        isExpanded = true
+                    }
+                }
+                .background {
+                    ZStack {
+                        ForEach(hiddenRuns) { hiddenRun in
+                            Color.clear
+                                .frame(width: 0, height: 0)
+                                .accessibilityElement(children: .ignore)
+                                .accessibilityLabel(ToolActivityPresentation(run: hiddenRun).accessibilityLabel)
+                                .accessibilityIdentifier("assistant.tool.run")
+                        }
+                        if runs.count >= 3 {
+                            RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous)
+                                .fill(Theme.surface2.opacity(0.45))
+                                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous).strokeBorder(Theme.hairline.opacity(0.6)))
+                                .scaleEffect(x: 0.90, y: 1.0, anchor: .top)
+                                .offset(y: 8)
+                        }
+
+                        RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous)
+                            .fill(Theme.surface2.opacity(0.75))
+                            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous).strokeBorder(Theme.hairline))
+                            .scaleEffect(x: 0.95, y: 1.0, anchor: .top)
+                            .offset(y: 4)
+                    }
+                }
+                .padding(.bottom, runs.count >= 3 ? 8 : 4)
+            }
         }
     }
 }
@@ -476,12 +588,8 @@ struct AssistantView: View {
                                    isLive: isStreaming)
             }
             if !toolRuns.isEmpty {
-                VStack(alignment: .leading, spacing: Theme.Space.xs) {
-                    ForEach(toolRuns) { run in
-                        ToolActivityRow(run: run) {
-                            activeModalSheet = .tool(run)
-                        }
-                    }
+                StackedToolActivityView(runs: toolRuns) { run in
+                    activeModalSheet = .tool(run)
                 }
             }
             if !answer.isEmpty {
