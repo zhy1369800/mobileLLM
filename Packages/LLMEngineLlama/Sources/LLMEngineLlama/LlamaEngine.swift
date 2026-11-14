@@ -1111,7 +1111,8 @@ public actor LlamaEngine: LLMEngine {
                 let unstrippedThinkBloat = (!hasImages && !sessionCache.hasImages && !fittedPromptTokens.isEmpty)
                     ? max(0, (sessionCache.tokenCount + tokens.count) - fittedPromptTokens.count)
                     : 0
-                let maxAllowedThinkBloat = min(1536, max(512, Int(Double(contextCap) * 0.2)))
+                // let maxAllowedThinkBloat = min(1536, max(512, Int(Double(contextCap) * 0.2)))，先改为1m，暂使其无法触发
+                let maxAllowedThinkBloat = 1_000_000
                 if unstrippedThinkBloat > maxAllowedThinkBloat {
                     purgedThinkBloatTokens = unstrippedThinkBloat
                     sessionCache.reset(context: context)
