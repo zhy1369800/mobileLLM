@@ -333,6 +333,10 @@ public actor LlamaEngine: LLMEngine {
         let renderedTokens: [llama_token]    // canonical rendered prompt tokens (for prefix validation)
         let turns: [ChatTurn]                // kept turns at save time, to rebuild sessionCache.turns on restore
         let hasImages: Bool                  // whether the captured KV state includes multimodal ViT embeddings
+        /// True when this snapshot is a zero-`<think>`-bloat Clean Anchor whose token sequence is a
+        /// strict prefix of future `<think>`-stripped prompts. Preserved across `<think>` bloat purges
+        /// so the engine can fast-restore the clean prefix and decode only recent turns.
+        let isCleanAnchor: Bool
 
         var physicalEndPos: Int { promptEndPos + extraVisualTokens }
     }
@@ -410,6 +414,7 @@ public actor LlamaEngine: LLMEngine {
                                 extraVisualTokens: Int = 0,
                                 turns: [ChatTurn],
                                 hasImages: Bool = false,
+                                isCleanAnchor: Bool = false,
                                 context: OpaquePointer) {
         let canonicalTokens = (renderedTokens?.isEmpty == false) ? renderedTokens! : promptTokens
         let effectiveEndPos = promptEndPos ?? promptTokens.count
@@ -417,11 +422,14 @@ public actor LlamaEngine: LLMEngine {
             NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: empty tokens or turns")
             return
         }
-        // Short-context skip for pure text (≤ 1024 tokens): full recompute is < 0.5 s.
+        // Short-context skip for pure text: clean anchor snapshots use 0 threshold (always save) so
+        // periodic `<think>` bloat purges can always relay from a clean anchor, whereas regular EOS
+        // snapshots skip <= 1024 tokens where full-prefill is already < 0.5 s.
         // Multimodal checkpoints are ALWAYS saved regardless of token count because ViT image encoding
         // takes 2–5 seconds even on a short 1-turn prompt.
-        if !hasImages && effectiveEndPos <= 1024 {
-            NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: tokens=%d <= 1024", Int32(effectiveEndPos))
+        let minTokensForCheckpoint = isCleanAnchor ? 0 : 1024
+        if !hasImages && effectiveEndPos <= minTokensForCheckpoint {
+            NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: tokens=%d <= %d", Int32(effectiveEndPos), Int32(minTokensForCheckpoint))
             return
         }
         // Same-turn boundary with identical prompt and turns: already saved, skip the disk write.
@@ -442,18 +450,21 @@ public actor LlamaEngine: LLMEngine {
         let filePath = dir.appendingPathComponent("\(checkpointFilePrefix)\(turnCount).bin").path
         let tokensCopy = promptTokens
         let turnsCopy = turns
+        let saveStart = Date()
         let written = filePath.withCString { cPath in
             tokensCopy.withUnsafeBufferPointer { buf in
                 llama_state_seq_save_file(context, cPath, 0, buf.baseAddress, buf.count)
             }
         }
+        let saveElapsedMs = Date().timeIntervalSince(saveStart) * 1000.0
         if written == 0 {
             if checkpoints[turnCount]?.filePath == filePath {
                 checkpoints.removeValue(forKey: turnCount)
                 checkpointOrder.removeAll { $0 == turnCount }
             }
             try? FileManager.default.removeItem(atPath: filePath)
-            NSLog("[LlamaEngine][Checkpoint] Checkpoint save failed (turn=%d, endPos=%d, path=%@)", Int32(turnCount), Int32(effectiveEndPos), filePath)
+            NSLog("[LlamaEngine][Checkpoint] Checkpoint save failed (turn=%d, endPos=%d, ms=%.1f, path=%@)",
+                  Int32(turnCount), Int32(effectiveEndPos), saveElapsedMs, filePath)
         } else {
             checkpointOrder.removeAll { $0 == turnCount }
             checkpointOrder.append(turnCount)
@@ -464,14 +475,15 @@ public actor LlamaEngine: LLMEngine {
                                                        tokens: promptTokens,
                                                        renderedTokens: canonicalTokens,
                                                        turns: turnsCopy,
-                                                       hasImages: hasImages)
+                                                       hasImages: hasImages,
+                                                       isCleanAnchor: isCleanAnchor)
             checkpointModelKey = loadedModelKey
             checkpointContextCap = contextCap
             checkpointKVBits = contextKVBits
             checkpointIsSpeculative = (contextSpeculativeMode != .off)
             trimCheckpoints()
-            NSLog("[LlamaEngine][Checkpoint] Checkpoint save succeeded (turn=%d, endPos=%d, extraVisual=%d, hasImages=%@, bytes=%zu, path=%@)",
-                  Int32(turnCount), Int32(effectiveEndPos), Int32(extraVisualTokens), hasImages ? "true" : "false", written, filePath)
+            NSLog("[LlamaEngine][Checkpoint] Checkpoint save succeeded (turn=%d, endPos=%d, extraVisual=%d, cleanAnchor=%@, hasImages=%@, bytes=%zu, ms=%.1f, path=%@)",
+                  Int32(turnCount), Int32(effectiveEndPos), Int32(extraVisualTokens), isCleanAnchor ? "true" : "false", hasImages ? "true" : "false", written, saveElapsedMs, filePath)
             // New files do not inherit the directory's isExcludedFromBackup attribute; mark this one
             // so the fresh snapshot stays out of iCloud backup.
             var fileURL = URL(fileURLWithPath: filePath)
@@ -513,11 +525,36 @@ public actor LlamaEngine: LLMEngine {
         return true
     }
 
-    /// LRU eviction: keep only the most recently saved `checkpointMaxSlots` snapshots.
+    /// LRU eviction: keep the most recently saved `checkpointMaxSlots` snapshots, while always
+    /// preserving the newest zero-bloat clean anchor (`isCleanAnchor`) so periodic `<think>`
+    /// bloat purges can restore from it via `llama_state_seq_load_file` instead of full-recomputing.
     private func trimCheckpoints() {
-        while checkpointOrder.count > Self.checkpointMaxSlots {
-            let oldest = checkpointOrder.removeFirst()
-            if let old = checkpoints.removeValue(forKey: oldest) {
+        let protectedCleanTurn = checkpointOrder.last { turn in
+            checkpoints[turn]?.isCleanAnchor == true
+        }
+        let maxAllowed = (protectedCleanTurn != nil) ? (Self.checkpointMaxSlots + 1) : Self.checkpointMaxSlots
+        while checkpointOrder.count > maxAllowed {
+            if let victimIdx = checkpointOrder.firstIndex(where: { $0 != protectedCleanTurn }) {
+                let victimKey = checkpointOrder.remove(at: victimIdx)
+                if let old = checkpoints.removeValue(forKey: victimKey) {
+                    try? FileManager.default.removeItem(atPath: old.filePath)
+                }
+            } else {
+                break
+            }
+        }
+    }
+
+    /// Evict checkpoints that contain accumulated `<think>` bloat while keeping zero-bloat clean
+    /// anchor snapshots (`isCleanAnchor`), allowing `<think>` bloat purges to relay from the last
+    /// clean anchor via `llama_state_seq_load_file`.
+    private func evictBloatedCheckpoints() {
+        let bloatedKeys = checkpoints.values
+            .filter { !$0.isCleanAnchor }
+            .map(\.turnCount)
+        for key in bloatedKeys {
+            checkpointOrder.removeAll { $0 == key }
+            if let old = checkpoints.removeValue(forKey: key) {
                 try? FileManager.default.removeItem(atPath: old.filePath)
             }
         }
@@ -1031,6 +1068,7 @@ public actor LlamaEngine: LLMEngine {
 
             var incrementalSuffixTokens: [llama_token]? = nil
             var canIncrementalMultimodal = false
+            var purgedThinkBloatTokens = 0
             if prefixMatched && !newTurnsCarryImages {
                 let suffixText: String
                 if !hasImages, let m = model,
@@ -1056,13 +1094,14 @@ public actor LlamaEngine: LLMEngine {
                 let unstrippedThinkBloat = (!hasImages && !sessionCache.hasImages && !fittedPromptTokens.isEmpty)
                     ? max(0, (sessionCache.tokenCount + tokens.count) - fittedPromptTokens.count)
                     : 0
-                let maxAllowedThinkBloat = 1536
+                let maxAllowedThinkBloat = min(1536, max(512, Int(Double(contextCap) * 0.2)))
                 if unstrippedThinkBloat > maxAllowedThinkBloat {
+                    purgedThinkBloatTokens = unstrippedThinkBloat
                     sessionCache.reset(context: context)
-                    clearCheckpoints()
-                    rollbackDiagnosticMessage = "增量缓存净化: 已清理累积的 \(unstrippedThinkBloat) tok 历史思考草稿，重置SSM/KV状态"
-                    NSLog("[LlamaEngine][CachePurge] Incremental continuation skipped to purge %d tokens of accumulated historical <think> bloat (cleanPrompt=%d).",
-                          Int32(unstrippedThinkBloat), Int32(fittedPromptTokens.count))
+                    evictBloatedCheckpoints()
+                    rollbackDiagnosticMessage = "增量缓存净化: 已清理累积的 \(unstrippedThinkBloat) tok 历史思考草稿 (阈值 \(maxAllowedThinkBloat))，重置SSM/KV状态"
+                    NSLog("[LlamaEngine][CachePurge] Incremental continuation skipped to purge %d tokens (threshold=%d) of accumulated historical <think> bloat (cleanPrompt=%d, cleanAnchors=%d).",
+                          Int32(unstrippedThinkBloat), Int32(maxAllowedThinkBloat), Int32(fittedPromptTokens.count), Int32(checkpoints.count))
                 } else if !tokens.isEmpty && sessionCache.physicalTokenCount + tokens.count + incrementalReserve <= contextCap {
                     incrementalSuffixTokens = tokens
                 } else {
@@ -1090,6 +1129,7 @@ public actor LlamaEngine: LLMEngine {
             }
 
             var prefilledPromptTokens: [llama_token]? = nil
+            var savedCleanAnchorDuringPrefill = false
             if let suffixTokens = incrementalSuffixTokens {
                 isIncrementalContinuation = true
                 // MULTI-TURN CONTINUATION (text or multimodal):
@@ -1428,12 +1468,37 @@ public actor LlamaEngine: LLMEngine {
                     }
                 }
 
+                // Identify any trailing `<think>` opener tokens (e.g. `<think>\n` in Qwen3.5) at the very end
+                // of `promptTokens`. Because future turns strip historical `<think>` blocks, saving a Clean Anchor
+                // Checkpoint right BEFORE these trailing opener tokens (at `cleanAnchorTargetPos`) ensures the
+                // checkpoint's token sequence is a 100% exact prefix of all future turns' `fittedPromptTokens`.
+                let trailingThinkOpenerCount: Int = {
+                    guard params.kvCheckpointsEnabled, !hasImages else { return 0 }
+                    let dynamicSuffix = Self.thinkSuffix(reasoningStyle, thinking: wantThinking)
+                    var candidates: [String] = []
+                    if !dynamicSuffix.isEmpty {
+                        candidates.append(dynamicSuffix)
+                    }
+                    for fallback in ["<think>\n\n</think>\n\n", "<think>\r\n\r\n</think>\r\n\r\n", "\n</think>\n\n", "\r\n</think>\r\n\r\n", "<think>\n", "<think>\r\n", "<think>"] where !candidates.contains(fallback) {
+                        candidates.append(fallback)
+                    }
+                    for candidate in candidates {
+                        if fittedPromptText.hasSuffix(candidate) {
+                            let toks = Self.tokenize(vocab: vocab, text: candidate, addSpecial: false)
+                            if !toks.isEmpty && promptTokens.count > toks.count + 16 && promptTokens.suffix(toks.count).elementsEqual(toks) {
+                                return toks.count
+                            }
+                        }
+                    }
+                    return 0
+                }()
+                let cleanAnchorTargetPos = promptTokens.count - trailingThinkOpenerCount
+
                 if !rollbackSucceeded, params.kvCheckpointsEnabled {
-                    // Edit-resend fallback #2: whole-sequence checkpoint restore. Serves architectures
-                    // where llama_memory_seq_rm is rejected (Qwen 3.5 hybrid Gated DeltaNet / recurrent
-                    // state) — instead of a full recompute we reload the saved "prompt fully prefilled"
-                    // state file for the matching turn boundary and decode only the tokens after the edit
-                    // point.
+                    // Edit-resend & Clean-Anchor relay fallback: whole-sequence checkpoint restore. Serves
+                    // architectures where llama_memory_seq_rm is rejected (Qwen 3.5 hybrid Gated DeltaNet /
+                    // recurrent state) — reloads the saved state file (including zero-bloat Clean Anchors
+                    // during a 1536-token <think> purge) and decodes only the trailing clean suffix.
                     var restoreReason = ""
                     if let restored = restoreCheckpoint(kept: kept,
                                                         fittedPromptText: fittedPromptText,
@@ -1455,17 +1520,52 @@ public actor LlamaEngine: LLMEngine {
                         effectiveCommon = restored.pos
                         suffixTokensToDecode = suffixTokens
                         totalPromptCountForStats = effectiveCommon + suffixTokens.count
-                        if try await decodeSuffix(suffixTokens, from: effectiveCommon,
-                                                  nBatch: nBatch, context: context, governance: governance) {
+
+                        let isZeroBloatRestore = (restored.pos + suffixTokens.count == promptTokens.count)
+                        let shouldSplitForCleanAnchor = isZeroBloatRestore
+                            && trailingThinkOpenerCount > 0
+                            && cleanAnchorTargetPos > effectiveCommon
+                            && cleanAnchorTargetPos > 16
+                            && suffixTokens.count > trailingThinkOpenerCount
+
+                        let decodeOK: Bool
+                        if shouldSplitForCleanAnchor {
+                            let bodyTokens = Array(suffixTokens.dropLast(trailingThinkOpenerCount))
+                            let openerTokens = Array(suffixTokens.suffix(trailingThinkOpenerCount))
+                            if try await decodeSuffix(bodyTokens, from: effectiveCommon,
+                                                      nBatch: nBatch, context: context, governance: governance) {
+                                let cleanAnchorTokens = Array(promptTokens.prefix(cleanAnchorTargetPos))
+                                saveCheckpoint(turnCount: kept.count,
+                                               promptTokens: cleanAnchorTokens,
+                                               renderedTokens: cleanAnchorTokens,
+                                               turns: kept,
+                                               isCleanAnchor: true,
+                                               context: context)
+                                savedCleanAnchorDuringPrefill = true
+                                decodeOK = try await decodeSuffix(openerTokens, from: cleanAnchorTargetPos,
+                                                                  nBatch: nBatch, context: context, governance: governance)
+                            } else {
+                                decodeOK = false
+                            }
+                        } else {
+                            decodeOK = try await decodeSuffix(suffixTokens, from: effectiveCommon,
+                                                              nBatch: nBatch, context: context, governance: governance)
+                        }
+
+                        if decodeOK {
                             promptTokenCount = suffixTokens.count
                             cachedRollbackTokensCount = effectiveCommon
                             rollbackSucceeded = true
                             cachePathResult = .checkpoint
                             let hitRatePct = (Double(effectiveCommon) / Double(totalPromptCountForStats)) * 100.0
                             let hitRateText = String(format: "%.1f%%", hitRatePct)
-                            rollbackDiagnosticMessage = "检查点恢复: 复用 \(effectiveCommon) tok (\(hitRateText)), 解码后缀 \(suffixTokens.count) tok"
-                            NSLog("[LlamaEngine][CacheHit] checkpoint restore: reused %d prompt tokens, decoded suffix %d tok",
-                                  Int32(effectiveCommon), Int32(suffixTokens.count))
+                            if purgedThinkBloatTokens > 0 {
+                                rollbackDiagnosticMessage = "增量缓存净化(检查点接力): 清理 \(purgedThinkBloatTokens) tok 思考草稿, 复用 \(effectiveCommon) tok (\(hitRateText)), 仅算后缀 \(suffixTokens.count) tok"
+                            } else {
+                                rollbackDiagnosticMessage = "检查点恢复: 复用 \(effectiveCommon) tok (\(hitRateText)), 解码后缀 \(suffixTokens.count) tok"
+                            }
+                            NSLog("[LlamaEngine][CacheHit] checkpoint restore: reused %d prompt tokens, decoded suffix %d tok (purgedThinkBloat=%d)",
+                                  Int32(effectiveCommon), Int32(suffixTokens.count), Int32(purgedThinkBloatTokens))
                         } else {
                             rollbackDiagnosticMessage = "检查点恢复失败: 后缀Token解码错误, 回退全量重算"
                             NSLog("[LlamaEngine][CacheMiss] Checkpoint restore decode failed, falling back to clean slate")
@@ -1473,6 +1573,8 @@ public actor LlamaEngine: LLMEngine {
                     } else {
                         if rollbackDiagnosticMessage == nil {
                             rollbackDiagnosticMessage = "检查点恢复未命中: \(restoreReason)，回退全量重算"
+                        } else if purgedThinkBloatTokens > 0 {
+                            rollbackDiagnosticMessage = "增量缓存净化(全量重算): 清理 \(purgedThinkBloatTokens) tok 思考草稿, 检查点接力未命中(\(restoreReason)), 回退全量重算"
                         }
                         NSLog("[LlamaEngine][CacheMiss] Checkpoint restore missed: %@", restoreReason)
                     }
@@ -1484,37 +1586,41 @@ public actor LlamaEngine: LLMEngine {
                           Int32(promptTokens.count))
                     sessionCache.reset(context: context)
 
-                    let batchCap = Int32(max(1, min(nBatch, promptTokens.count)))
-                    var batch = llama_batch_init(batchCap, 0, 1)
-                    defer { llama_batch_free(batch) }
+                    let shouldSplitForCleanAnchor = params.kvCheckpointsEnabled
+                        && !hasImages
+                        && trailingThinkOpenerCount > 0
+                        && cleanAnchorTargetPos > 16
 
-                    var i = 0
-                    while i < promptTokens.count {
-                        try await governance.checkpoint()
-                        guard self.context == context else { throw CancellationError() }
-                        let end = min(i + nBatch, promptTokens.count)
-                        let chunkCount = end - i
-                        for offset in 0..<chunkCount {
-                            let tok = promptTokens[i + offset]
-                            let isLast = (i + offset == promptTokens.count - 1)
-                            Self.setBatchItem(&batch, at: offset, maxCapacity: batchCap,
-                                              token: tok, pos: Int32(i + offset), logits: isLast)
+                    if shouldSplitForCleanAnchor {
+                        let bodyTokens = Array(promptTokens.prefix(cleanAnchorTargetPos))
+                        let openerTokens = Array(promptTokens.suffix(trailingThinkOpenerCount))
+                        guard try await decodeSuffix(bodyTokens, from: 0,
+                                                     nBatch: nBatch, context: context, governance: governance) else {
+                            throw EngineError.decodeFailed
                         }
-                        batch.n_tokens = Int32(chunkCount)
-                        guard llama_decode(context, batch) == 0 else { throw EngineError.decodeFailed }
-                        i = end
-                        if Task.isCancelled || governance.isCancelled { throw CancellationError() }
-                        guard self.context == context else { throw CancellationError() }
+                        saveCheckpoint(turnCount: kept.count,
+                                       promptTokens: bodyTokens,
+                                       renderedTokens: bodyTokens,
+                                       turns: kept,
+                                       isCleanAnchor: true,
+                                       context: context)
+                        savedCleanAnchorDuringPrefill = true
+                        guard try await decodeSuffix(openerTokens, from: cleanAnchorTargetPos,
+                                                     nBatch: nBatch, context: context, governance: governance) else {
+                            throw EngineError.decodeFailed
+                        }
+                    } else {
+                        guard try await decodeSuffix(promptTokens, from: 0,
+                                                     nBatch: nBatch, context: context, governance: governance) else {
+                            throw EngineError.decodeFailed
+                        }
                     }
                     promptTokenCount = promptTokens.count
                 }
             }
-            // Save a "prompt fully prefilled" checkpoint for this turn boundary (prefix-rollback path),
-            // so that a later edit-resend that seq_rm cannot serve (Qwen 3.5 hybrid recurrent state)
-            // can restore it instead of recomputing. The write is SYNCHRONOUS on the actor (see
-            // saveCheckpoint) and skipped for short contexts (≤ 1024 tok) where full-prefill is
-            // already fast enough.
-            if params.kvCheckpointsEnabled && !hasImages && (checkpoints.isEmpty || promptTokenCount > 1024),
+            // Save a "prompt fully prefilled" checkpoint for this turn boundary when not already saved
+            // as a split Clean Anchor above (e.g. non-thinking models where `trailingThinkOpenerCount == 0`).
+            if params.kvCheckpointsEnabled && !hasImages && !savedCleanAnchorDuringPrefill && (checkpoints.isEmpty || promptTokenCount > 16),
                let pt = prefilledPromptTokens, !pt.isEmpty {
                 let physicalTokens: [llama_token]
                 if rollbackSucceeded && cachedRollbackTokensCount > 0 && sessionCache.tokens.count >= cachedRollbackTokensCount {
@@ -1526,6 +1632,7 @@ public actor LlamaEngine: LLMEngine {
                                promptTokens: physicalTokens,
                                renderedTokens: pt,
                                turns: kept,
+                               isCleanAnchor: (physicalTokens.count == pt.count),
                                context: context)
             }
             let promptSecs = max(Date().timeIntervalSince(prefillStart), 0.0001)
@@ -2100,6 +2207,9 @@ public actor LlamaEngine: LLMEngine {
                                                               addSpecial: true)
                         let tokenHeader = isMultimodalSession ? completedRendered : sessionCache.tokens
                         if !completedRendered.isEmpty && !tokenHeader.isEmpty {
+                            let eosIsCleanAnchor = !isMultimodalSession
+                                && sessionCache.tokenCount <= completedRendered.count
+                                && tokenHeader.count == completedRendered.count
                             saveCheckpoint(turnCount: updatedTurns.count,
                                            promptTokens: tokenHeader,
                                            renderedTokens: completedRendered,
@@ -2107,6 +2217,7 @@ public actor LlamaEngine: LLMEngine {
                                            extraVisualTokens: sessionCache.extraVisualTokens,
                                            turns: updatedTurns,
                                            hasImages: isMultimodalSession,
+                                           isCleanAnchor: eosIsCleanAnchor,
                                            context: context)
                         }
                     }
