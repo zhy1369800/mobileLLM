@@ -143,13 +143,18 @@ struct ThinkingDisclosure: View {
     let reasoning: String
     let phase: Phase
     let displayMode: ThinkingDisplayMode
+    /// True while the owning assistant turn is still running (streaming, tool loop, agent run). Unlike
+    /// `phase`, which flips to `.answered` as soon as a tool call starts, this stays true for the whole
+    /// turn: text selection is withheld and expand/collapse skips the spring animation until it ends.
+    let isLive: Bool
 
     @State private var timeline: ThinkingTimeline
 
-    init(reasoning: String, phase: Phase, displayMode: ThinkingDisplayMode) {
+    init(reasoning: String, phase: Phase, displayMode: ThinkingDisplayMode, isLive: Bool = false) {
         self.reasoning = reasoning
         self.phase = phase
         self.displayMode = displayMode
+        self.isLive = isLive
         var initial = ThinkingTimeline()
         if !reasoning.isEmpty {
             switch phase {
@@ -209,7 +214,7 @@ struct ThinkingDisclosure: View {
                 let isDone = !isStreaming
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(chunks) { chunk in
-                        ThinkingChunkRow(text: chunk.text, selectable: isDone)
+                        ThinkingChunkRow(text: chunk.text, selectable: isDone && !isLive)
                             .equatable()
                     }
                 }
@@ -235,10 +240,16 @@ struct ThinkingDisclosure: View {
     private var header: some View {
         let current = effectiveTimeline
         return Button {
-            withAnimation(Motion.spring) {
-                var next = current
-                next.toggle()
-                timeline = next
+            var next = current
+            next.toggle()
+            if isLive {
+                // The turn is still running and the layout is changing under it (streaming flushes,
+                // tool rows, auto-scroll). Toggle in a single frame instead of stacking a spring on top.
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) { timeline = next }
+            } else {
+                withAnimation(Motion.spring) { timeline = next }
             }
         } label: {
             HStack(spacing: Theme.Space.xs) {
