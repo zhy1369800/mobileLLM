@@ -443,6 +443,14 @@ public actor LlamaEngine: LLMEngine {
             NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: turn %d identical to existing checkpoint", Int32(turnCount))
             return
         }
+        // Never overwrite an existing zero-bloat Clean Anchor for the exact same turns with a non-clean snapshot.
+        if let existing = checkpoints[turnCount],
+           existing.isCleanAnchor && !isCleanAnchor,
+           existing.turns == turns,
+           FileManager.default.fileExists(atPath: existing.filePath) {
+            NSLog("[LlamaEngine][Checkpoint] saveCheckpoint skipped: preserving existing clean anchor at turn %d", Int32(turnCount))
+            return
+        }
         guard let dir = checkpointDirectoryURL() else {
             NSLog("[LlamaEngine][Checkpoint] saveCheckpoint failed: cannot resolve directory")
             return
@@ -646,7 +654,16 @@ public actor LlamaEngine: LLMEngine {
             let matchLen = cp.renderedTokens.count
             guard matchLen >= minCommon, matchLen <= newPromptTokens.count else { continue }
             // Prefix validation: the saved canonical prompt must equal the head of the new prompt.
-            guard newPromptTokens.prefix(matchLen).elementsEqual(cp.renderedTokens) else { continue }
+            if !newPromptTokens.prefix(matchLen).elementsEqual(cp.renderedTokens) {
+                var divergeIdx = 0
+                while divergeIdx < matchLen && newPromptTokens[divergeIdx] == cp.renderedTokens[divergeIdx] {
+                    divergeIdx += 1
+                }
+                NSLog("[LlamaEngine][Checkpoint] Token-prefix candidate missed (turn=%d, cleanAnchor=%@, matchLen=%d, newCount=%d, divergeAt=%d: saved=%d vs new=%d)",
+                      Int32(cp.turnCount), cp.isCleanAnchor ? "true" : "false", Int32(matchLen), Int32(newPromptTokens.count),
+                      Int32(divergeIdx), cp.renderedTokens[divergeIdx], newPromptTokens[divergeIdx])
+                continue
+            }
 
             let suffixCount = max(1, newPromptTokens.count - matchLen)
             guard cp.physicalEndPos + suffixCount + reserve <= contextCap else {
@@ -1468,19 +1485,32 @@ public actor LlamaEngine: LLMEngine {
                     }
                 }
 
-                // Identify any trailing `<think>` opener tokens (e.g. `<think>\n` in Qwen3.5) at the very end
+                // Identify any trailing `<think>` opener tokens (e.g. `\n<think>\n` in Qwen3.5) at the very end
                 // of `promptTokens`. Because future turns strip historical `<think>` blocks, saving a Clean Anchor
                 // Checkpoint right BEFORE these trailing opener tokens (at `cleanAnchorTargetPos`) ensures the
                 // checkpoint's token sequence is a 100% exact prefix of all future turns' `fittedPromptTokens`.
+                // Including the preceding newline (`\n` after `<|im_start|>assistant`) in the opener ensures the
+                // Clean Anchor ends on the `assistant` role token rather than a trailing `\n` token that could
+                // otherwise BPE-merge with leading whitespace/newlines of future assistant responses.
                 let trailingThinkOpenerCount: Int = {
                     guard params.kvCheckpointsEnabled, !hasImages else { return 0 }
                     let dynamicSuffix = Self.thinkSuffix(reasoningStyle, thinking: wantThinking)
-                    var candidates: [String] = []
+                    var baseCandidates: [String] = []
                     if !dynamicSuffix.isEmpty {
-                        candidates.append(dynamicSuffix)
+                        baseCandidates.append(dynamicSuffix)
                     }
-                    for fallback in ["<think>\n\n</think>\n\n", "<think>\r\n\r\n</think>\r\n\r\n", "\n</think>\n\n", "\r\n</think>\r\n\r\n", "<think>\n", "<think>\r\n", "<think>"] where !candidates.contains(fallback) {
-                        candidates.append(fallback)
+                    for fallback in ["<think>\n\n</think>\n\n", "<think>\r\n\r\n</think>\r\n\r\n", "\n</think>\n\n", "\r\n</think>\r\n\r\n", "<think>\n", "<think>\r\n", "<think>"] where !baseCandidates.contains(fallback) {
+                        baseCandidates.append(fallback)
+                    }
+                    var candidates: [String] = []
+                    for base in baseCandidates {
+                        if !base.hasPrefix("\n") && !base.hasPrefix("\r\n") {
+                            candidates.append("\n" + base)
+                            candidates.append("\r\n" + base)
+                        }
+                        if !candidates.contains(base) {
+                            candidates.append(base)
+                        }
                     }
                     for candidate in candidates {
                         if fittedPromptText.hasSuffix(candidate) {
@@ -1632,7 +1662,7 @@ public actor LlamaEngine: LLMEngine {
                                promptTokens: physicalTokens,
                                renderedTokens: pt,
                                turns: kept,
-                               isCleanAnchor: (physicalTokens.count == pt.count),
+                               isCleanAnchor: (physicalTokens.count == pt.count && trailingThinkOpenerCount == 0),
                                context: context)
             }
             let promptSecs = max(Date().timeIntervalSince(prefillStart), 0.0001)
@@ -1674,10 +1704,12 @@ public actor LlamaEngine: LLMEngine {
             var decoder = PieceDecoder()
             var answerStripper = LiteralStripper(tags: Self.answerStripTags(for: promptTemplate))
             var fullGeneratedAnswer = ""
+            var sawAnyReasoning = promptOpenedThink
             var firstTokenTime: Date? = nil
             func emit(_ d: ThinkSplitter.Delta) {
                 switch d {
                 case .reasoning(let s):
+                    sawAnyReasoning = true
                     if !s.isEmpty {
                         if firstTokenTime == nil { firstTokenTime = Date() }
                         cont.yield(.reasoning(s))
@@ -1689,7 +1721,15 @@ public actor LlamaEngine: LLMEngine {
                             llama_sampler_accept(sampler, tok)
                         }
                     }
-                    let out = answerStripper.isNoop ? s : answerStripper.feed(s)
+                    var out = answerStripper.isNoop ? s : answerStripper.feed(s)
+                    // Strip formatting newlines (`\n\n` / `\r\n\r\n`) immediately following `</think>`
+                    // so stored `.assistant` messages start cleanly with the actual response text rather
+                    // than accumulating leading blank lines that alter BPE tokenization on later turns.
+                    if fullGeneratedAnswer.isEmpty && sawAnyReasoning {
+                        while out.first == "\n" || out.first == "\r" {
+                            out.removeFirst()
+                        }
+                    }
                     if !out.isEmpty {
                         if firstTokenTime == nil { firstTokenTime = Date() }
                         cont.yield(.answer(out))
