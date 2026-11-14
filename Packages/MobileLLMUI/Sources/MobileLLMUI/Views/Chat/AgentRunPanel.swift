@@ -68,7 +68,8 @@ struct AgentRunPanel: View {
                     stepsList(run)
                 }
             }
-            .padding(Theme.Space.md)
+            .padding(.horizontal, Theme.Space.md)
+            .padding(.vertical, expanded ? Theme.Space.md : Theme.Space.sm)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Theme.surface2)
             .clipShape(RoundedRectangle(cornerRadius: Theme.corner, style: .continuous))
@@ -87,15 +88,21 @@ struct AgentRunPanel: View {
         } label: {
             HStack(spacing: Theme.Space.sm) {
                 statusIcon(run)
-                VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: Theme.Space.xs) {
                     Text(activityTitle(run))
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Theme.textPrimary)
-                    if !activitySubtitle(run).isEmpty {
-                        Text(activitySubtitle(run))
+                        .lineLimit(1)
+                    let subtitle = activitySubtitle(run)
+                    if !subtitle.isEmpty {
+                        let formatted = subtitle.hasPrefix("(") && subtitle.hasSuffix(")")
+                            ? subtitle
+                            : "(\(subtitle))"
+                        Text(formatted)
                             .font(.caption)
                             .foregroundStyle(Theme.textSecondary)
                             .lineLimit(1)
+                            .layoutPriority(run.isTerminal ? 1 : 0)
                     }
                 }
                 Spacer(minLength: 0)

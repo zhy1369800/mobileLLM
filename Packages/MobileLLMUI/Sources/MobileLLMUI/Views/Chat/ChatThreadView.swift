@@ -455,10 +455,18 @@ private struct AgentRunPanelRow: View {
     let conversationID: UUID
 
     var body: some View {
-        if let run = store.presentation(for: conversationID), run.needsPanel {
-            AgentRunPanel(store: store, conversationID: conversationID)
-                .id("agent-run-\(run.runID.description)")
+        let isVisible = store.presentation(for: conversationID)?.needsPanel == true
+        Group {
+            if let run = store.presentation(for: conversationID), run.needsPanel {
+                AgentRunPanel(store: store, conversationID: conversationID)
+                    .id("agent-run-\(run.runID.description)")
+                    .transition(.asymmetric(
+                        insertion: .opacity.combined(with: .scale(scale: 0.96, anchor: .bottom)),
+                        removal: .opacity
+                    ))
+            }
         }
+        .animation(.spring(response: 0.35, dampingFraction: 0.82), value: isVisible)
     }
 }
 
