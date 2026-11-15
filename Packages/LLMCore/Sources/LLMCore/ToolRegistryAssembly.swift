@@ -57,6 +57,7 @@ public extension ToolRegistry {
                          locationProvider: (any LocationProviding)? = nil,
                          mapKitProvider: (any MapKitProviding)? = nil,
                          shortcutExecutor: (any ShortcutAutomationExecuting)? = nil,
+                         webSearchExecutor: (@Sendable (String) async throws -> String)? = nil,
                          session: URLSession = .shared) -> ToolRegistry {
         var tools: [Tool] = []
         func on(_ id: ToolID) -> Bool { config.enabled.contains(id) }
@@ -64,7 +65,11 @@ public extension ToolRegistry {
         if on(.calculator)       { tools.append(CalculatorTool()) }
         if on(.currentDatetime)  { tools.append(DateTimeTool()) }
         if on(.wikipedia)        { tools.append(WikipediaTool(session: session)) }
-        if on(.webSearch)        { tools.append(WebSearchTool(engines: config.searchEngines, session: session)) }
+        if on(.webSearch)        {
+            tools.append(WebSearchTool(engines: config.searchEngines,
+                                       session: session,
+                                       customExecutor: webSearchExecutor))
+        }
         if on(.fetchWebpage)     { tools.append(WebScraperTool(session: session)) }
 
         if let memoryStore {

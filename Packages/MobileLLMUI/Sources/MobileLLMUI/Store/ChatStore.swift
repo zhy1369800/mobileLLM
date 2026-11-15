@@ -2389,14 +2389,56 @@ public final class ChatStore {
     /// next launch.
     private func toolRegistry(config: BuiltInToolConfig, servers: [MCPServer]) async throws -> ToolRegistry {
         try Task.checkCancellation()
-        let signature = Self.registrySignature(config: config, servers: servers)
+        let remoteServiceID = settings.webSearchOnlineServiceID
+        let remoteService = settings.webSearchOnlineService
+        let signature = Self.registrySignature(
+            config: config,
+            servers: servers,
+            webSearchServiceID: remoteServiceID,
+            webSearchService: remoteService
+        )
         if let cachedRegistry, cachedRegistrySignature == signature { return cachedRegistry }
+
+        let webSearchExecutor: (@Sendable (String) async throws -> String)?
+        if remoteServiceID != nil {
+            let service = remoteService
+            let credentials = openAICredentials
+            let dialects = compactionDialects
+            webSearchExecutor = { query in
+                guard let service else {
+                    throw NSError(
+                        domain: "mobileLLM.webSearch",
+                        code: 1,
+                        userInfo: [NSLocalizedDescriptionKey: "Cloud web search service is not configured."]
+                    )
+                }
+                let apiKey = (try? credentials?.loadAPIKey(serviceID: service.id)) ?? ""
+                guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw NSError(
+                        domain: "mobileLLM.webSearch",
+                        code: 2,
+                        userInfo: [
+                            NSLocalizedDescriptionKey:
+                                "Missing API key for cloud web search service '\(service.name)'."
+                        ]
+                    )
+                }
+                return try await OnlineCompletionClient(dialects: dialects).webSearch(
+                    service: service,
+                    apiKey: apiKey,
+                    query: query
+                )
+            }
+        } else {
+            webSearchExecutor = nil
+        }
 
         // The tools get the DURABLE store, not the book: they run inside the agent loop, off the main
         // actor, and the book is only the screen's (and the injector's) main-actor mirror of it.
         let builtIns = ToolRegistry.assemble(config: config, memoryStore: memoryBook?.store,
                                              eventStore: eventStore, locationProvider: locationProvider,
-                                             shortcutExecutor: shortcutExecutor)
+                                             shortcutExecutor: shortcutExecutor,
+                                             webSearchExecutor: webSearchExecutor)
         let registry: ToolRegistry
         if servers.isEmpty {
             registry = builtIns
@@ -2415,13 +2457,21 @@ public final class ChatStore {
     /// A stable string over everything that changes the assembled tool set — the enabled built-in tools,
     /// the search-engine order, and each enabled server's URL / token / muted tools. Pure + nonisolated so
     /// the cache-invalidation contract is unit-testable off the main actor, without building real registries.
-    nonisolated static func registrySignature(config: BuiltInToolConfig, servers: [MCPServer]) -> String {
+    nonisolated static func registrySignature(
+        config: BuiltInToolConfig,
+        servers: [MCPServer],
+        webSearchServiceID: String? = nil,
+        webSearchService: OnlineService? = nil
+    ) -> String {
         let builtins = config.enabled.map(\.rawValue).sorted().joined(separator: "+")
         let engines = config.searchEngines.map(\.rawValue).joined(separator: "+")
         let mcp = servers.map {
             "\($0.url)|\($0.token ?? "")|\($0.disabledTools.sorted().joined(separator: "+"))"
         }.joined(separator: ",")
-        return "builtins:[\(builtins)];engines:[\(engines)];mcp:[\(mcp)]"
+        let remote = webSearchServiceID.map {
+            "\($0)|\(webSearchService?.baseURL ?? "")|\(webSearchService?.modelID ?? "")"
+        } ?? "builtin"
+        return "builtins:[\(builtins)];engines:[\(engines)];mcp:[\(mcp)];webSearch:[\(remote)]"
     }
 
     /// Map an agent-loop event onto the streaming state — reasoning/answer as usual, plus tool activity.

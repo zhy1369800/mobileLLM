@@ -37,14 +37,17 @@ public struct WebSearchTool: Tool {
     private let httpClient: WebHTTPClient
     private let maxResults: Int
     private let maxBytes: Int
+    private let customExecutor: (@Sendable (String) async throws -> String)?
 
     public init(engines: [SearchEngine] = [.duckduckgo, .bing, .brave, .yahoo, .marginalia],
                 session: URLSession = .shared, maxResults: Int = 6,
-                maxBytes: Int = 1 * 1024 * 1024) {
+                maxBytes: Int = 1 * 1024 * 1024,
+                customExecutor: (@Sendable (String) async throws -> String)? = nil) {
         self.engines = engines.isEmpty ? [.duckduckgo, .bing, .brave, .yahoo, .marginalia] : engines
         self.httpClient = WebHTTPClient(session: session)
         self.maxResults = max(1, maxResults)
         self.maxBytes = max(1, maxBytes)
+        self.customExecutor = customExecutor
     }
 
     init(engines: [SearchEngine] = [.duckduckgo, .bing, .brave, .yahoo, .marginalia],
@@ -54,6 +57,7 @@ public struct WebSearchTool: Tool {
         self.httpClient = WebHTTPClient(session: session, resolver: dnsResolver)
         self.maxResults = max(1, maxResults)
         self.maxBytes = max(1, maxBytes)
+        self.customExecutor = nil
     }
 
     public var schema: ToolSchema {
@@ -67,6 +71,13 @@ public struct WebSearchTool: Tool {
     public func execute(argumentsJSON: String) async -> String {
         guard let q = ToolCall(name: "web_search", argumentsJSON: argumentsJSON).arg("query"),
               !q.trimmingCharacters(in: .whitespaces).isEmpty else { return "Error: missing 'query'." }
+        if let customExecutor {
+            do {
+                return try await customExecutor(q)
+            } catch {
+                return "Web search failed: \(error.localizedDescription)"
+            }
+        }
         for engine in engines {
             do {
                 let html = try await fetch(engine: engine, query: q)
