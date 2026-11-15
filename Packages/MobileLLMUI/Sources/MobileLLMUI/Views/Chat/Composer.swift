@@ -41,6 +41,10 @@ struct Composer: View {
     @State private var stopArmed = false
     /// Presents the skill management sheet (composer's "Manage Skills…").
     @State private var showSkills = false
+    /// Presents the persistent multi-select quick tools sheet from [+].
+    @State private var showToolPicker = false
+    /// Presents the persistent multi-select skills sheet from [+].
+    @State private var showSkillPicker = false
     /// Composer controls scale with Dynamic Type instead of a hard 44pt.
     @ScaledMetric(relativeTo: .body) private var controlSize: CGFloat = 44
 
@@ -74,6 +78,22 @@ struct Composer: View {
                     .frame(minWidth: 520, minHeight: 560)
                 #endif
             }
+        }
+        .sheet(isPresented: $showToolPicker) {
+            NavigationStack { quickToolsSheet }
+            #if os(iOS)
+                .presentationDetents([.medium, .large])
+            #else
+                .frame(minWidth: 420, minHeight: 480)
+            #endif
+        }
+        .sheet(isPresented: $showSkillPicker) {
+            NavigationStack { quickSkillsSheet }
+            #if os(iOS)
+                .presentationDetents([.medium, .large])
+            #else
+                .frame(minWidth: 420, minHeight: 440)
+            #endif
         }
         .onChange(of: pickerItems) { _, items in loadPickedImages(items) }
         // Belt and suspenders for EVERY attach path (incl. the field's own paste menu): a staged chip
@@ -185,8 +205,8 @@ struct Composer: View {
 
     private var inputCard: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if let skill = chat.activeSkill {
-                activeSkillChip(skill)
+            if !chat.activeSkills.isEmpty {
+                activeSkillChips
                     .padding(.horizontal, Theme.Space.sm)
                     .padding(.top, Theme.Space.xs)
             }
@@ -339,7 +359,7 @@ struct Composer: View {
         case .toggleThinking:
             chat.composerThinkingEnabled.toggle()
         case .selectSkill(let skillID):
-            chat.setActiveSkill(skillID)
+            chat.activateSkill(skillID)
             focused = true
         }
     }
@@ -475,8 +495,21 @@ struct Composer: View {
                     Label("Thinking", systemImage: "brain")
                 }
             }
-            toolMenu
-            if chat.skillStore != nil { skillMenu }
+            Button {
+                focused = false
+                showToolPicker = true
+            } label: {
+                Label("Tools", systemImage: "wrench.and.screwdriver")
+            }
+            if chat.skillStore != nil {
+                Button {
+                    focused = false
+                    showSkillPicker = true
+                } label: {
+                    let count = chat.activeSkills.count
+                    Label(count > 0 ? "Skills (\(count))" : "Skills", systemImage: "sparkles")
+                }
+            }
             if canAttachImages {
                 Divider()
                 // Every image entry point clears the FOCUS STATE, not just the first responder: a bare
@@ -504,7 +537,7 @@ struct Composer: View {
         } label: {
             let active = chat.toolsEnabled
                 || (thinkingCapable && chat.composerThinkingEnabled)
-                || chat.activeSkill != nil
+                || !chat.activeSkills.isEmpty
             Image(systemName: "plus")
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(active ? Theme.accent : Theme.textSecondary)
@@ -519,30 +552,29 @@ struct Composer: View {
 
     // MARK: Tool selection
 
-    /// Compact, conversation-local access to the persisted tool selection. The master switch authorizes
-    /// the selected set; each checkmark controls one user-facing capability. The model never receives a
-    /// schema for an unchecked tool, so it cannot decide to call that tool on the next send.
-    private var toolMenu: some View {
-        Menu {
-            Toggle(isOn: Binding(get: { chat.toolsEnabled },
-                                 set: { newValue in
-                                     chat.toolsEnabled = newValue
-                                     chat.applyCurrentToolSelectionToActiveConversation()
-                                     chat.showToast(Toast(newValue
-                                         ? "Selected tools are now available to the model."
-                                         : "Tools off.", autoDismiss: 3))
-                                 })) {
-                Label("Allow selected tools", systemImage: "hammer")
+    /// Persistent multi-select quick tools sheet presented from [+]. Toggling any switch keeps
+    /// the sheet open so the user can configure multiple tools in one pass.
+    private var quickToolsSheet: some View {
+        List {
+            Section {
+                Toggle(isOn: Binding(get: { chat.toolsEnabled },
+                                     set: { newValue in
+                                         chat.toolsEnabled = newValue
+                                         chat.applyCurrentToolSelectionToActiveConversation()
+                                     })) {
+                    Label("Allow selected tools", systemImage: "hammer")
+                }
+                .tint(Theme.accent)
             }
 
             Section("Network") {
-                ForEach(Self.networkToolRows) { toolToggle($0) }
+                ForEach(Self.networkToolRows) { toolToggle($0).tint(Theme.accent) }
             }
             Section("On device") {
-                ForEach(Self.onDeviceToolRows) { toolToggle($0) }
+                ForEach(Self.onDeviceToolRows) { toolToggle($0).tint(Theme.accent) }
             }
             Section("Personal data") {
-                ForEach(Self.personalToolRows) { toolToggle($0) }
+                ForEach(Self.personalToolRows) { toolToggle($0).tint(Theme.accent) }
             }
 
             if !settings.mcpServers.isEmpty {
@@ -551,19 +583,30 @@ struct Composer: View {
                         Toggle(isOn: mcpServerBinding(server.id)) {
                             Label(server.name, systemImage: "server.rack")
                         }
+                        .tint(Theme.accent)
                     }
                 }
             }
 
-            Divider()
-            Button {
-                focused = false
-                onOpenToolSettings()
-            } label: {
-                Label("Tool Settings…", systemImage: "gearshape")
+            Section {
+                Button {
+                    showToolPicker = false
+                    Task { @MainActor in
+                        onOpenToolSettings()
+                    }
+                } label: {
+                    Label("Tool Settings…", systemImage: "gearshape")
+                }
             }
-        } label: {
-            Label("Tools", systemImage: "wrench.and.screwdriver")
+        }
+        .navigationTitle("Tools")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { showToolPicker = false }
+            }
         }
     }
 
@@ -619,58 +662,105 @@ struct Composer: View {
 
     // MARK: Skill
 
-    /// The Skill submenu inside the [+] menu: None + every skill (checkmark on the active one) + a route
-    /// into the management sheet. Explicit per-conversation selection (Skills v1 — no auto-routing).
-    private var skillMenu: some View {
-        Menu {
-            Button { chat.setActiveSkill(nil) } label: {
-                if chat.activeSkill == nil { Label("None", systemImage: "checkmark") } else { Text("None") }
-            }
-            if !chat.availableSkills.isEmpty { Divider() }
-            ForEach(chat.availableSkills) { skill in
-                Button { chat.setActiveSkill(skill.id) } label: {
-                    if chat.activeSkill?.id == skill.id {
-                        Label("\(skill.emoji)  \(skill.name)", systemImage: "checkmark")
-                    } else {
-                        Text("\(skill.emoji)  \(skill.name)")
+    /// Persistent multi-select skills sheet presented from [+]: allows toggling multiple skills
+    /// on or off without dismissing the sheet on each tap.
+    private var quickSkillsSheet: some View {
+        List {
+            if chat.availableSkills.isEmpty {
+                Text("No skills yet. Tap Manage Skills… below to create or import one.")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textSecondary)
+            } else {
+                Section {
+                    ForEach(chat.availableSkills) { skill in
+                        let selected = chat.activeSkills.contains(where: { $0.id == skill.id })
+                        Button {
+                            chat.toggleActiveSkill(skill.id)
+                        } label: {
+                            HStack(spacing: Theme.Space.sm) {
+                                Text(skill.emoji).font(.title3)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(skill.name)
+                                        .font(.subheadline.weight(.medium))
+                                        .foregroundStyle(Theme.textPrimary)
+                                    if !skill.summary.isEmpty {
+                                        Text(skill.summary)
+                                            .font(.caption)
+                                            .foregroundStyle(Theme.textTertiary)
+                                            .lineLimit(2)
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(selected ? Theme.accent : Theme.textTertiary)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
             }
-            Divider()
-            Button {
-                focused = false
-                showSkills = true
-            } label: { Label("Manage Skills…", systemImage: "slider.horizontal.3") }
-        } label: {
-            Label("Skill", systemImage: "sparkles")
+
+            if !chat.activeSkills.isEmpty {
+                Section {
+                    Button("Clear selected skills", role: .destructive) {
+                        chat.setActiveSkill(nil)
+                    }
+                }
+            }
+
+            Section {
+                Button {
+                    showSkillPicker = false
+                    Task { @MainActor in
+                        showSkills = true
+                    }
+                } label: {
+                    Label("Manage Skills…", systemImage: "slider.horizontal.3")
+                }
+            }
+        }
+        .navigationTitle("Skills")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { showSkillPicker = false }
+            }
         }
     }
 
-    /// The active-skill chip above the input — same visual family as the pending-image chips, with an x to
-    /// deactivate the skill for this thread.
-    private func activeSkillChip(_ skill: Skill) -> some View {
-        HStack(spacing: 0) {
+    /// Horizontal strip of active-skill chips above the input, each with an `x` to remove one skill.
+    private var activeSkillChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: Theme.Space.xs) {
-                Text(skill.emoji).font(.caption).accessibilityHidden(true)
-                Text(skill.name)
-                    .font(.caption.weight(.medium)).foregroundStyle(Theme.accent)
-                    .lineLimit(1)
-                Button { chat.setActiveSkill(nil) } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.caption)
-                        .symbolRenderingMode(.palette)
-                        .foregroundStyle(Theme.accent, Theme.accentSoft)
+                ForEach(chat.activeSkills) { skill in
+                    activeSkillChip(skill)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Deactivate skill")
             }
-            .padding(.leading, Theme.Space.sm).padding(.trailing, Theme.Space.xs)
-            .padding(.vertical, Theme.Space.xs)
-            .background(Theme.accentSoft, in: Capsule())
-            .overlay(Capsule().strokeBorder(Theme.accent.opacity(0.25)))
-            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func activeSkillChip(_ skill: Skill) -> some View {
+        HStack(spacing: Theme.Space.xs) {
+            Text(skill.emoji).font(.caption).accessibilityHidden(true)
+            Text(skill.name)
+                .font(.caption.weight(.medium)).foregroundStyle(Theme.accent)
+                .lineLimit(1)
+            Button { chat.removeActiveSkill(skill.id) } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.caption)
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(Theme.accent, Theme.accentSoft)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Deactivate \(skill.name)")
+        }
+        .padding(.leading, Theme.Space.sm).padding(.trailing, Theme.Space.xs)
+        .padding(.vertical, Theme.Space.xs)
+        .background(Theme.accentSoft, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.accent.opacity(0.25)))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Active skill: \(skill.name)")
     }

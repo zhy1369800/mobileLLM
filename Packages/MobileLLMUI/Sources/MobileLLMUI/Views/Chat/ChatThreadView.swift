@@ -72,7 +72,7 @@ struct ChatThreadView: View {
                                        chat.send()
                                    },
                                    onSwitchModel: onSwitchModel,
-                                   activeSkill: chat.activeSkill)
+                                   activeSkills: chat.activeSkills)
                 }
             }
         }
