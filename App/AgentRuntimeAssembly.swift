@@ -699,7 +699,8 @@ public final class AgentRuntimeAssembly {
         shortcutExecutor: (any ShortcutAutomationExecuting)? = nil,
         mcpDiscovery: MCPDiscoveryCache = MCPDiscoveryCache(),
         session: URLSession = .shared,
-        onlineConfiguration: @escaping @Sendable (AgentModelSelection) -> ResponsesAPIConfiguration? = { _ in nil }
+        onlineConfiguration: @escaping @Sendable (AgentModelSelection) -> ResponsesAPIConfiguration? = { _ in nil },
+        remoteWebSearchBackend: (@Sendable () async -> RemoteWebSearchBackend?)? = nil
     ) throws {
         let fileManager = FileManager.default
         let support = conversationDirectory.appending(component: "agent")
@@ -823,7 +824,8 @@ public final class AgentRuntimeAssembly {
             locationProvider: locationProvider,
             shortcutExecutor: shortcutExecutor,
             mcpCache: mcpDiscovery,
-            session: session
+            session: session,
+            remoteWebSearchBackend: remoteWebSearchBackend
         )
         frozenBuilder = AppFrozenInputBuilder(
             capabilityVersion: capabilityVersion

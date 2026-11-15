@@ -128,6 +128,32 @@ public struct OnlineCompletionClient: Sendable {
         throw OnlineCompletionError.unusableResponse
     }
 
+    /// Performs a cloud-backed web search query using the configured online service.
+    public func webSearch(
+        service: OnlineService,
+        apiKey: String,
+        query: String,
+        timeout: TimeInterval = 30
+    ) async throws -> String {
+        let systemPrompt = """
+            You are a real-time web search backend. Search the web for the user's query and return \
+            concise factual findings with source URLs and dates when available. Do not speculate or \
+            fabricate sources; if no reliable results are found, state that clearly.
+            """
+        let messages = [
+            Message(role: "system", content: systemPrompt),
+            Message(role: "user", content: query),
+        ]
+        return try await complete(
+            service: service,
+            apiKey: apiKey,
+            messages: messages,
+            temperature: 0.2,
+            maxOutputTokens: 1024,
+            timeout: timeout
+        )
+    }
+
     static func extractText(_ data: Data, dialect: OnlineWireDialect) -> String? {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         if dialect == .responses {

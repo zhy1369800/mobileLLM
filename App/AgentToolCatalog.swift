@@ -166,7 +166,8 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         mapKitProvider: (any MapKitProviding)? = nil,
         shortcutExecutor: (any ShortcutAutomationExecuting)? = nil,
         mcpCache: MCPDiscoveryCache,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        remoteWebSearchBackend: (@Sendable () async -> RemoteWebSearchBackend?)? = nil
     ) throws {
         let enabled = Set(enabledToolNames)
         var adapters: [AgentToolDescriptorID: any ToolV2] = [:]
@@ -190,7 +191,8 @@ final class AppToolCatalog: ExecutableToolCatalog, @unchecked Sendable {
         if enabled.contains("web_search") {
             try register(AppWebSearchToolAdapter(
                 tool: WebSearchTool(session: session),
-                trustRevision: "builtin.v1"
+                trustRevision: "builtin.v1",
+                remoteBackend: remoteWebSearchBackend
             ))
         }
         if enabled.contains("wikipedia") {

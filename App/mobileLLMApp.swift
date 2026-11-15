@@ -614,6 +614,8 @@ struct MobileLLMApp: App {
                 }
             }
             #endif
+            let webSearchSession = agentRuntimeURLSession()
+            let webSearchClient = OnlineCompletionClient(session: webSearchSession)
             do {
                 let assembly = try AgentRuntimeAssembly(
                     engine: container.engine,
@@ -643,8 +645,37 @@ struct MobileLLMApp: App {
                     locationProvider: container.toolLocationProvider,
                     shortcutExecutor: container.toolShortcutExecutor,
                     mcpDiscovery: container.mcpDiscovery,
-                    session: agentRuntimeURLSession(),
-                    onlineConfiguration: { onlineConfigBox.configuration(for: $0) }
+                    session: webSearchSession,
+                    onlineConfiguration: { onlineConfigBox.configuration(for: $0) },
+                    remoteWebSearchBackend: { [weak container] in
+                        await MainActor.run {
+                            guard let container,
+                                  let service = container.settings.webSearchOnlineService,
+                                  let url = URL(string: service.baseURL),
+                                  let destination = try? AppToolV2Support.hostOnlyDestination(url) else {
+                                return nil
+                            }
+                            let credentials = container.openAICredentials
+                            return RemoteWebSearchBackend(destination: destination) { query in
+                                guard let apiKey = try credentials.loadAPIKey(serviceID: service.id),
+                                      !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                                    throw NSError(
+                                        domain: "mobileLLM.webSearch",
+                                        code: 1,
+                                        userInfo: [
+                                            NSLocalizedDescriptionKey:
+                                                "Missing API key for cloud web search service '\(service.name)'."
+                                        ]
+                                    )
+                                }
+                                return try await webSearchClient.webSearch(
+                                    service: service,
+                                    apiKey: apiKey,
+                                    query: query
+                                )
+                            }
+                        }
+                    }
                 )
                 container.attachAgentRuns(assembly.runStore)
                 // Production outbox projector (spec §9.1/§33 gap 2): claims journal outbox rows and

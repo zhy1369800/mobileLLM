@@ -112,6 +112,20 @@ enum AppToolV2Support {
 
 // MARK: - Web Search (networkRead, requires approval)
 
+/// Optional cloud-backed web search backend resolved for the current run.
+public struct RemoteWebSearchBackend: Sendable {
+    public let destination: ExternalDestination
+    public let execute: @Sendable (String) async throws -> String
+
+    public init(
+        destination: ExternalDestination,
+        execute: @escaping @Sendable (String) async throws -> String
+    ) {
+        self.destination = destination
+        self.execute = execute
+    }
+}
+
 /// Adapts the legacy `WebSearchTool` to Tool V2. Every engine fetch crosses the authorization gate as
 /// its own bounded network hop; the primary engine is the plan destination and the rest are fallbacks.
 public final class AppWebSearchToolAdapter: ToolV2, @unchecked Sendable {
@@ -121,6 +135,7 @@ public final class AppWebSearchToolAdapter: ToolV2, @unchecked Sendable {
     private let engines: [SearchEngine]
     private let maximumResponseBytes: UInt64
     private let timeoutMilliseconds: UInt64
+    private let remoteBackend: (@Sendable () async -> RemoteWebSearchBackend?)?
 
     public init(
         tool: WebSearchTool,
@@ -128,7 +143,8 @@ public final class AppWebSearchToolAdapter: ToolV2, @unchecked Sendable {
         version: SemanticVersion = SemanticVersion("1.0.0")!,
         trustRevision: String,
         timeoutMilliseconds: UInt64 = 30_000,
-        maximumResponseBytes: UInt64 = 1 * 1_024 * 1_024
+        maximumResponseBytes: UInt64 = 1 * 1_024 * 1_024,
+        remoteBackend: (@Sendable () async -> RemoteWebSearchBackend?)? = nil
     ) throws {
         let schema = tool.schema
         let inputSchema = try AppToolV2Support.inputSchema(for: schema)
@@ -157,6 +173,7 @@ public final class AppWebSearchToolAdapter: ToolV2, @unchecked Sendable {
         engines = tool.engines
         self.maximumResponseBytes = maximumResponseBytes
         self.timeoutMilliseconds = timeoutMilliseconds
+        self.remoteBackend = remoteBackend
     }
 
     public func prepare(
@@ -172,18 +189,30 @@ public final class AppWebSearchToolAdapter: ToolV2, @unchecked Sendable {
         // may be called or offered as fallbacks. The shared adapter's engine list is a superset of the
         // per-run ceiling (settings may change after the executor is built), so intersect it here.
         let grantedDestinations = context.capabilityGrant.authority.destinations
-        let destinations = try engines
-            .map { try Self.destination(engine: $0) }
-            .filter { grantedDestinations.contains($0) }
-        guard let first = destinations.first else {
-            throw AgentContractError.capabilityEscalation([])
+        let first: ExternalDestination
+        let fallbacks: [ExternalDestination]
+        if let remote = await remoteBackend?() {
+            guard grantedDestinations.contains(remote.destination) else {
+                throw AgentContractError.capabilityEscalation([])
+            }
+            first = remote.destination
+            fallbacks = []
+        } else {
+            let destinations = try engines
+                .map { try Self.destination(engine: $0) }
+                .filter { grantedDestinations.contains($0) }
+            guard let builtInFirst = destinations.first else {
+                throw AgentContractError.capabilityEscalation([])
+            }
+            first = builtInFirst
+            fallbacks = Array(destinations.dropFirst())
         }
         let plan = try ExternalOperationPlan(
             kind: .tool,
             subjectID: descriptor.id.logicalID.description,
             canonicalArguments: request.sanitizedArguments,
             destination: first,
-            allowedFallbacks: Array(destinations.dropFirst()),
+            allowedFallbacks: fallbacks,
             dataCategories: [try AgentDataCategory(rawValue: "web.search")],
             payloadDigest: request.sanitizedArguments.fingerprint,
             effects: descriptor.effects,
@@ -230,6 +259,59 @@ public final class AppWebSearchToolAdapter: ToolV2, @unchecked Sendable {
                     let allowedDestinations = Set(
                         [plan.destination].compactMap { $0 } + plan.allowedFallbacks
                     )
+                    if let remote = await remoteBackend?(),
+                       allowedDestinations.contains(remote.destination) {
+                        do {
+                            let boundary = try await context.performBoundary(
+                                observation: ExternalOperationObservation(
+                                    destination: remote.destination,
+                                    dataCategories: [try AgentDataCategory(rawValue: "web.search")],
+                                    effects: [.networkRead],
+                                    requestBytes: UInt64(
+                                        prepared.prepared.request.sanitizedArguments.string.utf8.count
+                                    ),
+                                    responseBytesLimit: maximumResponseBytes,
+                                    payloadDigest: prepared.prepared.request
+                                        .sanitizedArguments.fingerprint,
+                                    descriptorID: descriptor.id.description,
+                                    schemaDigest: descriptor.id.schemaDigest,
+                                    trustRevision: descriptor.id.trustRevision
+                                ),
+                                operation: { control in
+                                    let text = try await remote.execute(query)
+                                    try await control.consumeResponseBytes(UInt64(text.utf8.count))
+                                    return try AppToolV2Support.canonicalText(text)
+                                }
+                            )
+                            guard let text = try AppToolV2Support.textValue(boundary.value) else {
+                                throw WebSearchTool.ToolNetError.badResponse
+                            }
+                            try Task.checkCancellation()
+                            let results = try ToolResultCollection([
+                                .text(try ToolTextResult(text)),
+                            ])
+                            continuation.yield(.completed(results))
+                            continuation.finish()
+                            return
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch let contract as AgentContractError {
+                            throw contract
+                        } catch {
+                            await context.logger.record(
+                                code: "tool.web-search.remote-failed",
+                                metadata: ["reason": String(describing: type(of: error))]
+                            )
+                            continuation.yield(.failed(
+                                try AppToolV2Support.toolFailure(
+                                    code: "tool.web-search.remote-failed",
+                                    message: "Cloud web search failed: \(error.localizedDescription)"
+                                )
+                            ))
+                            continuation.finish()
+                            return
+                        }
+                    }
                     for engine in engines {
                         if await context.cancellation.isCancelled() { throw CancellationError() }
                         guard let engineDestination = try? Self.destination(engine: engine),
