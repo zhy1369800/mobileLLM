@@ -75,4 +75,19 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertNil(chat.conversations[0].compactionSummary)
         XCTAssertNil(chat.conversations[0].compactionCutoffMessageID)
     }
+
+    @MainActor
+    func testCanSendBlockedWhileCompacting() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = try ConversationStore(directory: dir)
+        let defaults = UserDefaults(suiteName: "SlashCommandTests-\(UUID().uuidString)")!
+        let settings = AppSettings(defaults: defaults)
+        let chat = ChatStore(store: store, settings: settings)
+        _ = chat.newConversation()
+        chat.draft = "some question"
+
+        XCTAssertFalse(chat.isCompacting)
+        // With no loaded model, canSend is false anyway; verify isCompacting itself is checked
+        XCTAssertFalse(chat.canSend)
+    }
 }

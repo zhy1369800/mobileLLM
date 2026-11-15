@@ -338,10 +338,6 @@ struct Composer: View {
             _ = chat.newConversation()
         case .toggleThinking:
             chat.composerThinkingEnabled.toggle()
-            chat.showToast(Toast(
-                chat.composerThinkingEnabled ? "Thinking mode on." : "Thinking mode off.",
-                autoDismiss: 2
-            ))
         case .selectSkill(let skillID):
             chat.setActiveSkill(skillID)
             focused = true

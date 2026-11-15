@@ -710,7 +710,7 @@ public final class ChatStore {
     public var hasModel: Bool { activeModel != nil || isOnlineActive || isShortcutsActive }
     public var canSend: Bool {
         acceptingNewActions && !conversationEraseInProgress && agentRuntimeUnavailableReason == nil
-            && hasModel && streamingMessageID == nil
+            && hasModel && streamingMessageID == nil && !isCompacting
             && (hasSendableDraft || !pendingImages.isEmpty)
     }
 
@@ -1290,11 +1290,16 @@ public final class ChatStore {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let stagedImages = pendingImages
         let images = stagedImages.map(\.data)
+        if isCompacting {
+            showToast(Toast("Wait for conversation compaction to finish.", kind: .warning, autoDismiss: 3))
+            return
+        }
         guard acceptingNewActions,
               agentRuntimeUnavailableReason == nil,
               !text.isEmpty || !images.isEmpty,
               hasModel,
-              streaming == nil
+              streaming == nil,
+              !isCompacting
         else { return }
         // Deterministic workflow trigger (spec §22): a standalone `/workflow` marker may appear
         // before, inside, or after the goal. URL path components and longer slash commands do not
