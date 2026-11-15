@@ -3226,11 +3226,19 @@ public final class ChatStore {
                            let tool = registry.tools.first(where: { $0.schema.name == toolCall.tool || $0.schema.name.lowercased() == toolCall.tool.lowercased() }) {
 
                             self.streaming?.warmingNote = "正在执行工具: \(toolCall.tool)..."
+                            if self.streaming?.phase != .stopping {
+                                self.streaming?.phase = .answering
+                            }
                             let argsData = (try? JSONSerialization.data(withJSONObject: toolCall.arguments, options: [])) ?? Data()
                             let argsString = String(data: argsData, encoding: .utf8) ?? "{}"
-                            let toolResultText = await tool.execute(argumentsJSON: argsString)
-
                             let argsSummary = (try? String(data: JSONSerialization.data(withJSONObject: toolCall.arguments), encoding: .utf8)) ?? "{}"
+                            self.streaming?.toolActivity.append(ToolRun(name: toolCall.tool, arguments: argsSummary, result: nil))
+                            let liveIndex = (self.streaming?.toolActivity.count ?? 1) - 1
+                            let toolResultText = await tool.execute(argumentsJSON: argsString)
+                            if let count = self.streaming?.toolActivity.count, liveIndex >= 0, liveIndex < count {
+                                self.streaming?.toolActivity[liveIndex].result = toolResultText
+                            }
+
                             let run = ToolRun(name: toolCall.tool, arguments: argsSummary, result: toolResultText)
                             toolRuns.append(run)
 

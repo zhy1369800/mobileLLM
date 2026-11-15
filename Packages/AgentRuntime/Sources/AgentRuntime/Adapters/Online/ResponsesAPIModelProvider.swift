@@ -616,6 +616,9 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                     {
                         callName = name
                         callArguments = ""
+                        if emit {
+                            try await emitter.emit(.toolCallDelta(name: name, argumentDelta: ""), responseBytes: 0)
+                        }
                     } else if item["type"] == .string("reasoning") {
                         hasReasoningOutput = true
                     }
@@ -637,6 +640,9 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
             case "response.function_call_arguments.delta":
                 if case .string(let delta)? = event["delta"] {
                     callArguments += delta
+                    if emit, let callName, !callName.isEmpty {
+                        try await emitter.emit(.toolCallDelta(name: callName, argumentDelta: delta), responseBytes: 0)
+                    }
                 }
             case "response.output_item.done":
                 if case .object(let item)? = event["item"],

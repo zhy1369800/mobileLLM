@@ -90,6 +90,7 @@ public final class AgentRunStore {
     private var eventTasks: [AgentRunID: Task<Void, Never>] = [:]
     private var ephemeralTasks: [AgentRunID: Task<Void, Never>] = [:]
     @ObservationIgnored private var accumulatedReasoning: [UUID: String] = [:]
+    @ObservationIgnored private var streamedToolCallsInTurn: Set<UUID> = []
 
     public init(
         executor: any AgentExecutor,
@@ -481,15 +482,20 @@ public final class AgentRunStore {
                 sequence: record.sequence
             ))
         case .toolIntentRecorded(let prepared):
+            let title = Self.toolDisplayName(prepared.plan.subjectID)
+            let detail = Self.toolArgumentSummary(prepared.plan.canonicalArguments?.string)
             steps.append(AgentRunStep(
                 kind: .toolCall,
-                title: Self.toolDisplayName(prepared.plan.subjectID),
-                detail: Self.toolArgumentSummary(prepared.plan.canonicalArguments?.string),
+                title: title,
+                detail: detail,
                 invocationID: prepared.invocationID,
                 rawArguments: prepared.plan.canonicalArguments?.string,
                 status: .running,
                 sequence: record.sequence
             ))
+            if !streamedToolCallsInTurn.contains(conversationID) {
+                onEphemeral?(conversationID, .toolCall(name: title), detail)
+            }
         case .toolOutcomeRecorded(let invocationID, let outcome):
             let matchedIndex = steps.lastIndex(where: {
                 $0.kind == .toolCall && $0.invocationID == invocationID
@@ -525,10 +531,14 @@ public final class AgentRunStore {
                     onEphemeral?(conversationID, .toolResult(name: steps[index].title), res)
                 }
             }
+            if !steps.contains(where: { $0.kind == .toolCall && $0.status == .running }) {
+                streamedToolCallsInTurn.remove(conversationID)
+            }
         case .modelAttemptOutcome:
             // Token activity is rendered by the streaming row; a per-pass step is internal noise.
             break
         case .terminal(let result):
+            streamedToolCallsInTurn.remove(conversationID)
             run = run.replacing(
                 state: result.status.state,
                 terminalReason: result.status.terminalReason,
@@ -604,6 +614,7 @@ public final class AgentRunStore {
                 run = run.replacing(provisionalText: run.provisionalText + delta)
                 onEphemeral?(conversationID, .answer, delta)
             case .toolCallDelta(let name, let delta):
+                streamedToolCallsInTurn.insert(conversationID)
                 onEphemeral?(conversationID, .toolCall(name: name), delta)
             case .usage:
                 break
