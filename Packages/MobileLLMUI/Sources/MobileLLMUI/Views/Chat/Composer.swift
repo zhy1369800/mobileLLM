@@ -328,10 +328,13 @@ struct Composer: View {
         chat.draft = ""
         switch item.action {
         case .clear:
+            focused = false
             chat.clearActiveConversation()
         case .compact:
+            focused = false
             Task { @MainActor in await chat.manualCompactActiveConversation() }
         case .newConversation:
+            focused = false
             _ = chat.newConversation()
         case .toggleThinking:
             chat.composerThinkingEnabled.toggle()
