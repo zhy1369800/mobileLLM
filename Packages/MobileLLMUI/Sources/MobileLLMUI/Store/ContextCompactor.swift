@@ -108,6 +108,26 @@ public enum ContextCompactor {
         return Plan(toSummarize: Array(turns[0..<keepFrom]), newCutoffID: turns[keepFrom - 1].id)
     }
 
+    /// Builds a manual compaction plan regardless of the auto-compaction threshold. Keeps the
+    /// latest user turn verbatim when earlier turns exist, or folds all active turns when only one
+    /// turn is present so `/compact` always makes progress if visible content exists.
+    public static func manualPlan(
+        history: [Message],
+        cutoffID: UUID?
+    ) -> Plan? {
+        guard let active = activeMessages(history, cutoffID: cutoffID) else { return nil }
+        let turns = active.filter { $0.role != .system && $0.hasVisibleContent }
+        guard !turns.isEmpty else { return nil }
+
+        if let lastUserIndex = turns.lastIndex(where: { $0.role == .user }), lastUserIndex > 0 {
+            return Plan(
+                toSummarize: Array(turns[0..<lastUserIndex]),
+                newCutoffID: turns[lastUserIndex - 1].id
+            )
+        }
+        return Plan(toSummarize: turns, newCutoffID: turns[turns.count - 1].id)
+    }
+
     /// Token cap for the generated summary.
     public static func summaryTokenBudget(contextLength: Int) -> Int {
         min(800, max(128, Int(Double(contextLength) * summaryRatio)))

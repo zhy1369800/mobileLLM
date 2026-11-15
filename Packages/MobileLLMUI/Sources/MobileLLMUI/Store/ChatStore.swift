@@ -181,6 +181,8 @@ public final class ChatStore {
     public var onGenerationStarted: (@MainActor () -> Void)?
     /// Observer notified when a shortcut automation task notification has been dispatched.
     public var onShortcutsTaskDispatched: (@MainActor () -> Void)?
+    /// True while a manual `/compact` summarization pass is in flight.
+    public private(set) var isCompacting = false
     private var genTask: Task<Void, Never>?
     @ObservationIgnored private var pendingStreamReasoning: String = ""
     @ObservationIgnored private var pendingStreamAnswer: String = ""
@@ -824,6 +826,62 @@ public final class ChatStore {
         // exists (the reuse branch above), so this never litters the list.
         persist(convo)
         return convo
+    }
+
+    /// Clears all messages and compaction state in the active conversation in place.
+    @discardableResult
+    public func clearActiveConversation() -> Bool {
+        guard !isStreaming, !isCompacting else {
+            showToast(Toast("Stop generating before clearing the conversation.", kind: .warning, autoDismiss: 3))
+            return false
+        }
+        guard let i = activeIndex else { return false }
+        let id = conversations[i].id
+        purgeAttachments(of: conversations[i].messages)
+        conversations[i].messages.removeAll()
+        conversations[i].compactionSummary = nil
+        conversations[i].compactionCutoffMessageID = nil
+        conversations[i].updatedAt = Date()
+        compactionFailedConversations[id] = nil
+        lastShortcutsConfigFingerprint.removeValue(forKey: id)
+        contextHistoryCache = nil
+        contextOverheadCache = nil
+        clearPendingImages()
+        persist(conversations[i])
+        showToast(Toast("Conversation cleared.", autoDismiss: 2))
+        return true
+    }
+
+    /// Manually compacts the active conversation regardless of the auto-compaction threshold.
+    public func manualCompactActiveConversation() async {
+        guard !isStreaming, !isCompacting else {
+            showToast(Toast("Wait for the current operation to finish.", kind: .warning, autoDismiss: 3))
+            return
+        }
+        guard let ci = activeIndex else { return }
+        let conversationID = conversations[ci].id
+        if let cutoff = conversations[ci].compactionCutoffMessageID,
+           !conversations[ci].messages.contains(where: { $0.id == cutoff }) {
+            conversations[ci].compactionSummary = nil
+            conversations[ci].compactionCutoffMessageID = nil
+        }
+        guard let plan = ContextCompactor.manualPlan(
+            history: conversations[ci].messages,
+            cutoffID: conversations[ci].compactionCutoffMessageID
+        ) else {
+            showToast(Toast("Nothing to compact in this conversation.", kind: .warning, autoDismiss: 3))
+            return
+        }
+        isCompacting = true
+        defer { isCompacting = false }
+        compactionFailedConversations[conversationID] = nil
+        let previousCutoff = conversations[ci].compactionCutoffMessageID
+        showToast(Toast("Compacting conversation…", autoDismiss: 2))
+        await runCompaction(plan, conversationID: conversationID)
+        if let idx = conversations.firstIndex(where: { $0.id == conversationID }),
+           conversations[idx].compactionCutoffMessageID != previousCutoff {
+            showToast(Toast("Conversation compacted.", autoDismiss: 3))
+        }
     }
 
     /// The current global tool template copied into a NEW conversation (spec §14: new conversations
