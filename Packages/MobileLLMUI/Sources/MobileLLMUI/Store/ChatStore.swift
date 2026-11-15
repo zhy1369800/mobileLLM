@@ -485,6 +485,11 @@ public final class ChatStore {
         return conversations.first { $0.id == activeID }
     }
 
+    public var activeIndex: Int? {
+        guard let activeID else { return nil }
+        return conversations.firstIndex { $0.id == activeID }
+    }
+
     /// Exact persisted conversation lookup for app-assembly snapshots and recovery. Runtime work is
     /// bound to its recorded conversation id, never whichever thread happens to be visible.
     public func conversation(id: UUID) -> Conversation? {
@@ -3014,7 +3019,6 @@ public final class ChatStore {
 
         let completedTurns = convo.messages.filter { $0.id != assistantID && $0.role != .system }
         let priorHistory = completedTurns.dropLast()
-        let isFirstTurn = priorHistory.isEmpty
         let historyTuples: [(role: String, content: String)] = priorHistory.map { ($0.role.rawValue, $0.answer) }
         let system = composedSystemPrompt(query: currentPrompt)
 
