@@ -234,4 +234,31 @@ final class ContextCompactorTests: XCTestCase {
         XCTAssertEqual(activeAfter.first?.id, latestUser.id, "At least the latest user/assistant exchange stays verbatim")
         XCTAssertFalse(plan.toSummarize.contains { $0.id == latestUser.id || $0.id == hugeAssistant.id })
     }
+
+    func testManualPlanIgnoresThresholdAndMinimumHistory() throws {
+        // Only 2 pairs (4 small messages), well below the 85% auto-compaction threshold.
+        let history = [
+            Message(role: .user, answer: "first question"),
+            Message(role: .assistant, answer: "first answer"),
+            Message(role: .user, answer: "second question"),
+            Message(role: .assistant, answer: "second answer"),
+        ]
+        XCTAssertNil(ContextCompactor.plan(
+            history: history, cutoffID: nil, summary: nil, fixedTokens: 0, contextLength: 8_192
+        ))
+
+        let manual = try XCTUnwrap(ContextCompactor.manualPlan(history: history, cutoffID: nil))
+        XCTAssertEqual(manual.toSummarize.count, 2)
+        XCTAssertEqual(manual.newCutoffID, history[1].id)
+    }
+
+    func testManualPlanSingleTurnFoldsAllActiveMessages() throws {
+        let history = [
+            Message(role: .user, answer: "only question"),
+            Message(role: .assistant, answer: "only answer"),
+        ]
+        let manual = try XCTUnwrap(ContextCompactor.manualPlan(history: history, cutoffID: nil))
+        XCTAssertEqual(manual.toSummarize.count, 2)
+        XCTAssertEqual(manual.newCutoffID, history[1].id)
+    }
 }
