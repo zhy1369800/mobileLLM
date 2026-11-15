@@ -88,7 +88,7 @@ extension ChatStore {
                     kept.append(turn)
                 }
             } else {
-                kept.append(ChatTurn(role: role, content: message.answer, images: turnImages))
+                kept.append(ChatTurn(role: role, content: message.modelInputText, images: turnImages))
             }
             budget -= tokens
             if budget <= 0 { break }

@@ -30,6 +30,7 @@ struct UserBubble: View {
     var attachmentLoader: ((ImageRef) async -> Data?)?
 
     private var attachments: [ImageRef] { message.attachments ?? [] }
+    private var fileAttachments: [FileAttachment] { message.fileAttachments ?? [] }
 
     var body: some View {
         HStack {
@@ -37,6 +38,9 @@ struct UserBubble: View {
             VStack(alignment: .trailing, spacing: Theme.Space.xs) {
                 if !attachments.isEmpty, let attachmentLoader {
                     AttachmentThumbnails(refs: attachments, load: attachmentLoader)
+                }
+                if !fileAttachments.isEmpty {
+                    FileAttachmentPills(files: fileAttachments)
                 }
                 if !message.answer.isEmpty {
                     Text(message.answer)
@@ -61,9 +65,46 @@ struct UserBubble: View {
     }
 
     private var accessibilityValue: String {
-        guard !attachments.isEmpty else { return message.answer }
-        let noun = attachments.count == 1 ? "attached image" : "\(attachments.count) attached images"
-        return message.answer.isEmpty ? noun : "\(noun). \(message.answer)"
+        var parts: [String] = []
+        if !attachments.isEmpty {
+            parts.append(attachments.count == 1 ? "attached image" : "\(attachments.count) attached images")
+        }
+        if !fileAttachments.isEmpty {
+            parts.append(fileAttachments.map(\.fileName).joined(separator: ", "))
+        }
+        if !message.answer.isEmpty {
+            parts.append(message.answer)
+        }
+        return parts.joined(separator: ", ")
+    }
+}
+
+private struct FileAttachmentPills: View {
+    let files: [FileAttachment]
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            ForEach(files) { file in
+                HStack(spacing: 6) {
+                    Image(systemName: file.fileExtension == "pdf" ? "doc.richtext" : "doc.text")
+                        .font(.caption)
+                        .foregroundStyle(Theme.accent)
+                    Text(file.fileName)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                    if file.isTruncated {
+                        Text("\(file.retainedPercent)%")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.orange)
+                    }
+                }
+                .padding(.horizontal, Theme.Space.sm)
+                .padding(.vertical, 6)
+                .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous).strokeBorder(Theme.hairline))
+            }
+        }
     }
 }
 

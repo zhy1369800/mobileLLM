@@ -49,7 +49,7 @@ public enum ContextCompactor {
     /// A message's prompt cost: its answer plus any replayed tool calls / results, each framed like the
     /// runtime replays them (call = assistant turn, result = user turn).
     static func tokens(of message: Message) -> Int {
-        var count = tokens(in: message.answer, role: message.role == .assistant ? .assistant : .user)
+        var count = tokens(in: message.modelInputText, role: message.role == .assistant ? .assistant : .user)
         for run in message.toolRuns ?? [] {
             count += tokens(in: run.rawCallText ?? "\(run.name) \(run.arguments)", role: .assistant)
             if let result = run.result { count += tokens(in: run.rawResponseText ?? result, role: .user) }

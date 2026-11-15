@@ -37,6 +37,7 @@ struct Composer: View {
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var showPhotoPicker = false
     @State private var showCamera = false
+    @State private var showFileImporter = false
     /// Stop stays disarmed for a beat after send so the tail of a double-tap can't cancel the turn.
     @State private var stopArmed = false
     /// Presents the skill management sheet (composer's "Manage Skills…").
@@ -71,6 +72,18 @@ struct Composer: View {
         .overlay(alignment: .top) { Divider().background(Theme.hairline) }
         .photosPicker(isPresented: $showPhotoPicker, selection: $pickerItems,
                       maxSelectionCount: ChatStore.maxAttachments, matching: .images)
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: DocumentTextExtractor.supportedContentTypes,
+            allowsMultipleSelection: true
+        ) { result in
+            switch result {
+            case .success(let urls):
+                chat.attach(fileURLs: urls)
+            case .failure(let error):
+                chat.showToast(Toast(error.localizedDescription, kind: .warning, autoDismiss: 5))
+            }
+        }
         .sheet(isPresented: $showSkills) {
             if let store = chat.skillStore {
                 NavigationStack { SkillsView(store: store) }
@@ -212,6 +225,11 @@ struct Composer: View {
             }
             if !chat.pendingImages.isEmpty {
                 pendingImageChips
+                    .padding(.horizontal, Theme.Space.sm)
+                    .padding(.top, Theme.Space.xs)
+            }
+            if !chat.pendingFiles.isEmpty {
+                pendingFileChips
                     .padding(.horizontal, Theme.Space.sm)
                     .padding(.top, Theme.Space.xs)
             }
@@ -429,6 +447,48 @@ struct Composer: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var pendingFileChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: Theme.Space.xs) {
+                ForEach(chat.pendingFiles) { file in
+                    HStack(spacing: 6) {
+                        Image(systemName: file.fileExtension == "pdf" ? "doc.richtext" : "doc.text")
+                            .font(.caption)
+                            .foregroundStyle(Theme.accent)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(file.fileName)
+                                .font(.caption.weight(.medium))
+                                .lineLimit(1)
+                            if file.isTruncated {
+                                Text("Truncated · \(file.retainedPercent)%")
+                                    .font(.caption2)
+                                    .foregroundStyle(.orange)
+                            }
+                        }
+                        Button {
+                            chat.removePendingFile(file.id)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Remove \(file.fileName)")
+                    }
+                    .padding(.horizontal, Theme.Space.sm)
+                    .padding(.vertical, 6)
+                    .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous)
+                            .strokeBorder(file.isTruncated ? Color.orange.opacity(0.5) : Theme.hairline)
+                    )
+                }
+            }
+            .padding(.horizontal, 2).padding(.vertical, 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private func pendingChip(_ image: PendingImage) -> some View {
         ZStack(alignment: .topTrailing) {
             Group {
@@ -510,6 +570,14 @@ struct Composer: View {
                     Label(count > 0 ? "Skills (\(count))" : "Skills", systemImage: "sparkles")
                 }
             }
+            Divider()
+            Button {
+                focused = false
+                showFileImporter = true
+            } label: {
+                Label("Upload File", systemImage: "doc.text")
+            }
+            .disabled(!chat.canAttachMoreFiles)
             if canAttachImages {
                 Divider()
                 // Every image entry point clears the FOCUS STATE, not just the first responder: a bare

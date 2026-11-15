@@ -119,6 +119,8 @@ public final class ChatStore {
     /// raw 48 MP original). Capped at `maxAttachments`; cleared when the turn is sent. Held in memory
     /// only until send stamps them onto the user turn + writes them to disk.
     public private(set) var pendingImages: [PendingImage] = []
+    /// Text/document files staged in the composer for the next send (TXT, MD, code, PDF text).
+    public private(set) var pendingFiles: [FileAttachment] = []
     /// The durable agent runtime projection (spec §20). Nil only in tests/previews that deliberately
     /// exercise legacy chat behavior; production attaches it or fail-closes sending.
     public private(set) var agentRuns: AgentRunStore?
@@ -711,7 +713,7 @@ public final class ChatStore {
     public var canSend: Bool {
         acceptingNewActions && !conversationEraseInProgress && agentRuntimeUnavailableReason == nil
             && hasModel && streamingMessageID == nil && !isCompacting
-            && (hasSendableDraft || !pendingImages.isEmpty)
+            && (hasSendableDraft || !pendingImages.isEmpty || !pendingFiles.isEmpty)
     }
 
     /// Marks the production agent path unavailable. This is intentionally sticky for the process:
@@ -787,6 +789,55 @@ public final class ChatStore {
 
     public func clearPendingImages() {
         pendingImages.removeAll()
+    }
+
+    public var canAttachMoreFiles: Bool {
+        !conversationEraseInProgress && streamingMessageID == nil && pendingFiles.count < Self.maxAttachments
+    }
+
+    /// Extracts plain text from user-selected files (TXT, MD, source code, PDF) and stages them
+    /// for the next turn. Truncates oversized documents and notifies the user via toast.
+    public func attach(fileURLs urls: [URL]) {
+        guard !conversationEraseInProgress, streamingMessageID == nil else { return }
+        let maxChars = DocumentTextExtractor.recommendedMaxCharacters(contextTokenCap: effectiveContextTokenCap)
+        var addedTruncatedNames: [String] = []
+        var firstError: String?
+        var hitLimit = false
+
+        for url in urls {
+            guard pendingFiles.count < Self.maxAttachments else {
+                hitLimit = true
+                break
+            }
+            do {
+                let attachment = try DocumentTextExtractor.extract(from: url, maxCharacters: maxChars)
+                pendingFiles.append(attachment)
+                if attachment.isTruncated {
+                    addedTruncatedNames.append("\(attachment.fileName) (\(attachment.retainedPercent)%)")
+                }
+            } catch {
+                if firstError == nil {
+                    firstError = error.localizedDescription
+                }
+            }
+        }
+
+        if let firstError {
+            showToast(Toast(firstError, kind: .warning, autoDismiss: 5))
+        } else if !addedTruncatedNames.isEmpty {
+            let list = addedTruncatedNames.joined(separator: ", ")
+            showToast(Toast("File too long — truncated to fit context: \(list)", kind: .warning, autoDismiss: 5))
+        } else if hitLimit {
+            showToast(Toast("You can attach up to \(Self.maxAttachments) files per message.", kind: .warning, autoDismiss: 4))
+        }
+    }
+
+    public func removePendingFile(_ id: UUID) {
+        pendingFiles.removeAll { $0.id == id }
+    }
+
+    public func clearPendingFiles() {
+        pendingFiles.removeAll()
     }
 
     /// Load a persisted attachment's bytes (for thumbnail rendering in a committed user turn).
@@ -1056,6 +1107,7 @@ public final class ChatStore {
         if succeeded || resetSessionState {
             draft = ""
             pendingImages.removeAll()
+            pendingFiles.removeAll()
             pendingSaveFailures.removeAll()
             persistFailureBannerID = nil
             cachedRegistry = nil
@@ -1290,13 +1342,14 @@ public final class ChatStore {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let stagedImages = pendingImages
         let images = stagedImages.map(\.data)
+        let stagedFiles = pendingFiles
         if isCompacting {
             showToast(Toast("Wait for conversation compaction to finish.", kind: .warning, autoDismiss: 3))
             return
         }
         guard acceptingNewActions,
               agentRuntimeUnavailableReason == nil,
-              !text.isEmpty || !images.isEmpty,
+              !text.isEmpty || !images.isEmpty || !stagedFiles.isEmpty,
               hasModel,
               streaming == nil,
               !isCompacting
@@ -1313,6 +1366,7 @@ public final class ChatStore {
             // The workflow command is a real send: clear the composer exactly like a chat turn.
             draft = ""
             clearPendingImages()
+            clearPendingFiles()
             startWorkflow(goal: goal)
             return
         }
@@ -1333,6 +1387,7 @@ public final class ChatStore {
 
         draft = ""
         clearPendingImages()
+        clearPendingFiles()
         onGenerationStarted?()
         guard let convo = activeConversation ?? newConversation(),
               let idx = conversations.firstIndex(where: { $0.id == convo.id }) else { return }
@@ -1353,11 +1408,13 @@ public final class ChatStore {
             originalUpdatedAt: conversations[idx].updatedAt
         )
         let user = Message(id: rollback.userID, role: .user, answer: text,
-                           attachments: refs.isEmpty ? nil : refs)
+                           attachments: refs.isEmpty ? nil : refs,
+                           fileAttachments: stagedFiles.isEmpty ? nil : stagedFiles)
         conversations[idx].messages.append(user)
         // Auto-title from the first user line (model-summarized titling is TODO(v1.0)).
         if conversations[idx].messages.filter({ $0.role == .user }).count == 1 {
-            conversations[idx].title = Self.autoTitle(from: text)
+            let titleSource = text.isEmpty ? (stagedFiles.first?.fileName ?? text) : text
+            conversations[idx].title = Self.autoTitle(from: titleSource)
         }
         // Stamp the model that's actually answering on EVERY send — the record tracks the thread's
         // CURRENT model, so reopening the app restores what you were really using, not the first pick.
@@ -1378,7 +1435,7 @@ public final class ChatStore {
             startShortcutsGeneration(
                 assistantID: assistant.id,
                 in: conversations[idx].id,
-                currentPrompt: text,
+                currentPrompt: user.modelInputText,
                 writeAttachments: attachments,
                 attachmentRollback: finalRollback
             )

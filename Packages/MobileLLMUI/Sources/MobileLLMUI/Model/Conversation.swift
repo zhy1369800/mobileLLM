@@ -41,6 +41,37 @@ public struct ImageRef: Identifiable, Codable, Sendable, Equatable {
     public var fileName: String { "\(id.uuidString).jpg" }
 }
 
+/// A text/document file attached to a user turn (TXT, MD, source code, or PDF text).
+/// Extracted on-device as plain text so both local and cloud models can reason over it without
+/// inflating the visible chat bubble.
+public struct FileAttachment: Identifiable, Codable, Sendable, Equatable {
+    public let id: UUID
+    public var fileName: String
+    public var fileExtension: String
+    public var extractedText: String
+    public var originalCharCount: Int
+    public var isTruncated: Bool
+    public var retainedPercent: Int
+
+    public init(
+        id: UUID = UUID(),
+        fileName: String,
+        fileExtension: String,
+        extractedText: String,
+        originalCharCount: Int,
+        isTruncated: Bool = false,
+        retainedPercent: Int = 100
+    ) {
+        self.id = id
+        self.fileName = fileName
+        self.fileExtension = fileExtension
+        self.extractedText = extractedText
+        self.originalCharCount = originalCharCount
+        self.isTruncated = isTruncated
+        self.retainedPercent = retainedPercent
+    }
+}
+
 /// A durable snapshot of the model that generated one assistant turn. Conversation-level model identity
 /// tracks only the thread's current selection, so it cannot label historical generation stats after a model
 /// switch. IDs preserve machine identity; `displayName` keeps the footer meaningful if a catalog entry is
@@ -105,6 +136,8 @@ public struct Message: Identifiable, Codable, Sendable, Equatable {
     /// `attachments/` dir — never inline here). Optional → old records without the key decode as nil,
     /// and a text-only turn re-encodes byte-identically (the synthesized Codable omits a nil key).
     public var attachments: [ImageRef]?
+    /// Text/document files attached to this turn (TXT, MD, code, PDF). Optional → old records decode as nil.
+    public var fileAttachments: [FileAttachment]?
     /// Message-anchored workflow record (spec §20/§23): the initiating message owns the live and
     /// completed workflow row. Optional → old records decode without one.
     public var workflowRecord: WorkflowMessageRecord?
@@ -116,6 +149,7 @@ public struct Message: Identifiable, Codable, Sendable, Equatable {
                 answer: String, reasoning: String? = nil, thinkingSeconds: Double? = nil,
                 toolRuns: [ToolRun]? = nil, stats: Stats? = nil, parentID: UUID? = nil,
                 emptyOutcome: EmptyOutcome? = nil, attachments: [ImageRef]? = nil,
+                fileAttachments: [FileAttachment]? = nil,
                 generatedBy: GenerationModel? = nil,
                 workflowRecord: WorkflowMessageRecord? = nil,
                 workflowResultID: UUID? = nil) {
@@ -131,12 +165,32 @@ public struct Message: Identifiable, Codable, Sendable, Equatable {
         self.parentID = parentID
         self.emptyOutcome = emptyOutcome
         self.attachments = attachments
+        self.fileAttachments = fileAttachments
         self.workflowRecord = workflowRecord
         self.workflowResultID = workflowResultID
     }
 
+    /// Plain text sent to the model for this turn: any attached document text blocks followed by
+    /// the user's typed message (or `answer` alone when no files are attached).
+    public var modelInputText: String {
+        Self.composeModelInputText(answer: answer, files: fileAttachments ?? [])
+    }
+
+    public static func composeModelInputText(answer: String, files: [FileAttachment]) -> String {
+        guard !files.isEmpty else { return answer }
+        let blocks = files.map { file in
+            let meta = file.isTruncated ? " truncated=\"true\" retained=\"\(file.retainedPercent)%\"" : ""
+            return "<file name=\"\(file.fileName)\"\(meta)>\n\(file.extractedText)\n</file>"
+        }.joined(separator: "\n\n")
+        let trimmedAnswer = answer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedAnswer.isEmpty {
+            return blocks
+        }
+        return "\(blocks)\n\n\(answer)"
+    }
+
     var approximateTokens: Int {
-        var count = TokenEstimate.tokens(in: answer)
+        var count = TokenEstimate.tokens(in: modelInputText)
         if let runs = toolRuns {
             for run in runs {
                 let callText = run.rawCallText ?? "\(run.name) \(run.arguments)"
@@ -150,8 +204,13 @@ public struct Message: Identifiable, Codable, Sendable, Equatable {
         return count
     }
 
-    /// Whether this turn carries anything the engine should see — visible text, image attachments, or tool runs.
-    var hasVisibleContent: Bool { !answer.isEmpty || !(attachments?.isEmpty ?? true) || !(toolRuns?.isEmpty ?? true) }
+    /// Whether this turn carries anything the engine should see — visible text, image/file attachments, or tool runs.
+    var hasVisibleContent: Bool {
+        !answer.isEmpty
+            || !(attachments?.isEmpty ?? true)
+            || !(fileAttachments?.isEmpty ?? true)
+            || !(toolRuns?.isEmpty ?? true)
+    }
 }
 
 /// A chat thread (DESIGN §2.4). Persisted one-record-per-file by `ConversationStore`; a lightweight

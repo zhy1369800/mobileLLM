@@ -1105,10 +1105,11 @@ func makeAgentSnapshot(
         historyMessages = active
         systemPrompt += "\n\n" + ContextCompactor.summaryBlock(summary)
     }
+    let turnText = conversation.messages.first(where: { $0.id == userTurnID })?.modelInputText ?? text
     return AgentRunRequestSnapshot(
         conversationID: conversationID,
         userTurnID: userTurnID,
-        text: text,
+        text: turnText,
         imageRefs: imageRefs,
         messages: historyMessages,
         systemPrompt: systemPrompt,

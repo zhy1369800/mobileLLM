@@ -441,6 +441,7 @@ struct AppFrozenInputBuilder: Sendable {
             guard message.role != .system, message.id != snapshot.userTurnID else { return [] }
             let hasToolRuns = message.toolRuns?.isEmpty == false
             let hasAnswer = !message.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !(message.fileAttachments?.isEmpty ?? true)
             if message.role == .assistant && !hasAnswer && !hasToolRuns {
                 return []
             }
@@ -488,7 +489,7 @@ struct AppFrozenInputBuilder: Sendable {
                     messageID: MessageID(rawValue: message.id),
                     revision: "message.v1",
                     role: role,
-                    content: message.answer,
+                    content: message.modelInputText,
                     attachments: historyArtifacts[message.id] ?? []
                 )]
             }
