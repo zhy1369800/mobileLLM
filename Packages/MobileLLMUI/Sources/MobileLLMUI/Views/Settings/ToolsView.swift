@@ -95,15 +95,90 @@ struct ToolsView: View {
     // MARK: Search engines
 
     private var searchEnginesSection: some View {
-        section("Search engines", icon: "magnifyingglass") {
-            engineToggle("DuckDuckGo", .duckduckgo)
+        section("Web search", icon: "magnifyingglass") {
+            Picker("Search source", selection: cloudSearchBinding) {
+                Text("Built-in").tag(false)
+                Text("Cloud model").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .disabled(!webSearchOn || (settings.onlineServices.isEmpty && !usingCloudSearch))
+            .opacity(webSearchOn ? 1 : 0.5)
+
             Divider().background(Theme.hairline)
-            engineToggle("Bing", .bing)
-            Divider().background(Theme.hairline)
-            engineToggle("Brave", .brave)
+
+            if usingCloudSearch {
+                if settings.onlineServices.isEmpty {
+                    Text("No online services configured. Add one in Settings → Online Services.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    HStack {
+                        Text("Service")
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.textPrimary)
+                        Spacer()
+                        Picker("Service", selection: cloudServiceBinding) {
+                            ForEach(settings.onlineServices) { service in
+                                Text(serviceLabel(service)).tag(service.id)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .tint(Theme.accent)
+                    }
+                    .disabled(!webSearchOn)
+                    .opacity(webSearchOn ? 1 : 0.5)
+                }
+            } else {
+                engineToggle("DuckDuckGo", .duckduckgo)
+                Divider().background(Theme.hairline)
+                engineToggle("Bing", .bing)
+                Divider().background(Theme.hairline)
+                engineToggle("Brave", .brave)
+                if settings.onlineServices.isEmpty {
+                    Text("Add an online service in Settings → Online Services to use a cloud model for search.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             Text(searchFootnote).font(.caption).foregroundStyle(Theme.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private var usingCloudSearch: Bool { settings.webSearchOnlineServiceID != nil }
+
+    private var cloudSearchBinding: Binding<Bool> {
+        Binding(
+            get: { settings.webSearchOnlineServiceID != nil },
+            set: { useCloud in
+                if useCloud {
+                    if settings.webSearchOnlineServiceID == nil {
+                        settings.webSearchOnlineServiceID = settings.onlineServices.first?.id
+                    }
+                } else {
+                    settings.webSearchOnlineServiceID = nil
+                }
+            }
+        )
+    }
+
+    private var cloudServiceBinding: Binding<String> {
+        Binding(
+            get: { settings.webSearchOnlineServiceID ?? settings.onlineServices.first?.id ?? "" },
+            set: { newID in
+                settings.webSearchOnlineServiceID = newID.isEmpty ? nil : newID
+            }
+        )
+    }
+
+    private func serviceLabel(_ service: OnlineService) -> String {
+        if let modelID = service.modelID, !modelID.isEmpty {
+            return "\(service.name) (\(modelID))"
+        }
+        return service.name
     }
 
     private func engineToggle(_ name: String, _ engine: SearchEngine) -> some View {
@@ -119,10 +194,16 @@ struct ToolsView: View {
     private var webSearchOn: Bool { !settings.disabledBuiltInTools.contains(ToolID.webSearch.rawValue) }
 
     private var searchFootnote: String {
-        webSearchOn
-            ? "Web search reads these engines' public results pages directly (no API key), tries them in "
-              + "order, and hands the model the top links. Keep at least one on."
-            : "Turn on the Web search tool below to use these engines."
+        guard webSearchOn else {
+            return "Turn on the Web search tool below to configure web search."
+        }
+        if usingCloudSearch {
+            return "Search queries are sent to the selected online service for real-time lookup. "
+                 + "The first search in each conversation asks for your approval; failures report "
+                 + "an error without falling back to built-in engines."
+        }
+        return "Web search reads these engines' public results pages directly (no API key), tries them in "
+             + "order, and hands the model the top links. Keep at least one on."
     }
 
     /// Add/remove an engine while preserving the canonical priority order, and never removing the last one
