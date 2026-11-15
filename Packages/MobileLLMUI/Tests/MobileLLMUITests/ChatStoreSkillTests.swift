@@ -123,4 +123,31 @@ final class ChatStoreSkillTests: XCTestCase {
         XCTAssertNotNil(chat.activeConversation, "setting a skill with no active thread creates one")
         XCTAssertEqual(chat.activeSkill?.id, skill.id)
     }
+
+    // MARK: - Multi-skill support
+
+    func testMultiSkillToggleRemoveClearAndPromptComposition() throws {
+        let (chat, skills, _, dir) = makeChat()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let s1 = Skill(name: "Translator", emoji: "🌐", summary: "", instructions: "Translate to Chinese.")
+        let s2 = Skill(name: "Concise", emoji: "⚡", summary: "", instructions: "Keep it brief.")
+        skills.skills = [s1, s2]
+
+        _ = try XCTUnwrap(chat.newConversation())
+        chat.toggleActiveSkill(s1.id)
+        chat.toggleActiveSkill(s2.id)
+        XCTAssertEqual(chat.activeSkills.map(\.id), [s1.id, s2.id])
+
+        let prompt = ChatStore.systemPrompt(base: "Base", skills: chat.activeSkills)
+        XCTAssertTrue(prompt.contains("## Active skill: Translator\nTranslate to Chinese."))
+        XCTAssertTrue(prompt.contains("## Active skill: Concise\nKeep it brief."))
+
+        // Removing the first leaves only the second; clearing the last clears both skillID and skillIDs.
+        chat.removeActiveSkill(s1.id)
+        XCTAssertEqual(chat.activeSkills.map(\.id), [s2.id])
+        chat.removeActiveSkill(s2.id)
+        XCTAssertTrue(chat.activeSkills.isEmpty)
+        XCTAssertNil(chat.activeConversation?.skillID)
+        XCTAssertNil(chat.activeConversation?.skillIDs)
+    }
 }
