@@ -123,6 +123,49 @@ final class SettingsPersistenceTests: XCTestCase {
         XCTAssertEqual(reloaded.searchEngines, [.bing])
     }
 
+    // MARK: Online web-search backend
+
+    /// Fresh installs and pre-feature snapshots search with the built-in engines (nothing leaves the
+    /// device for a third-party model until the user picks one).
+    func testWebSearchBackendDefaultsToBuiltIn() {
+        XCTAssertNil(AppSettings(defaults: defaults).webSearchOnlineServiceID)
+        write(#"""
+        {"defaultModelID":"bonsai-8b","systemPrompt":"","thinkingDefault":true,
+         "thinkingDisplay":"autoCollapse","temperature":0.7,"topP":0.95,"topK":20,
+         "repetitionPenalty":1.05,"maxTokens":1024,"contextLength":8192,"kvBits":4,
+         "appearance":"system"}
+        """#)
+        let legacy = AppSettings(defaults: defaults)
+        XCTAssertNil(legacy.webSearchOnlineServiceID)
+        XCTAssertNil(legacy.webSearchOnlineService)
+    }
+
+    func testWebSearchBackendRoundTripsAndResolvesTheService() {
+        let settings = AppSettings(defaults: defaults)
+        settings.upsertOnlineService(OnlineService(
+            id: "svc-search", name: "Search", baseURL: "https://search.example.com/v1", modelID: "sonar"
+        ))
+        settings.webSearchOnlineServiceID = "svc-search"
+
+        let reloaded = AppSettings(defaults: defaults)
+        XCTAssertEqual(reloaded.webSearchOnlineServiceID, "svc-search")
+        XCTAssertEqual(reloaded.webSearchOnlineService?.modelID, "sonar")
+    }
+
+    /// Deleting the selected service reverts web search to built-in visibly, rather than leaving a
+    /// dangling id that would later resolve to nothing.
+    func testRemovingTheSelectedServiceRevertsWebSearchToBuiltIn() {
+        let settings = AppSettings(defaults: defaults)
+        settings.upsertOnlineService(OnlineService(
+            id: "svc-search", name: "Search", baseURL: "https://search.example.com/v1", modelID: "sonar"
+        ))
+        settings.webSearchOnlineServiceID = "svc-search"
+        settings.removeOnlineService(id: "svc-search")
+
+        XCTAssertNil(settings.webSearchOnlineServiceID)
+        XCTAssertNil(AppSettings(defaults: defaults).webSearchOnlineServiceID)
+    }
+
     /// The online-model toggle must survive a save/reload like every other setting; a fresh install
     /// starts with it off so no data egress happens by accident.
     func testOpenAIOnlineToggleRoundTripAndDefaultsOff() {

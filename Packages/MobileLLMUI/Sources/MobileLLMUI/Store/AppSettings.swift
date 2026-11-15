@@ -197,6 +197,10 @@ public final class AppSettings {
     /// Web-search engine priority — the first that returns results wins, the rest are fall-through. At least
     /// one is kept while `web_search` is on (the UI enforces it); an empty list falls back to both.
     public var searchEngines: [SearchEngine] { didSet { persist() } }
+    /// Where `web_search` gets its results. nil = the built-in engines above. Otherwise the id of an
+    /// online service that searches server-side: the query leaves the device for that service, so it
+    /// goes through the agent runtime's data-egress approval like any other online call.
+    public var webSearchOnlineServiceID: String? { didSet { persist() } }
 
     // MARK: Download & Mirror
     /// Whether to use domestic mirror (hf-mirror.com) for Hugging Face downloads and community queries.
@@ -344,6 +348,8 @@ public final class AppSettings {
     /// Remove a service (the caller also deletes its Keychain key).
     public func removeOnlineService(id: String) {
         onlineServices.removeAll { $0.id == id }
+        // A deleted service must not leave web search pointing at nothing; revert visibly to built-in.
+        if webSearchOnlineServiceID == id { webSearchOnlineServiceID = nil }
     }
 
     private func modelID(of service: OnlineService) -> String {
@@ -520,6 +526,7 @@ public final class AppSettings {
             loadedEngines = [.duckduckgo, .bing, .brave]
         }
         searchEngines = loadedEngines
+        webSearchOnlineServiceID = snap?.webSearchOnlineServiceID
         if let services = snap?.onlineServices, !services.isEmpty {
             onlineServices = services
         } else if snap?.openAIBaseURL != nil || snap?.openAIModelID != nil
@@ -672,6 +679,14 @@ public final class AppSettings {
         return BuiltInToolConfig(searchEngines: engines, enabled: enabled)
     }
 
+    /// The online service selected as the `web_search` backend, or nil when the built-in engines are used
+    /// (or the selection no longer exists). Deliberately NOT validated here: a selected-but-incomplete
+    /// service must fail loudly at call time rather than silently fall back to a different third party.
+    public var webSearchOnlineService: OnlineService? {
+        guard let id = webSearchOnlineServiceID else { return nil }
+        return onlineServices.first { $0.id == id }
+    }
+
     /// Whether the model may use what it remembers about the user — the one gate the prompt injector, the
     /// memory screen, and the tools all read, written by both the Manage-tools "Memory" switch and the
     /// Memory screen's own. Keyed on `recall` because reading memory is what it authorizes: the
@@ -721,6 +736,7 @@ public final class AppSettings {
         /// defaults (privacy tools off; both search engines on).
         var disabledBuiltInTools: Set<String>? = nil
         var searchEngines: [SearchEngine]? = nil
+        var webSearchOnlineServiceID: String? = nil
         var openAIBaseURL: String? = nil
         var openAIModelID: String? = nil
         var openAIOnlineEnabled: Bool? = nil
@@ -773,6 +789,7 @@ public final class AppSettings {
                             dictationLocale: dictationLocale,
                             mcpServers: scrubbed, mcpTokenMarkers: markers,
                             disabledBuiltInTools: disabledBuiltInTools, searchEngines: searchEngines,
+                            webSearchOnlineServiceID: webSearchOnlineServiceID,
                             openAIBaseURL: defaultService?.baseURL,
                             openAIModelID: defaultService?.modelID,
                             openAIOnlineEnabled: defaultService?.isEnabled ?? false,
@@ -835,6 +852,7 @@ public final class AppSettings {
         shortcutsServices = [ShortcutsService(name: "豆包", shortcutName: "发消息问豆包", isEnabled: false)]
         disabledBuiltInTools = Self.defaultDisabledBuiltInTools
         searchEngines = [.duckduckgo, .bing, .brave, .yahoo, .marginalia]
+        webSearchOnlineServiceID = nil
         temperature = 0.7
         topP = 0.95
         topK = 40
