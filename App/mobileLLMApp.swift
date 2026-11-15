@@ -1102,11 +1102,21 @@ func makeAgentSnapshot(
         mcpToolDescriptors: toolsEnabled
             ? container.mcpDiscovery.descriptors(for: container.settings.mcpServers)
             : [],
-        webSearchDestinations: toolsEnabled
-            ? (try? container.settings.builtInToolConfig.searchEngines.map {
+        webSearchDestinations: {
+            guard toolsEnabled else { return [] }
+            if let remoteID = container.settings.webSearchOnlineServiceID {
+                guard let remoteService = container.settings.onlineServices.first(where: { $0.id == remoteID }),
+                      let url = URL(string: remoteService.baseURL),
+                      let destination = try? AppToolV2Support.hostOnlyDestination(url) else {
+                    return []
+                }
+                return [destination]
+            }
+            return (try? container.settings.builtInToolConfig.searchEngines.map {
                 try AppWebSearchToolAdapter.destination(engine: $0)
             }) ?? []
-            : [],
+        }(),
+        webSearchOnlineServiceID: container.settings.webSearchOnlineServiceID,
         toolPolicy: conversation.toolPolicy,
         onlineModelEnabled: onlineParts != nil,
         onlineModelID: onlineModelID,

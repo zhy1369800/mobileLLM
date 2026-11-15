@@ -46,6 +46,8 @@ public struct AgentRunRequestSnapshot: Sendable {
     public let mcpToolDescriptors: [AgentToolDescriptor]
     /// Host-only destinations of the user's configured web-search engines (run-ceiling enumeration).
     public let webSearchDestinations: [ExternalDestination]
+    /// Optional online service id for cloud-backed web_search (nil = built-in search engines).
+    public let webSearchOnlineServiceID: String?
     /// The conversation-persistent tool policy (spec §14). App assembly snapshots the conversation's
     /// materialized policy; the runtime freezes it with the run.
     public let toolPolicy: ConversationToolPolicy?
@@ -101,6 +103,7 @@ public struct AgentRunRequestSnapshot: Sendable {
         shortcutSeamAvailable: Bool = true,
         mcpToolDescriptors: [AgentToolDescriptor],
         webSearchDestinations: [ExternalDestination],
+        webSearchOnlineServiceID: String? = nil,
         toolPolicy: ConversationToolPolicy?,
         onlineModelEnabled: Bool,
         onlineModelID: String?,
@@ -140,6 +143,7 @@ public struct AgentRunRequestSnapshot: Sendable {
         self.shortcutSeamAvailable = shortcutSeamAvailable
         self.mcpToolDescriptors = mcpToolDescriptors
         self.webSearchDestinations = webSearchDestinations
+        self.webSearchOnlineServiceID = webSearchOnlineServiceID
         self.toolPolicy = toolPolicy
         self.onlineModelEnabled = onlineModelEnabled
         self.onlineModelID = onlineModelID
@@ -192,6 +196,7 @@ extension AgentRunRequestSnapshot {
             shortcutSeamAvailable: shortcutSeamAvailable,
             mcpToolDescriptors: mcpToolDescriptors,
             webSearchDestinations: webSearchDestinations,
+            webSearchOnlineServiceID: webSearchOnlineServiceID,
             // Candidate/repair generation is a pure source-compilation pass. When its caller turns
             // tools off, discard the conversation policy too; otherwise the frozen manifest could
             // still advertise policy entries from the parent even though its catalog is empty.
