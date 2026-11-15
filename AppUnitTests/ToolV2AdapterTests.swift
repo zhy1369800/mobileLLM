@@ -348,6 +348,104 @@ final class ToolV2AdapterTests: XCTestCase {
         )
     }
 
+    func testWebSearchRemoteBackendSuccess() async throws {
+        let remoteURL = URL(string: "https://api.example.com")!
+        let remoteDestination = try AppToolV2Support.hostOnlyDestination(remoteURL)
+        let tool = WebSearchTool(engines: [.bing], session: URLSession(configuration: .ephemeral))
+        let adapter = try AppWebSearchToolAdapter(
+            tool: tool,
+            trustRevision: "builtin.v1",
+            remoteBackend: {
+                RemoteWebSearchBackend(destination: remoteDestination) { query in
+                    "Cloud result for \(query)"
+                }
+            }
+        )
+        let request = try makeRequest(descriptor: adapter.descriptor, arguments: [
+            "query": .string("swift 6"),
+        ])
+        let preparation = try makePreparationContext(
+            destinations: [remoteDestination],
+            dataCategories: [try AgentDataCategory(rawValue: "web.search")],
+            capabilities: AgentCapabilitySet([.networkRead])
+        )
+
+        let prepared = try await adapter.prepare(request: request, context: preparation)
+        XCTAssertEqual(prepared.externalOperation.plan.destination, remoteDestination)
+        XCTAssertTrue(prepared.externalOperation.plan.allowedFallbacks.isEmpty)
+
+        let outcome = try await execute(adapter, prepared: prepared)
+        guard case .completed(let results) = outcome,
+              case .text(let text) = results.first
+        else { return XCTFail("expected completed text, got \(outcome)") }
+        XCTAssertEqual(text.value, "Cloud result for swift 6")
+    }
+
+    func testWebSearchRemoteBackendFailureDoesNotFallbackToBuiltIn() async throws {
+        let remoteURL = URL(string: "https://api.example.com")!
+        let remoteDestination = try AppToolV2Support.hostOnlyDestination(remoteURL)
+        let tool = WebSearchTool(engines: [.bing], session: URLSession(configuration: .ephemeral))
+        let adapter = try AppWebSearchToolAdapter(
+            tool: tool,
+            trustRevision: "builtin.v1",
+            remoteBackend: {
+                RemoteWebSearchBackend(destination: remoteDestination) { _ in
+                    throw NSError(
+                        domain: "test",
+                        code: 500,
+                        userInfo: [NSLocalizedDescriptionKey: "upstream 500"]
+                    )
+                }
+            }
+        )
+        let request = try makeRequest(descriptor: adapter.descriptor, arguments: [
+            "query": .string("swift 6"),
+        ])
+        let preparation = try makePreparationContext(
+            destinations: [remoteDestination, try AppWebSearchToolAdapter.destination(engine: .bing)],
+            dataCategories: [try AgentDataCategory(rawValue: "web.search")],
+            capabilities: AgentCapabilitySet([.networkRead])
+        )
+
+        let prepared = try await adapter.prepare(request: request, context: preparation)
+        let outcome = try await execute(adapter, prepared: prepared)
+        guard case .failed(let failure) = outcome else {
+            return XCTFail("expected failure without built-in fallback, got \(outcome)")
+        }
+        XCTAssertEqual(failure.code, "tool.web-search.remote-failed")
+        XCTAssertTrue(failure.safeMessage.contains("upstream 500"))
+    }
+
+    func testWebSearchRemoteBackendUnauthorizedDestinationThrows() async throws {
+        let remoteURL = URL(string: "https://api.example.com")!
+        let remoteDestination = try AppToolV2Support.hostOnlyDestination(remoteURL)
+        let tool = WebSearchTool(engines: [.bing], session: URLSession(configuration: .ephemeral))
+        let adapter = try AppWebSearchToolAdapter(
+            tool: tool,
+            trustRevision: "builtin.v1",
+            remoteBackend: {
+                RemoteWebSearchBackend(destination: remoteDestination) { query in
+                    "Cloud result for \(query)"
+                }
+            }
+        )
+        let request = try makeRequest(descriptor: adapter.descriptor, arguments: [
+            "query": .string("swift 6"),
+        ])
+        let preparation = try makePreparationContext(
+            destinations: [try AppWebSearchToolAdapter.destination(engine: .bing)],
+            dataCategories: [try AgentDataCategory(rawValue: "web.search")],
+            capabilities: AgentCapabilitySet([.networkRead])
+        )
+
+        do {
+            _ = try await adapter.prepare(request: request, context: preparation)
+            XCTFail("expected capabilityEscalation when remote destination is not granted")
+        } catch AgentContractError.capabilityEscalation {
+            // expected
+        }
+    }
+
     // MARK: - Wikipedia
 
     func testWikipediaAdapterPreparesLanguageHostAndExecutes() async throws {

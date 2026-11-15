@@ -184,6 +184,33 @@ final class WebSearchToolTests: XCTestCase {
         let out = await tool().execute(argumentsJSON: "{}")
         XCTAssertTrue(out.contains("missing"))
     }
+
+    func testCustomExecutorSuccess() async {
+        let custom = WebSearchTool(engines: [.bing], session: .shared) { query in
+            "Cloud summary for \(query)"
+        }
+        let out = await custom.execute(argumentsJSON: #"{"query":"swift"}"#)
+        XCTAssertEqual(out, "Cloud summary for swift")
+    }
+
+    func testCustomExecutorFailureDoesNotFallbackToBuiltInEngines() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockSERPProtocol.self]
+        let custom = WebSearchTool(
+            engines: [.bing],
+            session: URLSession(configuration: config)
+        ) { _ in
+            throw NSError(
+                domain: "test",
+                code: 502,
+                userInfo: [NSLocalizedDescriptionKey: "remote search unavailable"]
+            )
+        }
+        let out = await custom.execute(argumentsJSON: #"{"query":"swift"}"#)
+        XCTAssertTrue(out.hasPrefix("Web search failed:"))
+        XCTAssertTrue(out.contains("remote search unavailable"))
+        XCTAssertFalse(out.contains("swift.org"))
+    }
 }
 
 // MARK: - Canned SERP fixtures (trimmed but structurally real)
