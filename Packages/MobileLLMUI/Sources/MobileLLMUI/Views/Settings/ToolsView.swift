@@ -113,18 +113,35 @@ struct ToolsView: View {
                         .foregroundStyle(Theme.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    HStack {
+                    HStack(spacing: Theme.Space.sm) {
                         Text("Service")
                             .font(.subheadline)
                             .foregroundStyle(Theme.textPrimary)
                         Spacer()
-                        Picker("Service", selection: cloudServiceBinding) {
+                        Menu {
                             ForEach(settings.onlineServices) { service in
-                                Text(serviceLabel(service)).tag(service.id)
+                                Button {
+                                    settings.webSearchOnlineServiceID = service.id
+                                } label: {
+                                    if settings.webSearchOnlineServiceID == service.id {
+                                        Label(serviceLabel(service), systemImage: "checkmark")
+                                    } else {
+                                        Text(serviceLabel(service))
+                                    }
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Text(currentCloudServiceLabel)
+                                    .font(.subheadline)
+                                    .foregroundStyle(Theme.accent)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                Image(systemName: "chevron.up.chevron.down")
+                                    .font(.caption2)
+                                    .foregroundStyle(Theme.textTertiary)
                             }
                         }
-                        .pickerStyle(.menu)
-                        .tint(Theme.accent)
                     }
                     .disabled(!webSearchOn)
                     .opacity(webSearchOn ? 1 : 0.5)
@@ -165,13 +182,14 @@ struct ToolsView: View {
         )
     }
 
-    private var cloudServiceBinding: Binding<String> {
-        Binding(
-            get: { settings.webSearchOnlineServiceID ?? settings.onlineServices.first?.id ?? "" },
-            set: { newID in
-                settings.webSearchOnlineServiceID = newID.isEmpty ? nil : newID
-            }
-        )
+    private var currentCloudServiceLabel: String {
+        if let current = settings.webSearchOnlineService {
+            return serviceLabel(current)
+        }
+        if let first = settings.onlineServices.first {
+            return serviceLabel(first)
+        }
+        return "Select service"
     }
 
     private func serviceLabel(_ service: OnlineService) -> String {
