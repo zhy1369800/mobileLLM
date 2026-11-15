@@ -21,6 +21,7 @@ public struct AgentRunRequestSnapshot: Sendable {
     public let systemPrompt: String
     public let memoryFacts: [MemoryFact]
     public let activeSkill: Skill?
+    public let activeSkills: [Skill]
     public let model: LLMModel
     public let variant: LLMVariant
     public let weightsDirectory: URL
@@ -85,6 +86,7 @@ public struct AgentRunRequestSnapshot: Sendable {
         systemPrompt: String,
         memoryFacts: [MemoryFact],
         activeSkill: Skill?,
+        activeSkills: [Skill]? = nil,
         model: LLMModel,
         variant: LLMVariant,
         weightsDirectory: URL,
@@ -124,7 +126,9 @@ public struct AgentRunRequestSnapshot: Sendable {
         self.messages = messages
         self.systemPrompt = systemPrompt
         self.memoryFacts = memoryFacts
-        self.activeSkill = activeSkill
+        let resolvedSkills = activeSkills ?? (activeSkill.map { [$0] } ?? [])
+        self.activeSkills = resolvedSkills
+        self.activeSkill = activeSkill ?? resolvedSkills.first
         self.model = model
         self.variant = variant
         self.weightsDirectory = weightsDirectory
@@ -178,6 +182,7 @@ extension AgentRunRequestSnapshot {
             systemPrompt: systemPrompt,
             memoryFacts: memoryFacts,
             activeSkill: activeSkill,
+            activeSkills: activeSkills,
             model: model,
             variant: variant,
             weightsDirectory: weightsDirectory,
@@ -418,15 +423,12 @@ struct AppFrozenInputBuilder: Sendable {
             revision: "app.system.v1",
             content: snapshot.systemPrompt
         )
-        let skills: [SkillInstructionContextSource]
-        if let skill = snapshot.activeSkill {
-            skills = [try SkillInstructionContextSource(
+        let skills = try snapshot.activeSkills.map { skill in
+            try SkillInstructionContextSource(
                 skillID: skill.id.uuidString,
                 version: "skill.v1",
                 instructions: skill.instructions
-            )]
-        } else {
-            skills = []
+            )
         }
         let memories = snapshot.memoryFacts.map {
             try? CanonicalEnglishMemoryContextSource(

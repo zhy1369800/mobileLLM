@@ -2709,51 +2709,91 @@ public final class ChatStore {
 
     // MARK: - Skills (per-conversation instruction packs; Skills v1)
 
-    /// The skill activated for the active thread, or nil when none is set OR the referenced skill was
-    /// deleted (nil-safe resolution: a dangling `skillID` simply resolves to no skill, and composition
-    /// falls back to the base system prompt).
-    public var activeSkill: Skill? {
-        guard let id = activeConversation?.skillID else { return nil }
-        return skillStore?.skill(id: id)
+    /// Skills activated for the active thread, resolved nil-safely against `skillStore`.
+    public var activeSkills: [Skill] {
+        guard let ids = activeConversation?.activeSkillIDs, !ids.isEmpty else { return [] }
+        return ids.compactMap { skillStore?.skill(id: $0) }
     }
+
+    /// First activated skill for callers expecting a single optional skill.
+    public var activeSkill: Skill? { activeSkills.first }
 
     /// Every skill available to pick from the composer menu (empty when no store is wired).
     public var availableSkills: [Skill] { skillStore?.skills ?? [] }
 
-    /// Persist a per-conversation skill selection (nil clears it). Does NOT bump `updatedAt` — activating a
+    /// Persist a per-conversation multi-skill selection. Does NOT bump `updatedAt` — activating a
     /// skill is a config change, not a message, so it must not reorder the conversation list.
-    public func setSkill(_ skillID: UUID?, for conversationID: UUID) {
-        guard let i = conversations.firstIndex(where: { $0.id == conversationID }),
-              conversations[i].skillID != skillID else { return }
-        conversations[i].skillID = skillID
+    public func setSkills(_ skillIDs: [UUID], for conversationID: UUID) {
+        guard let i = conversations.firstIndex(where: { $0.id == conversationID }) else { return }
+        let before = conversations[i].activeSkillIDs
+        conversations[i].activeSkillIDs = skillIDs
+        guard conversations[i].activeSkillIDs != before else { return }
         persist(conversations[i])
     }
 
-    /// Set the skill on the ACTIVE thread from the composer, creating an empty thread first if there isn't
-    /// one — so the Skill menu works before the first message (mirrors how `send` lazily creates a thread).
+    /// Persist a per-conversation single-skill selection (nil clears all).
+    public func setSkill(_ skillID: UUID?, for conversationID: UUID) {
+        setSkills(skillID.map { [$0] } ?? [], for: conversationID)
+    }
+
+    /// Set a single skill on the ACTIVE thread (nil clears all).
     public func setActiveSkill(_ skillID: UUID?) {
         guard let convo = activeConversation ?? newConversation() else { return }
         setSkill(skillID, for: convo.id)
     }
 
-    /// The system prompt for a turn: the base prompt, the active skill's instruction fragment, and the
+    /// Toggle one skill in the ACTIVE thread's multi-skill selection.
+    public func toggleActiveSkill(_ skillID: UUID) {
+        guard let convo = activeConversation ?? newConversation() else { return }
+        var ids = convo.activeSkillIDs
+        if let idx = ids.firstIndex(of: skillID) {
+            ids.remove(at: idx)
+        } else {
+            ids.append(skillID)
+        }
+        setSkills(ids, for: convo.id)
+    }
+
+    /// Ensure a skill is included in the ACTIVE thread's multi-skill selection (idempotent).
+    public func activateSkill(_ skillID: UUID) {
+        guard let convo = activeConversation ?? newConversation() else { return }
+        var ids = convo.activeSkillIDs
+        guard !ids.contains(skillID) else { return }
+        ids.append(skillID)
+        setSkills(ids, for: convo.id)
+    }
+
+    /// Remove one skill from the ACTIVE thread's multi-skill selection.
+    public func removeActiveSkill(_ skillID: UUID) {
+        guard let convo = activeConversation else { return }
+        var ids = convo.activeSkillIDs
+        ids.removeAll { $0 == skillID }
+        setSkills(ids, for: convo.id)
+    }
+
+    /// The system prompt for a turn: the base prompt, all active skills' instruction fragments, and the
     /// facts worth remembering for `query` (blank — the default — means the freshest few). Both the
     /// generation path (`startGeneration`) and the context meter (`contextUsage`) route through this, so
     /// every part is charged to the window exactly once and shown honestly.
     func composedSystemPrompt(query: String = "", memoryEnabled: Bool? = nil) -> String {
-        Self.systemPrompt(base: effectiveBaseSystemPrompt, skill: activeSkill,
+        Self.systemPrompt(base: effectiveBaseSystemPrompt, skills: activeSkills,
                           memoryBlock: memoryBlock(for: query, enabled: memoryEnabled))
     }
 
-    /// Pure composition (unit-tested): `base` + `"\n\n## Active skill: <name>\n<instructions>"` when a skill
-    /// is active, then the memory block. A blank base (system prompt "off") yields just the fragments, so a
-    /// skill — and memory — still work. Nonisolated + pure so the composition contract is unit-testable off
-    /// the main actor.
+    /// Pure composition (unit-tested) for a single optional skill (back-compat).
     nonisolated static func systemPrompt(base: String, skill: Skill?, memoryBlock: String? = nil) -> String {
+        systemPrompt(base: base, skills: skill.map { [$0] } ?? [], memoryBlock: memoryBlock)
+    }
+
+    /// Pure composition (unit-tested): `base` + `"\n\n## Active skill: <name>\n<instructions>"` for each
+    /// active skill, then the memory block.
+    nonisolated static func systemPrompt(base: String, skills: [Skill], memoryBlock: String? = nil) -> String {
         var parts: [String] = []
         let trimmedBase = base.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedBase.isEmpty { parts.append(base) }
-        if let skill { parts.append("## Active skill: \(skill.name)\n\(skill.instructions)") }
+        for skill in skills {
+            parts.append("## Active skill: \(skill.name)\n\(skill.instructions)")
+        }
         if let memoryBlock, !memoryBlock.isEmpty { parts.append(memoryBlock) }
         return parts.joined(separator: "\n\n")
     }
@@ -2788,7 +2828,7 @@ public final class ChatStore {
         let isOnline: Bool
         let recentUserTurns: [String]
         let baseSystemPrompt: String
-        let activeSkill: Skill?
+        let activeSkills: [Skill]
         let memoryEnabled: Bool
         let memoryFacts: [MemoryFact]
         let toolSchemaTokens: Int
@@ -2857,7 +2897,7 @@ public final class ChatStore {
         // so typing in the composer never invalidates `ContextMeterBar` or re-runs `MemoryRanking.rank`
         // on the main thread on every keystroke.
         let baseSystemPrompt = effectiveBaseSystemPrompt
-        let skill = activeSkill
+        let skills = activeSkills
         let memoryOn = settings.memoryEnabled
         let facts = memoryOn ? (memoryBook?.facts ?? []) : []
         let toolSchemaTokens = settings.toolsEnabled ? (agentToolSchemaTokens?() ?? 0) : 0
@@ -2869,7 +2909,7 @@ public final class ChatStore {
            cache.isOnline == online,
            cache.recentUserTurns == recentUserTurns,
            cache.baseSystemPrompt == baseSystemPrompt,
-           cache.activeSkill == skill,
+           cache.activeSkills == skills,
            cache.memoryEnabled == memoryOn,
            cache.memoryFacts == facts,
            cache.toolSchemaTokens == toolSchemaTokens {
@@ -2877,7 +2917,7 @@ public final class ChatStore {
         } else {
             let query = recentUserTurns.filter { !$0.isEmpty }.joined(separator: " ")
             let memBlock = (!facts.isEmpty) ? Self.memoryBlock(facts, query: query) : nil
-            let system = Self.systemPrompt(base: baseSystemPrompt, skill: skill, memoryBlock: memBlock)
+            let system = Self.systemPrompt(base: baseSystemPrompt, skills: skills, memoryBlock: memBlock)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let computedOverhead = ContextPolicy.fixedOverheadTokens(
                 systemPromptTokens: ContextCompactor.tokens(in: system, role: .system),
@@ -2892,7 +2932,7 @@ public final class ChatStore {
                 isOnline: online,
                 recentUserTurns: recentUserTurns,
                 baseSystemPrompt: baseSystemPrompt,
-                activeSkill: skill,
+                activeSkills: skills,
                 memoryEnabled: memoryOn,
                 memoryFacts: facts,
                 toolSchemaTokens: toolSchemaTokens,

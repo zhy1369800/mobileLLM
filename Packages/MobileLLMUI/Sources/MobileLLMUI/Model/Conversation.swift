@@ -186,6 +186,9 @@ public struct Conversation: Identifiable, Codable, Sendable, Equatable {
     /// nil, and a skill-less thread re-encodes byte-identically (the synthesized Codable omits a nil key,
     /// exactly like `Message.attachments`).
     public var skillID: UUID?
+    /// Multi-skill selection for this thread (Skills v2). When empty or 1 item, kept nil so
+    /// single-skill and skill-less records stay byte-compatible with v1 Codable snapshots.
+    public var skillIDs: [UUID]?
     /// The conversation-persistent tool policy (spec §14). Optional so pre-agent records decode as
     /// nil; a legacy conversation materializes the current global template exactly once on its first
     /// agent-runtime run, then persists the marker.
@@ -218,7 +221,7 @@ public struct Conversation: Identifiable, Codable, Sendable, Equatable {
     public init(id: UUID = UUID(), title: String = "New Chat", createdAt: Date = Date(),
                 updatedAt: Date = Date(), systemPromptID: String? = nil, modelID: String,
                 variantID: String, messages: [Message] = [], pinned: Bool = false,
-                skillID: UUID? = nil, toolPolicy: ConversationToolPolicy? = nil,
+                skillID: UUID? = nil, skillIDs: [UUID]? = nil, toolPolicy: ConversationToolPolicy? = nil,
                 onlineReasoningEnabled: Bool? = nil, contextLength: Int? = nil,
                 sampling: ConversationSampling? = nil,
                 approvalMode: AgentApprovalMode? = nil,
@@ -236,6 +239,7 @@ public struct Conversation: Identifiable, Codable, Sendable, Equatable {
         self.messages = messages
         self.pinned = pinned
         self.skillID = skillID
+        self.skillIDs = skillIDs
         self.toolPolicy = toolPolicy
         self.onlineReasoningEnabled = onlineReasoningEnabled
         self.contextLength = contextLength
@@ -249,6 +253,32 @@ public struct Conversation: Identifiable, Codable, Sendable, Equatable {
 
     /// The conversation's project tags (empty when none are stored).
     public var projectTagList: [String] { projectTags ?? [] }
+
+    /// Ordered, deduplicated skill ids active for this conversation (v1 `skillID` + v2 `skillIDs`).
+    public var activeSkillIDs: [UUID] {
+        get {
+            if let ids = skillIDs, !ids.isEmpty {
+                var seen = Set<UUID>()
+                return ids.filter { seen.insert($0).inserted }
+            }
+            if let id = skillID { return [id] }
+            return []
+        }
+        set {
+            var seen = Set<UUID>()
+            let deduped = newValue.filter { seen.insert($0).inserted }
+            if deduped.isEmpty {
+                skillID = nil
+                skillIDs = nil
+            } else if deduped.count == 1 {
+                skillID = deduped[0]
+                skillIDs = nil
+            } else {
+                skillID = deduped[0]
+                skillIDs = deduped
+            }
+        }
+    }
 
     /// A one-line preview for the conversation list (last user or assistant text).
     public var preview: String {
