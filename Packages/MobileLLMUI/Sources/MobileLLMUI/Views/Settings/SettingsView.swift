@@ -4,12 +4,9 @@ import SwiftUI
 import Combine
 import AppUI
 import LLMCore
-#if os(iOS)
-import UIKit
-#endif
 
-/// Settings (DESIGN §4): default model, chat behavior, sampling (progressive-disclosure Advanced),
-/// appearance, data & privacy, and about. Section/row builders in a clean studio style.
+/// Settings (DESIGN §4): assistant, models/connections, conversation/reasoning, generation/engine,
+/// app/system, data & privacy, and about. Section/row builders in a clean studio style.
 struct SettingsView: View {
     let container: AppContainer
     @Bindable var settings: AppSettings
@@ -22,10 +19,8 @@ struct SettingsView: View {
     @State private var showSkills = false
     @State private var showMemory = false
     @State private var showOpenAI = false
+    @State private var showShortcuts = false
     @State private var showLocalLogs = false
-    @State private var newShortcutName = ""
-    @State private var newShortcutTarget = ""
-    @FocusState private var isShortcutFieldFocused: Bool
 
     init(container: AppContainer) {
         self.container = container
@@ -35,11 +30,11 @@ struct SettingsView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.xl) {
-                behaviorSection
-                onlineSection
-                shortcutsSection
+                assistantSection
+                modelsSection
+                conversationSection
                 samplingSection
-                appearanceSection
+                systemSection
                 privacySection
                 aboutSection
             }
@@ -47,8 +42,6 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity)
             .padding(Theme.Space.xl)
         }
-        .simultaneousGesture(TapGesture().onEnded { dismissKeyboard() })
-        .scrollDismissesKeyboard(.interactively)   // drag to dismiss the system-prompt keyboard
         .background(Theme.bg)
         .task {
             storageBytes = await container.conversationStore.storageBytes()
@@ -115,6 +108,14 @@ struct SettingsView: View {
             .frame(minWidth: 520, minHeight: 440)
             #endif
         }
+        .sheet(isPresented: $showShortcuts) {
+            NavigationStack {
+                ShortcutsServicesSheet(settings: settings)
+            }
+            #if os(macOS)
+            .frame(minWidth: 520, minHeight: 440)
+            #endif
+        }
         .sheet(isPresented: $showLocalLogs) {
             NavigationStack {
                 LocalModelLogsView(logStore: container.localModelLogs)
@@ -142,236 +143,55 @@ struct SettingsView: View {
     // last-used identity. Launch restores that identity without loading weights and leaves history
     // unselected. `settings.defaultModelID` is the auto-tracked fallback, never user-facing.
 
-    // MARK: Behavior
+    // MARK: Assistant & Capabilities
 
-    private var behaviorSection: some View {
-        section("Behavior", icon: "text.bubble") {
+    private var assistantSection: some View {
+        section("Assistant & Capabilities", icon: "sparkles") {
             // A row, not an inline editor — the full-height TextEditor ate half the settings screen.
-            Button { showSystemPrompt = true } label: {
-                HStack(spacing: Theme.Space.sm) {
-                    Image(systemName: "text.quote")
-                        .font(.subheadline).foregroundStyle(Theme.accent).frame(width: 22)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("System prompt").font(.subheadline).foregroundStyle(Theme.textPrimary)
-                        Text(systemPromptSummary).font(.caption).foregroundStyle(Theme.textTertiary)
-                            .lineLimit(1)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(Theme.textTertiary)
-                }
-                .contentShape(Rectangle())
+            navRow("System prompt", subtitle: systemPromptSummary, icon: "text.quote") {
+                showSystemPrompt = true
             }
-            .buttonStyle(.plain)
-            Divider().background(Theme.hairline)
-            skillsRow
-            Divider().background(Theme.hairline)
-            memoryRow
-            Divider().background(Theme.hairline)
-            Toggle(isOn: $settings.thinkingDefault) {
-                Text("Thinking mode by default").font(.subheadline).foregroundStyle(Theme.textPrimary)
+            hairline
+            navRow("Skills", subtitle: SkillsView.summary(for: container.skills), icon: "sparkles") {
+                showSkills = true
             }
-            .tint(Theme.accent)
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Show reasoning").font(.subheadline).foregroundStyle(Theme.textSecondary)
-                Segmented(selection: $settings.thinkingDisplay, options: ThinkingDisplayMode.allCases) { $0.label }
+            hairline
+            navRow("Memory", subtitle: MemoryView.summary(book: container.memory, settings: settings), icon: "bookmark") {
+                showMemory = true
             }
-            Divider().background(Theme.hairline)
-            Toggle(isOn: $settings.toolsEnabled) {
-                Text("Allow selected tools").font(.subheadline).foregroundStyle(Theme.textPrimary)
+            // The count comes from a mirror of the durable store; a chat that saved a fact while Settings was
+            // on screen must not leave the row reading "Nothing saved yet".
+            .task { await container.memory.refresh() }
+            hairline
+            toggleRow("Allow selected tools", isOn: $settings.toolsEnabled)
+            hairline
+            navRow("Choose tools", subtitle: ToolsView.summary(for: settings), icon: "wrench.and.screwdriver") {
+                showTools = true
             }
-            .tint(Theme.accent)
-            manageToolsRow
-            Divider().background(Theme.hairline)
-            Toggle(isOn: $settings.autoCompactionEnabled) {
-                Text("Auto-compact conversations").font(.subheadline).foregroundStyle(Theme.textPrimary)
-            }
-            .tint(Theme.accent)
-            if settings.autoCompactionEnabled {
-                compactionModelPickerRow
-            }
-            Divider().background(Theme.hairline)
-            Toggle(isOn: $settings.localModelLoggingEnabled) {
-                Text("Record local model logs").font(.subheadline).foregroundStyle(Theme.textPrimary)
-            }
-            .tint(Theme.accent)
-            localModelLogsRow
-            #if os(iOS)
-            Divider().background(Theme.hairline)
-            Toggle(isOn: Binding(
-                get: { settings.continuedProcessingEnabled },
-                set: { newValue in
-                    settings.continuedProcessingEnabled = newValue
-                    container.continuedProcessing.setEnabled(
-                        newValue,
-                        activeConversationID: container.chat.activeID
-                    )
-                }
-            )) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Continue work in background (iOS 26)")
-                        .font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("Keep active generation runs processing after leaving the app.")
-                        .font(.caption).foregroundStyle(Theme.textTertiary)
-                }
-            }
-            .tint(Theme.accent)
-            if let status = continuedProcessingStatus {
-                Text(status)
-                    .font(.caption)
-                    .foregroundStyle(continuedProcessingHasError ? Theme.danger : Theme.textTertiary)
-            }
-            #endif
-            #if os(iOS)
-            Divider().background(Theme.hairline)
-            Toggle(isOn: Binding(
-                get: { settings.quickNotificationEnabled },
-                set: { newValue in
-                    settings.quickNotificationEnabled = newValue
-                    if newValue {
-                        Task { await QuickNotificationCoordinator.requestAuthorization() }
-                    } else {
-                        QuickNotificationCoordinator.dismissNotification()
-                    }
-                }
-            )) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Quick notification assistant")
-                        .font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("Interactive notification for multi-turn chat when in background.")
-                        .font(.caption).foregroundStyle(Theme.textTertiary)
-                }
-            }
-            .tint(Theme.accent)
-            Divider().background(Theme.hairline)
-            Toggle(isOn: Binding(
-                get: { settings.pipWindowEnabled },
-                set: { newValue in
-                    settings.pipWindowEnabled = newValue
-                    PiPCoordinator.shared.setEnabled(newValue)
-                    if !newValue {
-                        PiPCoordinator.shared.stopPiP()
-                    }
-                }
-            )) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Picture-in-Picture floating window")
-                        .font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("Floating window showing live thinking and response.")
-                        .font(.caption).foregroundStyle(Theme.textTertiary)
-                }
-            }
-            .tint(Theme.accent)
-            #endif
-            Divider().background(Theme.hairline)
-            Toggle(isOn: $settings.useHuggingFaceMirror) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Use domestic mirror for models")
-                        .font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("Accelerate model downloads via hf-mirror.com.")
-                        .font(.caption).foregroundStyle(Theme.textTertiary)
-                }
-            }
-            .tint(Theme.accent)
         }
     }
 
-    #if os(iOS)
-    private var continuedProcessingStatus: String? {
-        let coordinator = container.continuedProcessing
-        switch coordinator.phase {
-        case .idle, .finished:
-            return nil
-        case .submitted:
-            return "Waiting for the system to grant continued processing…"
-        case .running:
-            return "A run is continuing in the background; the system shows its progress."
-        case .rejected(let diagnostic):
-            return "Not started: \(diagnostic)"
-        case .expired:
-            return "The system ended background processing; the run is paused and can be resumed."
-        case .cancelled:
-            return "Background continuation was cancelled."
-        }
-    }
+    // MARK: Models & Connections
 
-    private var continuedProcessingHasError: Bool {
-        switch container.continuedProcessing.phase {
-        case .rejected, .expired, .cancelled: true
-        case .idle, .submitted, .running, .finished: false
-        }
-    }
-    #endif
-
-    // MARK: Skills
-
-    private var skillsRow: some View {
-        Button { showSkills = true } label: {
-            HStack(spacing: Theme.Space.sm) {
-                Image(systemName: "sparkles")
-                    .font(.subheadline).foregroundStyle(Theme.accent).frame(width: 22)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Skills").font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text(SkillsView.summary(for: container.skills))
-                        .font(.caption).foregroundStyle(Theme.textTertiary).lineLimit(1)
-                }
-                Spacer()
-                Image(systemName: "chevron.right").font(.caption).foregroundStyle(Theme.textTertiary)
+    private var modelsSection: some View {
+        section("Models & Connections", icon: "network") {
+            navRow("Online services", subtitle: onlineSummary, icon: "key.horizontal") {
+                showOpenAI = true
             }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    // MARK: Memory
-
-    /// Its own row in Behavior, beside System prompt and Skills — memory is a thing the app knows about
-    /// you, not a tool setting, and it was unreviewable while its only surface was a switch two screens
-    /// deep in Choose tools. The switch stays there; what's remembered lives here.
-    private var memoryRow: some View {
-        Button { showMemory = true } label: {
-            HStack(spacing: Theme.Space.sm) {
-                Image(systemName: "bookmark")
-                    .font(.subheadline).foregroundStyle(Theme.accent).frame(width: 22)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Memory").font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text(MemoryView.summary(book: container.memory, settings: settings))
-                        .font(.caption).foregroundStyle(Theme.textTertiary).lineLimit(1)
-                }
-                Spacer()
-                Image(systemName: "chevron.right").font(.caption).foregroundStyle(Theme.textTertiary)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        // The count comes from a mirror of the durable store; a chat that saved a fact while Settings was
-        // on screen must not leave the row reading "Nothing saved yet".
-        .task { await container.memory.refresh() }
-    }
-
-    // MARK: Choose tools
-
-    // MARK: Online models
-
-    @ViewBuilder private var onlineSection: some View {
-        section("Online models", icon: "network") {
-            Divider().background(Theme.hairline)
-            Button { showOpenAI = true } label: {
-                HStack(spacing: Theme.Space.sm) {
-                    Image(systemName: "key.horizontal")
-                        .font(.subheadline).foregroundStyle(Theme.accent).frame(width: 22)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Online services").font(.subheadline).foregroundStyle(Theme.textPrimary)
-                        Text(onlineSummary)
-                            .font(.caption).foregroundStyle(Theme.textTertiary)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(Theme.textTertiary)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
             .accessibilityLabel("Online services")
             .accessibilityValue("\(settings.onlineServices.count) services")
+            hairline
+            navRow("Shortcuts models", subtitle: shortcutsSummary, icon: "command") {
+                showShortcuts = true
+            }
+            .accessibilityLabel("Shortcuts models")
+            .accessibilityValue("\(settings.shortcutsServices.count) models")
+            hairline
+            toggleRow(
+                "Use domestic mirror for models",
+                subtitle: "Accelerate model downloads via hf-mirror.com.",
+                isOn: $settings.useHuggingFaceMirror
+            )
         }
     }
 
@@ -385,81 +205,31 @@ struct SettingsView: View {
         return "\(settings.onlineServices.count) service\(settings.onlineServices.count == 1 ? "" : "s") · Off"
     }
 
-    // MARK: Shortcuts models
-
-    @ViewBuilder private var shortcutsSection: some View {
-        section("Shortcuts models", icon: "command") {
-            if settings.shortcutsServices.isEmpty {
-                Text("No shortcut models configured.")
-                    .font(.caption).foregroundStyle(Theme.textTertiary)
-            } else {
-                ForEach(settings.shortcutsServices) { service in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(service.name).font(.subheadline.weight(.medium)).foregroundStyle(Theme.textPrimary)
-                            Text("Shortcut: \(service.shortcutName)").font(.caption).foregroundStyle(Theme.textTertiary)
-                        }
-                        Spacer()
-                        Button(role: .destructive) {
-                            settings.removeShortcutsService(id: service.id)
-                        } label: {
-                            Image(systemName: "trash").font(.subheadline).foregroundStyle(Theme.danger)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    Divider().background(Theme.hairline)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: Theme.Space.sm) {
-                Text("Add shortcut model").font(.caption.weight(.semibold)).foregroundStyle(Theme.textSecondary)
-                HStack(spacing: Theme.Space.sm) {
-                    TextField("Model name (e.g. 豆包)", text: $newShortcutName)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($isShortcutFieldFocused)
-                    TextField("Shortcut (e.g. 发消息问豆包)", text: $newShortcutTarget)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($isShortcutFieldFocused)
-                }
-                Button {
-                    let name = newShortcutName.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let target = newShortcutTarget.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !name.isEmpty && !target.isEmpty else { return }
-                    settings.upsertShortcutsService(ShortcutsService(name: name, shortcutName: target))
-                    newShortcutName = ""
-                    newShortcutTarget = ""
-                    isShortcutFieldFocused = false
-                    dismissKeyboard()
-                } label: {
-                    Label("Add Model", systemImage: "plus")
-                        .font(.caption.weight(.medium))
-                }
-                .disabled(newShortcutName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || newShortcutTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-
-            Text("Passes message in 'msg' (and image in 'fileName') to this shortcut, with automatic tool calling loop support.")
-                .font(.caption).foregroundStyle(Theme.textTertiary)
+    private var shortcutsSummary: String {
+        let count = settings.shortcutsServices.count
+        if count == 0 {
+            return "No shortcut models configured"
         }
+        return "\(count) shortcut model\(count == 1 ? "" : "s")"
     }
 
-    // MARK: Choose tools
+    // MARK: Conversation & Reasoning
 
-    @ViewBuilder private var manageToolsRow: some View {
-        Divider().background(Theme.hairline)
-        Button { showTools = true } label: {
-            HStack(spacing: Theme.Space.sm) {
-                Image(systemName: "wrench.and.screwdriver")
-                    .font(.subheadline).foregroundStyle(Theme.accent).frame(width: 22)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Choose tools").font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text(ToolsView.summary(for: settings)).font(.caption).foregroundStyle(Theme.textTertiary)
-                }
-                Spacer()
-                Image(systemName: "chevron.right").font(.caption).foregroundStyle(Theme.textTertiary)
+    private var conversationSection: some View {
+        section("Conversation & Reasoning", icon: "text.bubble") {
+            toggleRow("Thinking mode by default", isOn: $settings.thinkingDefault)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Show reasoning").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                Segmented(selection: $settings.thinkingDisplay, options: ThinkingDisplayMode.allCases) { $0.label }
             }
-            .contentShape(Rectangle())
+            hairline
+            toggleRow("Auto-compact conversations", isOn: $settings.autoCompactionEnabled)
+            if settings.autoCompactionEnabled {
+                compactionModelPickerRow
+            }
+            hairline
+            contextRow
         }
-        .buttonStyle(.plain)
     }
 
     private var isCompactionTargetMissing: Bool {
@@ -555,23 +325,9 @@ struct SettingsView: View {
     }
 
     @ViewBuilder private var localModelLogsRow: some View {
-        Divider().background(Theme.hairline)
-        Button { showLocalLogs = true } label: {
-            HStack(spacing: Theme.Space.sm) {
-                Image(systemName: "doc.text.magnifyingglass")
-                    .font(.subheadline).foregroundStyle(Theme.accent).frame(width: 22)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Local model request logs")
-                        .font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text(localLogsSummary)
-                        .font(.caption).foregroundStyle(Theme.textTertiary)
-                }
-                Spacer()
-                Image(systemName: "chevron.right").font(.caption).foregroundStyle(Theme.textTertiary)
-            }
-            .contentShape(Rectangle())
+        navRow("Local model request logs", subtitle: localLogsSummary, icon: "doc.text.magnifyingglass") {
+            showLocalLogs = true
         }
-        .buttonStyle(.plain)
     }
 
     private var localLogsSummary: String {
@@ -579,13 +335,16 @@ struct SettingsView: View {
         return count == 0 ? "No logs recorded" : "\(count) logged"
     }
 
-    // MARK: Sampling
+    // MARK: Generation & Engine
 
     private var samplingSection: some View {
-        section("Sampling", icon: "slider.horizontal.3") {
+        section("Generation & Engine", icon: "slider.horizontal.3") {
             sliderRow("Temperature", value: $settings.temperature, range: 0...1.5, step: 0.05, format: "%.2f")
+            hairline
             sliderRow("Top-p", value: $settings.topP, range: 0...1, step: 0.01, format: "%.2f")
+            hairline
             stepperRow("Max tokens", value: $settings.maxTokens, range: 128...4096, step: 128)
+            hairline
             HStack {
                 Text("Thinking budget").font(.subheadline).foregroundStyle(Theme.textSecondary)
                 Spacer()
@@ -596,16 +355,12 @@ struct SettingsView: View {
                     Divider()
                     Button("Auto (up to Max tokens)") { settings.thinkingBudget = 0 }
                 } label: {
-                    HStack(spacing: 4) {
-                        Text(settings.thinkingBudget == 0 ? "Auto" : "\(settings.thinkingBudget)")
-                            .font(.subheadline).foregroundStyle(Theme.accent)
-                        Image(systemName: "chevron.up.chevron.down").font(.caption2)
-                            .foregroundStyle(Theme.textTertiary)
-                    }
+                    menuLabel(settings.thinkingBudget == 0 ? "Auto" : "\(settings.thinkingBudget)")
                 }
                 .fixedSize()
             }
             if settings.openAIOnlineEnabled {
+                hairline
                 HStack {
                     Text("Online max output").font(.subheadline).foregroundStyle(Theme.textSecondary)
                     Spacer()
@@ -618,76 +373,82 @@ struct SettingsView: View {
                             Button("\(value)") { settings.onlineMaxTokens = value }
                         }
                     } label: {
-                        Text(settings.onlineMaxTokens == 0 ? "Auto" : "\(settings.onlineMaxTokens)")
-                            .font(.subheadline).foregroundStyle(Theme.accent)
+                        menuLabel(settings.onlineMaxTokens == 0 ? "Auto" : "\(settings.onlineMaxTokens)")
                     }
                     .fixedSize()
                 }
             }
-            contextRow
-            DisclosureGroup("Advanced") {
+            hairline
+            DisclosureGroup("Advanced & Diagnostics") {
                 VStack(alignment: .leading, spacing: Theme.Space.md) {
                     stepperRow("Top-k", value: $settings.topK, range: 0...100, step: 5)
+                    hairline
                     sliderRow("Repetition penalty", value: $settings.repetitionPenalty, range: 1...1.5, step: 0.01, format: "%.2f")
-                    HStack {
-                        Text("KV cache").font(.subheadline).foregroundStyle(Theme.textSecondary)
-                        Spacer()
-                        Menu {
-                            Button("Full (unquantized)") { settings.kvBits = 0 }
-                            Button("4-bit") { settings.kvBits = 4 }
-                            Button("6-bit (K4+V8)") { settings.kvBits = 6 }
-                            Button("8-bit") { settings.kvBits = 8 }
-                        } label: {
-                            Text(settings.kvBits == 0 ? "Full"
-                                 : settings.kvBits == 6 ? "6-bit (K4+V8)"
-                                 : "\(settings.kvBits)-bit")
-                                .font(.subheadline).foregroundStyle(Theme.accent)
-                        }
-                        .fixedSize()
-                    }
-                    Text("8-bit recommended (balanced quality & RAM); 4-bit saves memory.")
-                        .font(.caption).foregroundStyle(Theme.textTertiary)
-                    HStack {
-                        Text("Speculative decoding").font(.subheadline).foregroundStyle(Theme.textSecondary)
-                        Spacer()
-                        Menu {
-                            Button(SpeculativeMode.off.displayName) { settings.speculativeMode = .off }
-                            Button(SpeculativeMode.promptLookup.displayName) { settings.speculativeMode = .promptLookup }
-                            Button(SpeculativeMode.mtp.displayName) { settings.speculativeMode = .mtp }
-                        } label: {
-                            Text(settings.speculativeMode.displayName)
-                                .font(.subheadline).foregroundStyle(Theme.accent)
-                        }
-                        .fixedSize()
-                    }
-                    Text("Accelerates generation speed via draft token speculation.")
-                        .font(.caption).foregroundStyle(Theme.textTertiary)
-                    HStack {
-                        Text("Prefill Batch").font(.subheadline).foregroundStyle(Theme.textSecondary)
-                        Spacer()
-                        Menu {
-                            ForEach([256, 512, 1_024], id: \.self) { value in
-                                Button("\(value)") { settings.prefillBatchSize = value }
+                    hairline
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("KV cache").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                            Spacer()
+                            Menu {
+                                Button("Full (unquantized)") { settings.kvBits = 0 }
+                                Button("4-bit") { settings.kvBits = 4 }
+                                Button("6-bit (K4+V8)") { settings.kvBits = 6 }
+                                Button("8-bit") { settings.kvBits = 8 }
+                            } label: {
+                                menuLabel(settings.kvBits == 0 ? "Full"
+                                     : settings.kvBits == 6 ? "6-bit (K4+V8)"
+                                     : "\(settings.kvBits)-bit")
                             }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Text("\(settings.prefillBatchSize)")
-                                    .font(.subheadline).foregroundStyle(Theme.accent)
-                                Image(systemName: "chevron.up.chevron.down").font(.caption2)
-                                    .foregroundStyle(Theme.textTertiary)
-                            }
+                            .fixedSize()
                         }
-                        .fixedSize()
+                        Text("8-bit recommended (balanced quality & RAM); 4-bit saves memory.")
+                            .font(.caption).foregroundStyle(Theme.textTertiary)
                     }
-                    Text("Larger batch speeds up prompt evaluation but increases peak memory.")
-                        .font(.caption).foregroundStyle(Theme.textTertiary)
-                    Toggle(isOn: $settings.kvCheckpointsEnabled) {
-                        Text("KV Checkpoints").font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    hairline
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Speculative decoding").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                            Spacer()
+                            Menu {
+                                Button(SpeculativeMode.off.displayName) { settings.speculativeMode = .off }
+                                Button(SpeculativeMode.promptLookup.displayName) { settings.speculativeMode = .promptLookup }
+                                Button(SpeculativeMode.mtp.displayName) { settings.speculativeMode = .mtp }
+                            } label: {
+                                menuLabel(settings.speculativeMode.displayName)
+                            }
+                            .fixedSize()
+                        }
+                        Text("Accelerates generation speed via draft token speculation.")
+                            .font(.caption).foregroundStyle(Theme.textTertiary)
                     }
-                    Text("Cache KV snapshots to disk for instant multi-turn editing reuse.")
-                        .font(.caption).foregroundStyle(Theme.textTertiary)
+                    hairline
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Prefill Batch").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                            Spacer()
+                            Menu {
+                                ForEach([256, 512, 1_024], id: \.self) { value in
+                                    Button("\(value)") { settings.prefillBatchSize = value }
+                                }
+                            } label: {
+                                menuLabel("\(settings.prefillBatchSize)")
+                            }
+                            .fixedSize()
+                        }
+                        Text("Larger batch speeds up prompt evaluation but increases peak memory.")
+                            .font(.caption).foregroundStyle(Theme.textTertiary)
+                    }
+                    hairline
+                    toggleRow(
+                        "KV Checkpoints",
+                        subtitle: "Cache KV snapshots to disk for instant multi-turn editing reuse.",
+                        isOn: $settings.kvCheckpointsEnabled
+                    )
+                    hairline
+                    toggleRow("Record local model logs", isOn: $settings.localModelLoggingEnabled)
+                    localModelLogsRow
                 }
-                .padding(.top, Theme.Space.xs)
+                .padding(.top, Theme.Space.sm)
             }
             .tint(Theme.accent)
         }
@@ -762,24 +523,102 @@ struct SettingsView: View {
         return "Longer context uses more memory and increases initial latency."
     }
 
-    // MARK: Appearance
+    // MARK: App & System
 
-    private var appearanceSection: some View {
-        section("Appearance", icon: "circle.lefthalf.filled") {
-            Segmented(selection: $settings.appearance, options: AppearanceMode.allCases) { $0.label }
-            #if os(iOS)
-            Divider().background(Theme.hairline)
-            Toggle(isOn: $settings.keepScreenAwake) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Keep screen awake").font(.subheadline).foregroundStyle(Theme.textPrimary)
-                    Text("Prevent the device from sleeping while mobileLLM is in the foreground.")
-                        .font(.caption).foregroundStyle(Theme.textTertiary)
-                }
+    private var systemSection: some View {
+        section("App & System", icon: "gearshape") {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Appearance").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                Segmented(selection: $settings.appearance, options: AppearanceMode.allCases) { $0.label }
             }
-            .tint(Theme.accent)
+            #if os(iOS)
+            hairline
+            toggleRow(
+                "Keep screen awake",
+                subtitle: "Prevent the device from sleeping while mobileLLM is in the foreground.",
+                isOn: $settings.keepScreenAwake
+            )
+            hairline
+            toggleRow(
+                "Continue work in background (iOS 26)",
+                subtitle: "Keep active generation runs processing after leaving the app.",
+                isOn: Binding(
+                    get: { settings.continuedProcessingEnabled },
+                    set: { newValue in
+                        settings.continuedProcessingEnabled = newValue
+                        container.continuedProcessing.setEnabled(
+                            newValue,
+                            activeConversationID: container.chat.activeID
+                        )
+                    }
+                )
+            )
+            if let status = continuedProcessingStatus {
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(continuedProcessingHasError ? Theme.danger : Theme.textTertiary)
+            }
+            hairline
+            toggleRow(
+                "Quick notification assistant",
+                subtitle: "Interactive notification for multi-turn chat when in background.",
+                isOn: Binding(
+                    get: { settings.quickNotificationEnabled },
+                    set: { newValue in
+                        settings.quickNotificationEnabled = newValue
+                        if newValue {
+                            Task { await QuickNotificationCoordinator.requestAuthorization() }
+                        } else {
+                            QuickNotificationCoordinator.dismissNotification()
+                        }
+                    }
+                )
+            )
+            hairline
+            toggleRow(
+                "Picture-in-Picture floating window",
+                subtitle: "Floating window showing live thinking and response.",
+                isOn: Binding(
+                    get: { settings.pipWindowEnabled },
+                    set: { newValue in
+                        settings.pipWindowEnabled = newValue
+                        PiPCoordinator.shared.setEnabled(newValue)
+                        if !newValue {
+                            PiPCoordinator.shared.stopPiP()
+                        }
+                    }
+                )
+            )
             #endif
         }
     }
+
+    #if os(iOS)
+    private var continuedProcessingStatus: String? {
+        let coordinator = container.continuedProcessing
+        switch coordinator.phase {
+        case .idle, .finished:
+            return nil
+        case .submitted:
+            return "Waiting for the system to grant continued processing…"
+        case .running:
+            return "A run is continuing in the background; the system shows its progress."
+        case .rejected(let diagnostic):
+            return "Not started: \(diagnostic)"
+        case .expired:
+            return "The system ended background processing; the run is paused and can be resumed."
+        case .cancelled:
+            return "Background continuation was cancelled."
+        }
+    }
+
+    private var continuedProcessingHasError: Bool {
+        switch container.continuedProcessing.phase {
+        case .rejected, .expired, .cancelled: true
+        case .idle, .submitted, .running, .finished: false
+        }
+    }
+    #endif
 
     // MARK: Data & Privacy
 
@@ -794,9 +633,8 @@ struct SettingsView: View {
                 HStack(spacing: Theme.Space.sm) {
                     Image(systemName: "square.and.arrow.up")
                         .font(.subheadline).foregroundStyle(Theme.accent).frame(width: 22)
-                    Text("Export all chats (JSON)").font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    Text("Export all chats").font(.subheadline).foregroundStyle(Theme.textPrimary)
                     Spacer()
-                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(Theme.textTertiary)
                 }
                 .contentShape(Rectangle())
             }
@@ -813,11 +651,11 @@ struct SettingsView: View {
             }
             .buttonStyle(.plain)
             Divider().background(Theme.hairline)
-            Button(role: .destructive) { confirmEraseAll = true } label: {
+            Button { confirmEraseAll = true } label: {
                 HStack(spacing: Theme.Space.sm) {
                     Image(systemName: "externaldrive.badge.xmark")
-                        .font(.subheadline).foregroundStyle(Theme.danger).frame(width: 22)
-                    Text("Erase all app data").font(.subheadline).foregroundStyle(Theme.danger)
+                        .font(.subheadline).foregroundStyle(Theme.accent).frame(width: 22)
+                    Text("Erase all data").font(.subheadline).foregroundStyle(Theme.textPrimary)
                     Spacer()
                 }
                 .contentShape(Rectangle())
@@ -844,7 +682,9 @@ struct SettingsView: View {
     private var aboutSection: some View {
         section("About", icon: "info.circle") {
             row("Version", appVersion)
-            row("Engine", "Pure Swift · MLX + llama.cpp")
+            hairline
+            row("Engine", "MLX · LLaMA")
+            hairline
             Text("A private, open-source LLM & agent runner for iOS and macOS.")
                 .font(.caption).foregroundStyle(Theme.textTertiary)
         }
@@ -896,14 +736,57 @@ struct SettingsView: View {
         }
     }
 
-    private func dismissKeyboard() {
-        isShortcutFieldFocused = false
-        #if os(iOS)
-        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
-        #endif
+    // MARK: Builders
+
+    private var hairline: some View {
+        Divider().background(Theme.hairline)
     }
 
-    // MARK: Builders
+    private func navRow(
+        _ title: String,
+        subtitle: String? = nil,
+        icon: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: Theme.Space.sm) {
+                Image(systemName: icon)
+                    .font(.subheadline).foregroundStyle(Theme.accent).frame(width: 22)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    if let subtitle {
+                        Text(subtitle).font(.caption).foregroundStyle(Theme.textTertiary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption).foregroundStyle(Theme.textTertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func toggleRow(_ title: String, subtitle: String? = nil, isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) {
+            if let subtitle {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(.subheadline).foregroundStyle(Theme.textPrimary)
+                    Text(subtitle).font(.caption).foregroundStyle(Theme.textTertiary)
+                }
+            } else {
+                Text(title).font(.subheadline).foregroundStyle(Theme.textPrimary)
+            }
+        }
+        .tint(Theme.accent)
+    }
+
+    private func menuLabel(_ text: String) -> some View {
+        HStack(spacing: 4) {
+            Text(text).font(.subheadline).foregroundStyle(Theme.accent)
+            Image(systemName: "chevron.up.chevron.down").font(.caption2).foregroundStyle(Theme.textTertiary)
+        }
+    }
 
     private func sectionLabel(_ title: String, icon: String) -> some View {
         Label { Text(title.uppercased()) } icon: { Image(systemName: icon) }
@@ -956,6 +839,92 @@ struct SettingsView: View {
             }
         }
         .accessibilityValue("\(value.wrappedValue)")
+    }
+}
+
+private struct ShortcutsServicesSheet: View {
+    @Bindable var settings: AppSettings
+    @Environment(\.dismiss) private var dismiss
+    @State private var newShortcutName = ""
+    @State private var newShortcutTarget = ""
+    @FocusState private var isFieldFocused: Bool
+
+    private var canAdd: Bool {
+        !newShortcutName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !newShortcutTarget.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        List {
+            Section {
+                if settings.shortcutsServices.isEmpty {
+                    Text("No shortcut models configured.")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.textTertiary)
+                } else {
+                    ForEach(settings.shortcutsServices) { service in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(service.name)
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(Theme.textPrimary)
+                                Text("Shortcut: \(service.shortcutName)")
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.textTertiary)
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                settings.removeShortcutsService(id: service.id)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.subheadline)
+                                    .foregroundStyle(Theme.danger)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            } header: {
+                Text("Configured Models")
+            }
+
+            Section {
+                TextField("Model name (e.g. 豆包)", text: $newShortcutName)
+                    .focused($isFieldFocused)
+                TextField("Shortcut (e.g. 发消息问豆包)", text: $newShortcutTarget)
+                    .focused($isFieldFocused)
+                Button {
+                    addModel()
+                } label: {
+                    Label("Add Model", systemImage: "plus")
+                }
+                .disabled(!canAdd)
+            } header: {
+                Text("Add Shortcut Model")
+            } footer: {
+                Text("Passes message in 'msg' (and image in 'fileName') to this shortcut, with automatic tool calling loop support.")
+            }
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .navigationTitle("Shortcuts Models")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Done") { dismiss() }
+            }
+        }
+    }
+
+    private func addModel() {
+        let name = newShortcutName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let target = newShortcutTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !target.isEmpty else { return }
+        settings.upsertShortcutsService(ShortcutsService(name: name, shortcutName: target))
+        newShortcutName = ""
+        newShortcutTarget = ""
+        isFieldFocused = false
     }
 }
 
