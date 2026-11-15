@@ -50,6 +50,11 @@ struct Composer: View {
             if chat.agentRuntimeUnavailableReason != nil {
                 runtimeUnavailableBar
             } else if chat.hasModel {
+                let commands = slashCommands
+                if !commands.isEmpty {
+                    slashCommandPalette(commands)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
                 inputCard
             } else {
                 noModelBar
@@ -246,6 +251,98 @@ struct Composer: View {
             ?? chat.activeModel?.model.displayName
             ?? "the model"
         return "Message \(name)…"
+    }
+
+    // MARK: Slash command palette
+
+    private var slashCommands: [SlashCommandItem] {
+        guard chat.hasModel, let query = SlashCommandItem.query(from: chat.draft) else { return [] }
+        return SlashCommandItem.items(
+            for: query,
+            thinkingCapable: thinkingCapable,
+            thinkingEnabled: chat.composerThinkingEnabled,
+            skills: chat.availableSkills
+        )
+    }
+
+    private func slashCommandPalette(_ items: [SlashCommandItem]) -> some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                    if index > 0 { Divider().background(Theme.hairline) }
+                    Button {
+                        executeSlashCommand(item)
+                    } label: {
+                        HStack(spacing: Theme.Space.sm) {
+                            Group {
+                                if let emoji = item.emoji {
+                                    Text(emoji).font(.subheadline)
+                                } else {
+                                    Image(systemName: item.systemImage)
+                                        .font(.subheadline)
+                                        .foregroundStyle(Theme.accent)
+                                }
+                            }
+                            .frame(width: 24, alignment: .center)
+
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("/\(item.command)")
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(Theme.textPrimary)
+                                    .lineLimit(1)
+                                Text(item.subtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(Theme.textTertiary)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            }
+
+                            Spacer(minLength: 0)
+
+                            if item.isSkill {
+                                Text("Skill")
+                                    .font(.caption2.weight(.medium))
+                                    .foregroundStyle(Theme.accent)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Theme.accentSoft, in: Capsule())
+                            }
+                        }
+                        .padding(.horizontal, Theme.Space.md)
+                        .padding(.vertical, Theme.Space.sm)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .frame(maxHeight: 220)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Theme.hairline)
+        )
+    }
+
+    private func executeSlashCommand(_ item: SlashCommandItem) {
+        chat.draft = ""
+        switch item.action {
+        case .clear:
+            chat.clearActiveConversation()
+        case .compact:
+            Task { @MainActor in await chat.manualCompactActiveConversation() }
+        case .newConversation:
+            _ = chat.newConversation()
+        case .toggleThinking:
+            chat.composerThinkingEnabled.toggle()
+            chat.showToast(Toast(
+                chat.composerThinkingEnabled ? "Thinking mode on." : "Thinking mode off.",
+                autoDismiss: 2
+            ))
+        case .selectSkill(let skillID):
+            chat.setActiveSkill(skillID)
+            focused = true
+        }
     }
 
     // MARK: Dictation
