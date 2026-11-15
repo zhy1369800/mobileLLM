@@ -15,40 +15,34 @@ struct SystemPromptManagementView: View {
     @State private var pendingDelete: SystemPromptPreset?
 
     var body: some View {
-        List {
-            Section {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Theme.Space.md) {
                 Text("System prompts guide the model's tone and rules. Pick a preset as your global default, "
                      + "or customize prompts per conversation in conversation settings.")
                     .font(.caption).foregroundStyle(Theme.textSecondary)
-                    .listRowBackground(Color.clear)
-            }
 
-            Section {
-                ForEach(settings.systemPromptPresets) { preset in
-                    presetRow(preset)
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            if !preset.isBuiltin {
-                                Button(role: .destructive) {
-                                    pendingDelete = preset
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                                .tint(Theme.danger)
-                            }
-                        }
+                VStack(alignment: .leading, spacing: Theme.Space.sm) {
+                    Label { Text("PRESETS") } icon: { Image(systemName: "text.quote") }
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Theme.textTertiary)
+
+                    ForEach(settings.systemPromptPresets) { preset in
+                        presetCard(preset)
+                    }
                 }
-            } header: {
-                Text("PRESETS")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(Theme.textTertiary)
+
+                Button { isCreatingNew = true } label: {
+                    Label("Add a preset", systemImage: "plus.circle.fill")
+                        .font(.subheadline.weight(.medium)).foregroundStyle(Theme.accent)
+                        .frame(maxWidth: .infinity).padding(.vertical, Theme.Space.md)
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous).strokeBorder(Theme.hairline))
+                }
+                .buttonStyle(.plain)
             }
+            .padding(Theme.Space.lg)
+            .frame(maxWidth: 640).frame(maxWidth: .infinity)
         }
-        #if os(iOS)
-        .listStyle(.insetGrouped)
-        #else
-        .listStyle(.inset)
-        #endif
-        .scrollContentBackground(.hidden)
         .background(Theme.bg)
         .navigationTitle("System prompt")
         #if os(iOS)
@@ -110,18 +104,18 @@ struct SystemPromptManagementView: View {
         }
     }
 
-    private func presetRow(_ preset: SystemPromptPreset) -> some View {
+    private func presetCard(_ preset: SystemPromptPreset) -> some View {
         let isSelected = settings.selectedSystemPromptID == preset.id
         let snippet = preset.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "\n", with: " ")
 
-        return HStack(spacing: Theme.Space.sm) {
+        return HStack(spacing: Theme.Space.md) {
             Button {
                 settings.selectedSystemPromptID = preset.id
             } label: {
-                HStack(spacing: Theme.Space.sm) {
+                HStack(spacing: Theme.Space.md) {
                     Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                        .font(.body)
+                        .font(.subheadline)
                         .foregroundStyle(isSelected ? Theme.accent : Theme.textTertiary)
 
                     VStack(alignment: .leading, spacing: 3) {
@@ -151,18 +145,38 @@ struct SystemPromptManagementView: View {
             }
             .buttonStyle(.plain)
 
-            Button {
-                editingPreset = preset
-            } label: {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.textSecondary)
-                    .padding(4)
+            HStack(spacing: Theme.Space.xs) {
+                Button {
+                    editingPreset = preset
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(6)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Edit preset \(preset.name)")
+
+                if !preset.isBuiltin {
+                    Button(role: .destructive) {
+                        pendingDelete = preset
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.danger)
+                            .padding(6)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Delete preset \(preset.name)")
+                }
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Edit preset \(preset.name)")
         }
-        .padding(.vertical, 2)
+        .padding(Theme.Space.md)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
+            .strokeBorder(isSelected ? Theme.accent : Theme.hairline))
     }
 }
 

@@ -21,6 +21,7 @@ struct SettingsView: View {
     @State private var showOpenAI = false
     @State private var showShortcuts = false
     @State private var showLocalLogs = false
+    @State private var isAdvancedExpanded = false
 
     init(container: AppContainer) {
         self.container = container
@@ -163,9 +164,7 @@ struct SettingsView: View {
             // on screen must not leave the row reading "Nothing saved yet".
             .task { await container.memory.refresh() }
             hairline
-            toggleRow("Allow selected tools", isOn: $settings.toolsEnabled)
-            hairline
-            navRow("Choose tools", subtitle: ToolsView.summary(for: settings), icon: "wrench.and.screwdriver") {
+            navRow("Tools", subtitle: ToolsView.summary(for: settings), icon: "wrench.and.screwdriver") {
                 showTools = true
             }
         }
@@ -379,7 +378,27 @@ struct SettingsView: View {
                 }
             }
             hairline
-            DisclosureGroup("Advanced & Diagnostics") {
+            Button {
+                withAnimation(Motion.spring) {
+                    isAdvancedExpanded.toggle()
+                }
+            } label: {
+                HStack {
+                    Text("Advanced & Diagnostics")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Theme.textPrimary)
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.textTertiary)
+                        .rotationEffect(.degrees(isAdvancedExpanded ? 90 : 0))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isAdvancedExpanded {
+                hairline
                 VStack(alignment: .leading, spacing: Theme.Space.md) {
                     stepperRow("Top-k", value: $settings.topK, range: 0...100, step: 5)
                     hairline
@@ -446,11 +465,10 @@ struct SettingsView: View {
                     )
                     hairline
                     toggleRow("Record local model logs", isOn: $settings.localModelLoggingEnabled)
+                    hairline
                     localModelLogsRow
                 }
-                .padding(.top, Theme.Space.sm)
             }
-            .tint(Theme.accent)
         }
     }
 
@@ -845,6 +863,7 @@ struct SettingsView: View {
 private struct ShortcutsServicesSheet: View {
     @Bindable var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
+    @State private var showAdd = false
     @State private var newShortcutName = ""
     @State private var newShortcutTarget = ""
     @FocusState private var isFieldFocused: Bool
@@ -855,58 +874,40 @@ private struct ShortcutsServicesSheet: View {
     }
 
     var body: some View {
-        List {
-            Section {
+        ScrollView {
+            VStack(alignment: .leading, spacing: Theme.Space.md) {
+                Text("Passes message in 'msg' (and image in 'fileName') to Apple Shortcuts, with automatic tool calling loop support.")
+                    .font(.caption).foregroundStyle(Theme.textSecondary)
+
                 if settings.shortcutsServices.isEmpty {
-                    Text("No shortcut models configured.")
-                        .font(.subheadline)
-                        .foregroundStyle(Theme.textTertiary)
+                    emptyState
                 } else {
                     ForEach(settings.shortcutsServices) { service in
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(service.name)
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundStyle(Theme.textPrimary)
-                                Text("Shortcut: \(service.shortcutName)")
-                                    .font(.caption)
-                                    .foregroundStyle(Theme.textTertiary)
-                            }
-                            Spacer()
-                            Button(role: .destructive) {
-                                settings.removeShortcutsService(id: service.id)
-                            } label: {
-                                Image(systemName: "trash")
-                                    .font(.subheadline)
-                                    .foregroundStyle(Theme.danger)
-                            }
-                            .buttonStyle(.plain)
-                        }
+                        shortcutRow(service)
                     }
                 }
-            } header: {
-                Text("Configured Models")
-            }
 
-            Section {
-                TextField("Model name (e.g. 豆包)", text: $newShortcutName)
-                    .focused($isFieldFocused)
-                TextField("Shortcut (e.g. 发消息问豆包)", text: $newShortcutTarget)
-                    .focused($isFieldFocused)
-                Button {
-                    addModel()
-                } label: {
-                    Label("Add Model", systemImage: "plus")
+                if showAdd {
+                    addCard
+                } else {
+                    Button {
+                        showAdd = true
+                    } label: {
+                        Label("Add a shortcut model", systemImage: "plus.circle.fill")
+                            .font(.subheadline.weight(.medium)).foregroundStyle(Theme.accent)
+                            .frame(maxWidth: .infinity).padding(.vertical, Theme.Space.md)
+                            .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous).strokeBorder(Theme.hairline))
+                    }
+                    .buttonStyle(.plain)
                 }
-                .disabled(!canAdd)
-            } header: {
-                Text("Add Shortcut Model")
-            } footer: {
-                Text("Passes message in 'msg' (and image in 'fileName') to this shortcut, with automatic tool calling loop support.")
             }
+            .padding(Theme.Space.lg)
+            .frame(maxWidth: 640).frame(maxWidth: .infinity)
         }
         .scrollDismissesKeyboard(.interactively)
-        .navigationTitle("Shortcuts Models")
+        .background(Theme.bg)
+        .navigationTitle("Shortcuts models")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -917,14 +918,102 @@ private struct ShortcutsServicesSheet: View {
         }
     }
 
-    private func addModel() {
-        let name = newShortcutName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let target = newShortcutTarget.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, !target.isEmpty else { return }
-        settings.upsertShortcutsService(ShortcutsService(name: name, shortcutName: target))
-        newShortcutName = ""
-        newShortcutTarget = ""
-        isFieldFocused = false
+    private var emptyState: some View {
+        VStack(spacing: Theme.Space.sm) {
+            Image(systemName: "command")
+                .font(.largeTitle).foregroundStyle(Theme.textTertiary)
+            Text("No shortcut models configured").font(.subheadline.weight(.medium)).foregroundStyle(Theme.textSecondary)
+            Text("Add a model backed by an Apple Shortcut to run actions or forward prompts.")
+                .font(.caption).foregroundStyle(Theme.textTertiary).multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity).padding(.vertical, Theme.Space.xl)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous).strokeBorder(Theme.hairline))
+    }
+
+    private func shortcutRow(_ service: ShortcutsService) -> some View {
+        HStack(spacing: Theme.Space.md) {
+            Image(systemName: "command")
+                .font(.subheadline)
+                .foregroundStyle(Theme.accent)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(service.name)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.textPrimary)
+                Text("Shortcut: \(service.shortcutName)")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            Spacer()
+            Button(role: .destructive) {
+                settings.removeShortcutsService(id: service.id)
+            } label: {
+                Image(systemName: "trash")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.danger)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(Theme.Space.md)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous).strokeBorder(Theme.hairline))
+    }
+
+    private var addCard: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            Text("NEW SHORTCUT MODEL").font(.caption2.weight(.semibold)).foregroundStyle(Theme.textTertiary)
+            TextField("Model name (e.g. 豆包)", text: $newShortcutName)
+                .font(.subheadline)
+                .textFieldStyle(.plain)
+                .padding(Theme.Space.sm)
+                .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous).strokeBorder(Theme.hairline))
+                .focused($isFieldFocused)
+
+            TextField("Shortcut (e.g. 发消息问豆包)", text: $newShortcutTarget)
+                .font(.subheadline)
+                .textFieldStyle(.plain)
+                .padding(Theme.Space.sm)
+                .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous).strokeBorder(Theme.hairline))
+                .focused($isFieldFocused)
+
+            HStack {
+                Button("Cancel") {
+                    newShortcutName = ""
+                    newShortcutTarget = ""
+                    showAdd = false
+                    isFieldFocused = false
+                }
+                .buttonStyle(.plain)
+                .font(.subheadline)
+                .foregroundStyle(Theme.textSecondary)
+
+                Spacer()
+
+                Button {
+                    let name = newShortcutName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let target = newShortcutTarget.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !name.isEmpty, !target.isEmpty else { return }
+                    settings.upsertShortcutsService(ShortcutsService(name: name, shortcutName: target))
+                    newShortcutName = ""
+                    newShortcutTarget = ""
+                    showAdd = false
+                    isFieldFocused = false
+                } label: {
+                    Text("Add")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(canAdd ? Theme.accent : Theme.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canAdd)
+            }
+            .padding(.top, 4)
+        }
+        .padding(Theme.Space.md)
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous).strokeBorder(Theme.hairline))
     }
 }
 
