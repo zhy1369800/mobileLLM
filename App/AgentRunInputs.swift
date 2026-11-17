@@ -571,11 +571,20 @@ struct AppFrozenInputBuilder: Sendable {
         // Online models run reasoning chains and multi-turn tool passes; provide a generous 60m run budget.
         // Local models stay on the conservative 15m budget to protect battery and thermal limits.
         let activeMilliseconds: UInt64 = online ? (60 * 60 * 1_000) : (15 * 60 * 1_000)
-        let budget = try AgentBudget.firstReleaseDefaults(
+        let defaultBudget = try AgentBudget.firstReleaseDefaults(
             contextTokensPerAttempt: effectiveContext,
             outputTokens: outputBudget(snapshot: snapshot, contextCap: effectiveContext).maximumOutputTokens,
             peakMemoryBytes: peakMemoryCeiling,
             activeMilliseconds: activeMilliseconds
+        )
+        var budgetLimits = Dictionary(uniqueKeysWithValues: BudgetDimension.allCases.map {
+            ($0, defaultBudget.limits[$0])
+        })
+        budgetLimits[.structuredRepairs] = 3
+        let budget = try AgentBudget(
+            limits: BudgetQuantities(budgetLimits),
+            maximumThermalState: defaultBudget.maximumThermalState,
+            memoryPressureResponse: defaultBudget.memoryPressureResponse
         )
         var ceilingCapabilities = AgentCapabilitySet([
             .networkRead, .localRead, .localWrite, .unknownExternal,

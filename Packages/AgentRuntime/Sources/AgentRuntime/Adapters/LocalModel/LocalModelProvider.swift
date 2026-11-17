@@ -432,6 +432,7 @@ private enum LocalModelGeneration {
         var turns: [ChatTurn] = []
         var totalImageBytes: UInt64 = 0
         var policyBlocks: [String] = []
+        var repairInstructions: [String] = []
         let priorResponses = await residencyDriver?.pendingToolCallResponses(for: request.runID) ?? []
         var toolGroupIndex = 0
         var remainingInCurrentGroup = 0
@@ -440,7 +441,7 @@ private enum LocalModelGeneration {
         for message in request.messages {
             if isInternalRunStateMessage(message) {
                 if let repair = extractRepairInstruction(from: message.content) {
-                    policyBlocks.append(repair)
+                    repairInstructions.append(repair)
                 }
                 continue
             }
@@ -517,17 +518,33 @@ private enum LocalModelGeneration {
         if case .structured(let schema) = request.outputRequirement {
             policyBlocks.append(try LocalModelPromptRenderer.structuredOutputBlock(schema))
         }
-        guard !policyBlocks.isEmpty else { return turns }
-        let policy = policyBlocks.joined(separator: "\n\n")
-        if let index = turns.firstIndex(where: { $0.role == .system }) {
-            let existing = turns[index]
-            turns[index] = ChatTurn(
-                role: .system,
-                content: existing.content + "\n\n" + policy,
-                images: existing.images
-            )
-        } else {
-            turns.insert(ChatTurn(role: .system, content: policy), at: 0)
+        if !policyBlocks.isEmpty {
+            let policy = policyBlocks.joined(separator: "\n\n")
+            if let index = turns.firstIndex(where: { $0.role == .system }) {
+                let existing = turns[index]
+                turns[index] = ChatTurn(
+                    role: .system,
+                    content: existing.content + "\n\n" + policy,
+                    images: existing.images
+                )
+            } else {
+                turns.insert(ChatTurn(role: .system, content: policy), at: 0)
+            }
+        }
+        // Append repair instructions at the tail of the conversation rather than mutating turns[0]
+        // so the static system prompt and prior conversation turns keep their KV cache prefix.
+        if !repairInstructions.isEmpty {
+            let repairSuffix = repairInstructions.joined(separator: "\n\n")
+            if let lastIndex = turns.indices.last, turns[lastIndex].role == .user {
+                let lastTurn = turns[lastIndex]
+                turns[lastIndex] = ChatTurn(
+                    role: .user,
+                    content: lastTurn.content + "\n\n[Correction]\n" + repairSuffix,
+                    images: lastTurn.images
+                )
+            } else {
+                turns.append(ChatTurn(role: .user, content: "[Correction]\n" + repairSuffix))
+            }
         }
         return turns
     }

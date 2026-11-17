@@ -428,6 +428,24 @@ struct ExecutionHistory: Sendable {
         UInt64(diagnostics.lazy.filter { $0.1.code == "execution.tool-budget-exhausted" }.count)
     }
 
+    /// True only when a repair diagnostic has not yet been followed by a valid action or tool outcome.
+    var hasPendingRepair: Bool {
+        let lastRepairSequence = diagnostics
+            .filter {
+                $0.1.code == "execution.structured-repair"
+                    || $0.1.code == "execution.repeated-tool-call"
+                    || $0.1.code == "execution.tool-budget-exhausted"
+            }
+            .map(\.0.sequence)
+            .max()
+        guard let lastRepairSequence else { return false }
+        let lastProgressSequence = max(
+            actionEvents.map(\.0.sequence).max() ?? 0,
+            toolOutcomes.values.map(\.0.sequence).max() ?? 0
+        )
+        return lastRepairSequence > lastProgressSequence
+    }
+
 }
 
 extension AgentUsage {

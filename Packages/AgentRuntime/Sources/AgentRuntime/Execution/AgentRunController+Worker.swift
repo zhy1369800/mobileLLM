@@ -376,13 +376,15 @@ extension AgentRunController {
             "state": .string(facts.projection.state.rawValue),
             "stateVersion": .unsignedInteger(facts.projection.stateVersion),
             "modelAttempt": .unsignedInteger(attempt),
-            "structuredRepair": .bool(history.repairCount > 0),
+            "structuredRepair": .bool(history.hasPendingRepair),
             "toolFreeSynthesis": .bool(toolFree),
         ]
-        if history.repairCount > 0 {
-            let lastRepair = history.diagnostics.last { $0.1.code == "execution.structured-repair" }
-                ?? history.diagnostics.last { $0.1.code == "execution.repeated-tool-call" }
-                ?? history.diagnostics.last { $0.1.code == "execution.tool-budget-exhausted" }
+        if history.hasPendingRepair {
+            let lastRepair = history.diagnostics.last {
+                $0.1.code == "execution.structured-repair"
+                    || $0.1.code == "execution.repeated-tool-call"
+                    || $0.1.code == "execution.tool-budget-exhausted"
+            }
             let isTextRequirement: Bool
             switch facts.submission?.request.payload.outputRequirement {
             case .structured, .artifacts:
@@ -403,7 +405,9 @@ extension AgentRunController {
             } else if isTextRequirement {
                 stateFields["repairInstruction"] = .string(
                     "The tool you attempted to call does not exist or was invalid. "
-                        + "Do NOT call any tool — answer the user's request directly with text or markdown."
+                        + "Check the tool name and argument schema carefully, fix the invalid or missing "
+                        + "parameters and call the tool again, or answer the user directly with text or "
+                        + "markdown if no tool is needed."
                 )
             } else {
                 stateFields["repairInstruction"] = .string(
@@ -665,7 +669,7 @@ extension AgentRunController {
         )
         let generation = try generationParameters(
             frozen.generationParameters,
-            repair: history.repairCount > 0
+            repair: history.hasPendingRepair
         )
         let modelRequest = try AgentModelRequest(
             requestID: facts.projection.requestID,
@@ -828,7 +832,7 @@ extension AgentRunController {
             request: modelRequest,
             budget: facts.submission!.request.payload.budget,
             maximumActiveMilliseconds: attemptActiveReservation,
-            structuredRepair: history.repairCount > 0
+            structuredRepair: history.hasPendingRepair
         )
         guard let durableLedger = facts.budgetLedger else {
             throw AgentExecutionError.invalidRecoveryBoundary
@@ -887,7 +891,8 @@ extension AgentRunController {
                     runID: facts.projection.runID,
                     stepID: modelRequest.stepID,
                     reservation: reservation,
-                    repairAlreadyAttempted: history.structuredRepairCount > 0
+                    repairAlreadyAttempted: history.structuredRepairCount
+                        >= (facts.submission?.request.payload.budget.limits[.structuredRepairs] ?? 1)
                 )
                 return
             }
@@ -908,7 +913,8 @@ extension AgentRunController {
                 runID: facts.projection.runID,
                 stepID: modelRequest.stepID,
                 reservation: reservation,
-                repairAlreadyAttempted: history.structuredRepairCount > 0
+                repairAlreadyAttempted: history.structuredRepairCount
+                    >= (facts.submission?.request.payload.budget.limits[.structuredRepairs] ?? 1)
             )
             return
         }
@@ -1301,7 +1307,7 @@ extension AgentRunController {
                 let exhausted = try ExecutionFailureFactory.make(
                     reason: .internalFailure,
                     code: "execution.structured-repair-exhausted",
-                    message: "The model could not produce a valid structured action after one repair attempt."
+                    message: "The model could not produce a valid structured action after the allowed repair attempts."
                 )
                 let terminalStatus = try self.status(
                     after: builder,
