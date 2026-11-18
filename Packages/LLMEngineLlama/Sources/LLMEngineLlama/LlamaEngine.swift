@@ -303,6 +303,24 @@ public actor LlamaEngine: LLMEngine {
         releaseModelResources()
     }
 
+    /// Free the active KV decode context and vision projector buffer while keeping the mmap'd
+    /// base model and disk KV checkpoints intact, freeing ~1 GB+ of dirty Metal/CPU memory before
+    /// external spikes like the system camera.
+    public func releaseTransientMemory() async {
+        let drain = await generationLifecycle.beginDrain()
+        defer { generationLifecycle.endDrain(drain) }
+        if let mtmdContext { mtmd_free(mtmdContext) }
+        if let context { llama_free(context) }
+        mtmdContext = nil
+        context = nil
+        contextCap = 0
+        contextKVBits = -1
+        contextBatchSize = 0
+        contextRequestedBatchSize = 0
+        contextSpeculativeMode = .off
+        sessionCache.reset()
+    }
+
     private func releaseModelResources() {
         // Free the vision context BEFORE the model — it holds a reference to the text model.
         if let mtmdContext { mtmd_free(mtmdContext) }

@@ -62,6 +62,12 @@ public actor RoutingEngine: LLMEngine {
         self.active = nil
     }
 
+    /// Forward transient memory release to the currently active engine.
+    public func releaseTransientMemory() async {
+        guard let active else { return }
+        await active.engine.releaseTransientMemory()
+    }
+
     /// Forward generation to the last-loaded engine. Cancelling the returned stream cancels the inner
     /// engine's stream too (the bridging task is cancelled on termination).
     public nonisolated func generate(messages: [ChatTurn], params: Sampling)

@@ -791,6 +791,12 @@ public final class ChatStore {
         pendingImages.removeAll()
     }
 
+    /// Release transient KV/vision buffers on the active engine before launching the system camera
+    /// so camera capture doesn't collide with Jetsam highwater limits.
+    public func prepareMemoryForCamera() async {
+        await engine.releaseTransientMemory()
+    }
+
     public var canAttachMoreFiles: Bool {
         !conversationEraseInProgress && streamingMessageID == nil && pendingFiles.count < Self.maxAttachments
     }

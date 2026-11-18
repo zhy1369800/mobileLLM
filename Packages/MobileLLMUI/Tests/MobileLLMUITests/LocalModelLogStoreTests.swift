@@ -273,6 +273,30 @@ final class LocalModelLogStoreTests: XCTestCase {
         XCTAssertNil(loaded?.stats?.cachedPromptTokens)
         XCTAssertEqual(loaded?.stats?.cacheHitRate ?? 0, 0.0)
     }
+
+    func testLoggingEngineForwardsReleaseTransientMemory() async {
+        let spy = TransientMemorySpyEngine()
+        let loggingEngine = LoggingEngine(
+            inner: spy,
+            config: LoggingConfiguration(isEnabled: false, defaultModelID: ""),
+            onLogEntry: { _ in }
+        )
+
+        await loggingEngine.releaseTransientMemory()
+        let count = await spy.releaseCount
+        XCTAssertEqual(count, 1)
+    }
+}
+
+private actor TransientMemorySpyEngine: LLMEngine {
+    private(set) var releaseCount = 0
+
+    func load(model: LLMModel, variant: LLMVariant, weightsDir: URL, progress: @escaping @Sendable (Double) -> Void) async throws {}
+    func unload() async {}
+    func releaseTransientMemory() async { releaseCount += 1 }
+    nonisolated func generate(messages: [ChatTurn], params: Sampling) -> AsyncThrowingStream<EngineDelta, Error> {
+        AsyncThrowingStream { $0.finish() }
+    }
 }
 
 

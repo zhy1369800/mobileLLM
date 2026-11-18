@@ -214,7 +214,15 @@ public protocol LLMEngine: Sendable {
     /// Release the resident weights (and clear the accelerator reuse pool in the real engine).
     func unload() async
 
+    /// Release transient accelerator/KV/vision buffers while keeping loaded weights and disk
+    /// checkpoints intact (e.g. before opening the system camera to avoid Jetsam highwater kills).
+    func releaseTransientMemory() async
+
     /// Stream a generation from the chat history. The stream ends with a single `.done(Stats)` before
     /// finishing (or finishes throwing on error / cancellation).
     func generate(messages: [ChatTurn], params: Sampling) -> AsyncThrowingStream<EngineDelta, Error>
+}
+
+public extension LLMEngine {
+    func releaseTransientMemory() async {}
 }

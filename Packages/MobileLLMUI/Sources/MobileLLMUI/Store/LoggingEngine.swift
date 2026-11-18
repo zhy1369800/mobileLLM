@@ -49,6 +49,10 @@ public final class LoggingEngine: LLMEngine, @unchecked Sendable {
         setLoadedModel(nil)
     }
 
+    public func releaseTransientMemory() async {
+        await inner.releaseTransientMemory()
+    }
+
     public func generate(
         messages: [ChatTurn],
         params: Sampling

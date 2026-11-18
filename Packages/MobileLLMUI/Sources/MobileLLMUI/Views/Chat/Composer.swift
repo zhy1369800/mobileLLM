@@ -4,6 +4,9 @@ import SwiftUI
 import PhotosUI
 import AppUI
 import LLMCore
+#if os(iOS)
+import AVFoundation
+#endif
 
 /// The chat composer (DESIGN §4): multiline auto-grow field, one morphing Send↔Stop button (no
 /// reflow), an inline 🧠 thinking toggle, a mic for dictation, an optional photo attach (vision models),
@@ -37,6 +40,7 @@ struct Composer: View {
     @State private var pickerItems: [PhotosPickerItem] = []
     @State private var showPhotoPicker = false
     @State private var showCamera = false
+    @State private var isPreparingCamera = false
     @State private var showFileImporter = false
     /// Stop stays disarmed for a beat after send so the tail of a double-tap can't cancel the turn.
     @State private var stopArmed = false
@@ -518,6 +522,36 @@ struct Composer: View {
         }
     }
 
+    #if os(iOS)
+    private func openCamera() {
+        guard !isPreparingCamera, chat.canAttachMoreImages else { return }
+        isPreparingCamera = true
+        Task { @MainActor in
+            defer { isPreparingCamera = false }
+            let status = AVCaptureDevice.authorizationStatus(for: .video)
+            let granted: Bool
+            switch status {
+            case .authorized:
+                granted = true
+            case .notDetermined:
+                granted = await AVCaptureDevice.requestAccess(for: .video)
+            case .denied, .restricted:
+                granted = false
+            @unknown default:
+                granted = false
+            }
+            guard granted else {
+                chat.showToast(Toast("Allow camera access in Settings to take photos.",
+                                     kind: .warning, autoDismiss: 4))
+                return
+            }
+            await chat.prepareMemoryForCamera()
+            guard chat.canAttachMoreImages else { return }
+            showCamera = true
+        }
+    }
+    #endif
+
     /// Load photo-library picks into the composer (downscaled by `chat.attach`), then clear the selection.
     private func loadPickedImages(_ items: [PhotosPickerItem]) {
         guard !items.isEmpty else { return }
@@ -593,7 +627,7 @@ struct Composer: View {
                 if CameraPicker.isAvailable {
                     Button {
                         focused = false
-                        showCamera = true
+                        openCamera()
                     } label: { Label("Take Photo", systemImage: "camera") }
                 }
                 #endif
