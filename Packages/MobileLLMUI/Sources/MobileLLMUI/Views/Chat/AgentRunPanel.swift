@@ -67,9 +67,10 @@ struct AgentRunPanel: View {
                 if expanded {
                     stepsList(run)
                 }
+                controls(run)
             }
             .padding(.horizontal, Theme.Space.md)
-            .padding(.vertical, expanded ? Theme.Space.md : Theme.Space.sm)
+            .padding(.vertical, (expanded || run.isResumable) ? Theme.Space.md : Theme.Space.sm)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Theme.surface2)
             .clipShape(RoundedRectangle(cornerRadius: Theme.corner, style: .continuous))
@@ -203,6 +204,24 @@ struct AgentRunPanel: View {
             }
         }
         .padding(.top, Theme.Space.xs)
+    }
+
+    // MARK: Controls
+
+    @ViewBuilder
+    private func controls(_ run: AgentRunPresentation) -> some View {
+        if run.isResumable {
+            HStack(spacing: Theme.Space.sm) {
+                Button {
+                    Task { await store.resume(conversationID: conversationID) }
+                } label: {
+                    Label("Resume", systemImage: "play.fill")
+                }
+                .buttonStyle(StudioButtonStyle(.primary))
+                .accessibilityLabel("Resume run")
+            }
+            .padding(.top, Theme.Space.xs)
+        }
     }
 
 }
