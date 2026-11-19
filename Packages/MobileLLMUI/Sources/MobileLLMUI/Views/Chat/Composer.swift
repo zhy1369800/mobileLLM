@@ -120,7 +120,10 @@ struct Composer: View {
             if new > old { focused = false }
         }
         #if os(iOS)
-        .fullScreenCover(isPresented: $showCamera) {
+        .fullScreenCover(isPresented: $showCamera, onDismiss: {
+            // UIImagePickerController resets the idle timer on dismiss; re-assert the user's setting.
+            settings.applyIdleTimer(forceRefresh: true)
+        }) {
             CameraPicker { data in
                 showCamera = false
                 if let data, !chat.attach(imageData: data) {

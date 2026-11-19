@@ -439,14 +439,20 @@ public final class AppSettings {
     public var isDownloadingProvider: (@MainActor () -> Bool)?
 
     /// Synchronize the iOS idle timer with the user preference and active background tasks.
-    public func applyIdleTimer(isDownloading: Bool? = nil) {
+    /// Pass `forceRefresh: true` after system UI (camera, Control Center, lock screen) may have
+    /// invalidated SpringBoard's idle-timer assertion while leaving UIKit's cached flag `true`.
+    public func applyIdleTimer(isDownloading: Bool? = nil, forceRefresh: Bool = false) {
         #if os(iOS)
         let downloading = isDownloading ?? (isDownloadingProvider?() ?? false)
         let target = keepScreenAwake || downloading
+        if forceRefresh && target && UIApplication.shared.isIdleTimerDisabled {
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
         UIApplication.shared.isIdleTimerDisabled = target
-        NSLog("[IdleTimer] applyIdleTimer keepScreenAwake=%@ downloading=%@ -> isIdleTimerDisabled=%@",
+        NSLog("[IdleTimer] applyIdleTimer keepScreenAwake=%@ downloading=%@ force=%@ -> isIdleTimerDisabled=%@",
               keepScreenAwake ? "true" : "false",
               downloading ? "true" : "false",
+              forceRefresh ? "true" : "false",
               target ? "true" : "false")
         #endif
     }
