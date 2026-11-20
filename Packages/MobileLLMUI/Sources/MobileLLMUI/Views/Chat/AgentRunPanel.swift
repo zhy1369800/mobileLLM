@@ -236,7 +236,7 @@ struct AgentRunPanel: View {
 
 /// One expandable action row. Collapsed: icon + readable name + one-line preview of the concrete
 /// arguments ("Search: current year"). Expanded: the full arguments and the tool's result.
-private struct AgentRunStepRow: View {
+struct AgentRunStepRow: View {
     let step: AgentRunStep
     let terminal: Bool
     @State private var expanded = false
@@ -342,5 +342,68 @@ private struct AgentRunStepRow: View {
                 .background(Theme.surface)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous))
         }
+    }
+}
+
+/// Modal trace sheet surfaced from the message action bar once a run finishes, replacing the
+/// persistent bottom panel for completed runs.
+struct AgentRunTraceSheet: View {
+    let run: AgentRunPresentation
+    @Environment(\.dismiss) private var dismiss
+
+    private var summaryTitle: String {
+        switch run.state {
+        case .completed where run.terminalReason == .completedWithFailures: return "Completed with issues"
+        case .completed: return "Completed"
+        case .failed: return run.failureMessage ?? "Failed"
+        case .cancelled: return "Stopped"
+        default: return "Agent trace"
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.Space.md) {
+                    HStack(spacing: Theme.Space.xs) {
+                        Text(summaryTitle)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Theme.textPrimary)
+                        if !run.steps.isEmpty {
+                            Text("(\(run.steps.count) action\(run.steps.count == 1 ? "" : "s"))")
+                                .font(.caption)
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(run.steps) { step in
+                            AgentRunStepRow(step: step, terminal: run.isTerminal)
+                        }
+                    }
+                    .padding(Theme.Space.md)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.corner, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.corner, style: .continuous)
+                            .stroke(Theme.hairline, lineWidth: 1)
+                    )
+                }
+                .padding(Theme.Space.lg)
+            }
+            .background(Theme.bg)
+            .navigationTitle("Run Trace")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        #if os(macOS)
+        .frame(minWidth: 420, minHeight: 320)
+        #endif
     }
 }

@@ -232,6 +232,22 @@ public struct AgentRunPresentation: Equatable, Sendable {
         return false
     }
 
+    /// Whether the run needs the inline banner card at the bottom of the thread.
+    /// Live tool calls are surfaced by `StackedToolActivityView`, and finished traces move to an
+    /// action-bar icon; the inline banner is reserved for waiting, paused, approval, or failed states.
+    public var needsBannerPanel: Bool {
+        if pendingApproval != nil || pendingUserInput != nil { return true }
+        if isWaiting { return true }
+        if state == .failed || state == .cancelled { return true }
+        return false
+    }
+
+    /// Whether this finished run has tool trace steps worth inspecting from the message action bar.
+    public var hasTraceSteps: Bool {
+        guard steps.contains(where: { $0.kind == .toolCall }) else { return false }
+        return state == .completed || state == .failed || state == .cancelled
+    }
+
     public func replacing(
         state: AgentRunState? = nil,
         terminalReason: AgentTerminalReason? = nil,

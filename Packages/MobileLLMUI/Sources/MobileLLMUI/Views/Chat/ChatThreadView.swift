@@ -48,6 +48,7 @@ struct ChatThreadView: View {
     @State private var editText = ""
     /// A mid-history regenerate awaiting confirmation (nil = none pending).
     @State private var regenTarget: Message?
+    @State private var showingAgentTrace = false
     private let bottomID = "thread-bottom"
 
     private var conversation: Conversation? { chat.activeConversation }
@@ -83,6 +84,12 @@ struct ChatThreadView: View {
         // the composer is a sibling (safe-area inset), so focusing the field never self-dismisses.
         .simultaneousGesture(TapGesture().onEnded { Self.dismissKeyboard() })
         .sheet(item: $editing) { message in editSheet(message) }
+        .sheet(isPresented: $showingAgentTrace) {
+            if let convoID = conversation?.id,
+               let run = agentRuns?.presentation(for: convoID) {
+                AgentRunTraceSheet(run: run)
+            }
+        }
         .alert("Regenerate this reply?",
                isPresented: Binding(get: { regenTarget != nil }, set: { if !$0 { regenTarget = nil } }),
                presenting: regenTarget) { message in
@@ -283,6 +290,8 @@ struct ChatThreadView: View {
 
     @ViewBuilder private func row(_ message: Message) -> some View {
         let isStreamingRow = message.id == chat.streamingMessageID
+        let isLastAssistant = message.role == .assistant &&
+            (conversation.map { chat.isLastAssistantMessage(message.id, in: $0) } ?? false)
         MessageRowItem(
             message: message,
             isStreamingRow: isStreamingRow,
@@ -291,6 +300,9 @@ struct ChatThreadView: View {
             onEdit: { beginEdit(message) },
             onCopy: { Clipboard.copy(message.answer); chat.showToast(Toast("Copied")) },
             onRegenerate: { requestRegenerate(message) },
+            isLastAssistant: isLastAssistant,
+            agentRuns: agentRuns,
+            onShowRunTrace: { showingAgentTrace = true },
             attachmentLoader: { await chat.attachmentData($0) },
             workflowStore: chat.workflowStore,
             activeID: chat.activeID,
@@ -456,9 +468,9 @@ private struct AgentRunPanelRow: View {
     let conversationID: UUID
 
     var body: some View {
-        let isVisible = store.presentation(for: conversationID)?.needsPanel == true
+        let isVisible = store.presentation(for: conversationID)?.needsBannerPanel == true
         Group {
-            if let run = store.presentation(for: conversationID), run.needsPanel {
+            if let run = store.presentation(for: conversationID), run.needsBannerPanel {
                 AgentRunPanel(store: store, conversationID: conversationID)
                     .id("agent-run-\(run.runID.description)")
                     .transition(.asymmetric(
@@ -480,6 +492,9 @@ private struct MessageRowItem: View, Equatable {
     let onEdit: (() -> Void)?
     let onCopy: () -> Void
     let onRegenerate: (() -> Void)?
+    let isLastAssistant: Bool
+    let agentRuns: AgentRunStore?
+    let onShowRunTrace: () -> Void
     let attachmentLoader: (ImageRef) async -> Data?
     let workflowStore: WorkflowStore?
     let activeID: UUID?
@@ -494,7 +509,8 @@ private struct MessageRowItem: View, Equatable {
         lhs.thinkSeconds == rhs.thinkSeconds &&
         lhs.message.stats == rhs.message.stats &&
         lhs.message.emptyOutcome == rhs.message.emptyOutcome &&
-        lhs.message.toolRuns == rhs.message.toolRuns
+        lhs.message.toolRuns == rhs.message.toolRuns &&
+        lhs.isLastAssistant == rhs.isLastAssistant
     }
 
     var body: some View {
@@ -520,6 +536,16 @@ private struct MessageRowItem: View, Equatable {
         } else if isStreamingRow {
             StreamingRow(chat: chat, displayMode: displayMode)
         } else {
+            let showTrace: Bool = {
+                guard isLastAssistant,
+                      let convoID = activeID,
+                      let run = agentRuns?.presentation(for: convoID),
+                      run.hasTraceSteps,
+                      agentRuns?.assistantMessageID(for: convoID) == message.id else {
+                    return false
+                }
+                return true
+            }()
             AssistantView(
                 reasoning: message.reasoning ?? "",
                 answer: message.answer,
@@ -531,7 +557,8 @@ private struct MessageRowItem: View, Equatable {
                 toolRuns: message.toolRuns ?? [],
                 emptyOutcome: message.emptyOutcome,
                 onCopy: onCopy,
-                onRegenerate: onRegenerate)
+                onRegenerate: onRegenerate,
+                onShowRunTrace: showTrace ? onShowRunTrace : nil)
         }
     }
 }

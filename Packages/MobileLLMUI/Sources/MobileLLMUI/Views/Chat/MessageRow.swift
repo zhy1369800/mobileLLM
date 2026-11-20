@@ -619,6 +619,7 @@ struct AssistantView: View {
     var emptyOutcome: Message.EmptyOutcome?
     var onCopy: (() -> Void)?
     var onRegenerate: (() -> Void)?
+    var onShowRunTrace: (() -> Void)? = nil
 
     @State private var activeModalSheet: AssistantModalSheet?
 
@@ -696,6 +697,11 @@ struct AssistantView: View {
                 Button { onRegenerate() } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.plain).foregroundStyle(Theme.textTertiary)
                     .accessibilityLabel("Regenerate answer")
+            }
+            if let onShowRunTrace {
+                Button { onShowRunTrace() } label: { Image(systemName: "list.bullet.rectangle") }
+                    .buttonStyle(.plain).foregroundStyle(Theme.textTertiary)
+                    .accessibilityLabel("Show agent trace")
             }
             Spacer()
         }

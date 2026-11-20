@@ -324,6 +324,10 @@ public final class AgentRunStore {
         runs.values.first { $0.runID == runID }
     }
 
+    public func assistantMessageID(for conversationID: UUID) -> UUID? {
+        assistantMessageIDs[conversationID]
+    }
+
     /// Clears the projection for a deleted conversation.
     public func discard(conversationID: UUID) {
         guard let run = runs.removeValue(forKey: conversationID) else { return }
