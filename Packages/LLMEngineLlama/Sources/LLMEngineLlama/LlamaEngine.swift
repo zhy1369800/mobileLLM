@@ -1010,8 +1010,11 @@ public actor LlamaEngine: LLMEngine {
             // whenever a vision turn goes out, which is honest either way — the first image loads the
             // encoder, later ones still have to run it).
             var messages = messages
-            if messages.contains(where: { !$0.images.isEmpty }) { _ = ensureVisionContext() }
-            if mtmdContext == nil {
+            // Defer loading the ~940 MB mmproj vision encoder until `mtmdPrefill` actually needs to
+            // encode pixels: text-only follow-ups that restore from a multimodal checkpoint never
+            // invoke mtmd, saving ~3-4s and ~940 MB on resume.
+            let hasVisionCapability = (mtmdContext != nil || projectorPath != nil)
+            if !hasVisionCapability {
                 if let last = messages.last, !last.images.isEmpty {
                     throw EngineError.visionUnavailable
                 }
@@ -2379,7 +2382,7 @@ public actor LlamaEngine: LLMEngine {
                              renderPrompt: ([ChatTurn]) -> String,
                              nBatch: Int,
                              governance: GenerationGovernance) async throws -> MultimodalPrefillResult {
-        guard let mtmdCtx = mtmdContext else { throw EngineError.visionUnavailable }
+        guard let mtmdCtx = ensureVisionContext() else { throw EngineError.visionUnavailable }
         let marker = String(cString: mtmd_default_marker())
         let rawRendered = renderPrompt(Self.injectMediaMarkers(turnsToEval, marker: marker))
         let promptText: String
