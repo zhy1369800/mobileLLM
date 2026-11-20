@@ -67,10 +67,9 @@ struct AgentRunPanel: View {
                 if expanded {
                     stepsList(run)
                 }
-                controls(run)
             }
             .padding(.horizontal, Theme.Space.md)
-            .padding(.vertical, (expanded || run.isResumable) ? Theme.Space.md : Theme.Space.sm)
+            .padding(.vertical, expanded ? Theme.Space.md : Theme.Space.sm)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Theme.surface2)
             .clipShape(RoundedRectangle(cornerRadius: Theme.corner, style: .continuous))
@@ -84,38 +83,65 @@ struct AgentRunPanel: View {
     // MARK: Activity row
 
     private func activityRow(_ run: AgentRunPresentation) -> some View {
-        Button {
-            withAnimation(Motion.spring) { expanded.toggle() }
-        } label: {
-            HStack(spacing: Theme.Space.sm) {
-                statusIcon(run)
-                HStack(spacing: Theme.Space.xs) {
-                    Text(activityTitle(run))
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Theme.textPrimary)
-                        .lineLimit(1)
-                    let subtitle = activitySubtitle(run)
-                    if !subtitle.isEmpty {
-                        let formatted = subtitle.hasPrefix("(") && subtitle.hasSuffix(")")
-                            ? subtitle
-                            : "(\(subtitle))"
-                        Text(formatted)
-                            .font(.caption)
-                            .foregroundStyle(Theme.textSecondary)
+        HStack(spacing: Theme.Space.sm) {
+            Button {
+                withAnimation(Motion.spring) { expanded.toggle() }
+            } label: {
+                HStack(spacing: Theme.Space.sm) {
+                    statusIcon(run)
+                    HStack(spacing: Theme.Space.xs) {
+                        Text(activityTitle(run))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Theme.textPrimary)
                             .lineLimit(1)
-                            .layoutPriority(run.isTerminal ? 1 : 0)
+                        let subtitle = activitySubtitle(run)
+                        if !subtitle.isEmpty {
+                            let formatted = subtitle.hasPrefix("(") && subtitle.hasSuffix(")")
+                                ? subtitle
+                                : "(\(subtitle))"
+                            Text(formatted)
+                                .font(.caption)
+                                .foregroundStyle(Theme.textSecondary)
+                                .lineLimit(1)
+                                .layoutPriority(run.isTerminal ? 1 : 0)
+                        }
                     }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(activityTitle(run))
+            .accessibilityHint("Show or hide run steps")
+
+            if run.isResumable {
+                Button {
+                    Task { await store.resume(conversationID: conversationID) }
+                } label: {
+                    Label("Resume", systemImage: "play.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.onAccent)
+                        .padding(.horizontal, Theme.Space.sm)
+                        .padding(.vertical, 5)
+                        .background(Theme.accent, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Resume run")
+            }
+
+            Button {
+                withAnimation(Motion.spring) { expanded.toggle() }
+            } label: {
                 Image(systemName: "chevron.down")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Theme.textTertiary)
                     .rotationEffect(.degrees(expanded ? 180 : 0))
+                    .padding(.leading, 2)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityHidden(true)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(activityTitle(run))
-        .accessibilityHint("Show or hide run steps")
     }
 
     private func statusIcon(_ run: AgentRunPresentation) -> some View {
@@ -173,12 +199,12 @@ struct AgentRunPanel: View {
             )
             if !preview.isEmpty { return preview }
         }
-        if !run.isTerminal, !run.provisionalText.isEmpty { return "Typing…" }
+        if !run.isTerminal, !run.isResumable, !run.provisionalText.isEmpty { return "Typing…" }
         switch run.blockingReason {
         case .approval: return "Approve or deny below"
         case .userInput: return "Reply below"
         case .reconciliation: return "Confirm below"
-        case .paused: return "Resume to continue"
+        case .paused: return ""
         case .foreground: return "Return to the app to resume"
         case .modelResource: return "Waiting for the model"
         case nil:
@@ -204,24 +230,6 @@ struct AgentRunPanel: View {
             }
         }
         .padding(.top, Theme.Space.xs)
-    }
-
-    // MARK: Controls
-
-    @ViewBuilder
-    private func controls(_ run: AgentRunPresentation) -> some View {
-        if run.isResumable {
-            HStack(spacing: Theme.Space.sm) {
-                Button {
-                    Task { await store.resume(conversationID: conversationID) }
-                } label: {
-                    Label("Resume", systemImage: "play.fill")
-                }
-                .buttonStyle(StudioButtonStyle(.primary))
-                .accessibilityLabel("Resume run")
-            }
-            .padding(.top, Theme.Space.xs)
-        }
     }
 
 }
