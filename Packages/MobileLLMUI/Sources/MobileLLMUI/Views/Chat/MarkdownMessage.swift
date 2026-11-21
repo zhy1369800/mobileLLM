@@ -60,15 +60,15 @@ struct MarkdownBlock: Identifiable, Equatable {
             // Stream performance guard: while generating (streaming), keep all fences as lightweight
             // code to prevent WebKit instantiation thrashing on every token. Activate rich rendering only
             // after the closing fence is received in the finalized non-streaming message.
-            if line.hasPrefix("```") {
+            if let fenceRest = fenceInfo(line) {
                 flushProse()
-                let rawLang = line.dropFirst(3).trimmingCharacters(in: .whitespaces)
+                let rawLang = fenceRest.trimmingCharacters(in: .whitespaces)
                 let lang = rawLang.lowercased()
                 var code: [String] = []
                 i += 1
                 var isClosed = false
                 while i < lines.count {
-                    if lines[i].hasPrefix("```") {
+                    if fenceInfo(lines[i]) != nil {
                         isClosed = true
                         i += 1   // consume the closing fence
                         break
@@ -160,6 +160,13 @@ struct MarkdownBlock: Identifiable, Equatable {
         }
         flushProse()
         return blocks
+    }
+
+    /// Zero-allocation check for a fenced code delimiter (` ``` `), tolerating leading indentation.
+    private static func fenceInfo(_ line: String) -> Substring? {
+        let stripped = line.drop(while: { $0 == " " || $0 == "\t" })
+        guard stripped.hasPrefix("```") else { return nil }
+        return stripped.dropFirst(3)
     }
 
     // MARK: - Line classifiers
@@ -450,8 +457,8 @@ enum MarkdownBlockCache {
         var fenceCount = 0
         var lastNonEmptyLine = ""
         for line in candidate.components(separatedBy: "\n") {
-            if line.hasPrefix("```") { fenceCount += 1 }
             let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") { fenceCount += 1 }
             if !trimmed.isEmpty { lastNonEmptyLine = trimmed }
         }
         guard fenceCount % 2 == 0, !lastNonEmptyLine.isEmpty else { return nil }

@@ -534,4 +534,27 @@ final class MarkdownParsingTests: XCTestCase {
             XCTAssertEqual(incremental, reference)
         }
     }
+
+    func testIndentedFencedCodeBlockRendersAsCodeCard() {
+        let md = """
+        1. 示例用户：
+
+          ```json
+          {
+            "name": "李四",
+            "email": "lisi@example.com"
+          }
+          ```
+
+        后续说明文字。
+        """
+        let blocks = MarkdownBlock.parse(md, isStreaming: false)
+        XCTAssertEqual(blocks.count, 3)
+        guard case let .code(language, code) = blocks[1].kind else {
+            return XCTFail("Expected indented fenced JSON to parse as .code block, got \(blocks)")
+        }
+        XCTAssertEqual(language, "json")
+        XCTAssertTrue(code.contains("\"name\": \"李四\""))
+        XCTAssertEqual(blocks[2].kind, .prose("后续说明文字。"))
+    }
 }
