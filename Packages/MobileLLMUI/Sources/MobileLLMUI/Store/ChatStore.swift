@@ -393,7 +393,7 @@ public final class ChatStore {
     private func scheduleStreamingFlush() {
         guard streamFlushTask == nil else { return }
         streamFlushTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            try? await Task.sleep(nanoseconds: 16_000_000)
             guard let self else { return }
             self.streamFlushTask = nil
             self.flushStreamingBuffer()

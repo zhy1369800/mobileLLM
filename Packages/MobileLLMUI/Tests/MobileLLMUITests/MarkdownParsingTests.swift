@@ -371,13 +371,13 @@ final class MarkdownParsingTests: XCTestCase {
     func testStreamingPacerCadenceSteps() {
         XCTAssertEqual(StreamingPacer.nextStep(backlog: 0), 1)
         XCTAssertEqual(StreamingPacer.nextStep(backlog: 1), 1)
-        XCTAssertEqual(StreamingPacer.nextStep(backlog: 2), 2)
-        XCTAssertEqual(StreamingPacer.nextStep(backlog: 4), 2)
-        XCTAssertEqual(StreamingPacer.nextStep(backlog: 5), 4)
-        XCTAssertEqual(StreamingPacer.nextStep(backlog: 16), 4)
-        XCTAssertEqual(StreamingPacer.nextStep(backlog: 18), 6)
-        XCTAssertEqual(StreamingPacer.nextStep(backlog: 60), 20)
-        XCTAssertEqual(StreamingPacer.nextStep(backlog: 500), 120) // Clamped at 120
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 2), 1)
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 4), 1)
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 5), 2)
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 16), 2)
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 18), 3)
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 60), 10)
+        XCTAssertEqual(StreamingPacer.nextStep(backlog: 500), 60) // Clamped at 60 for 60fps pacing
     }
 
     func testStreamingPacerAdvanceText() {

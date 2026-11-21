@@ -455,11 +455,31 @@ enum MarkdownBlockCache {
             if !trimmed.isEmpty { lastNonEmptyLine = trimmed }
         }
         guard fenceCount % 2 == 0, !lastNonEmptyLine.isEmpty else { return nil }
-        // Do not split right after a list item, quote, or table row in case the next line continues it
-        if let firstChar = lastNonEmptyLine.first, "-*+>".contains(firstChar) { return nil }
+
+        // Check what follows `\n\n` — if the next non-empty line clearly starts a new block
+        // (e.g. heading, fenced code, or non-indented prose), it is safe to freeze the prefix
+        // even when the prefix ended with a list or quote.
+        let after = slice[range.upperBound...].drop(while: { $0 == "\n" || $0 == "\r" })
+        if after.isEmpty { return nil }
+        let nextLine = after.prefix(while: { $0 != "\n" })
+        let nextTrimmed = nextLine.trimmingCharacters(in: .whitespaces)
+        if nextTrimmed.isEmpty { return nil }
+
+        // Keep tables together across blank lines and keep indented continuations attached.
         if lastNonEmptyLine.contains("|") { return nil }
-        if lastNonEmptyLine.first?.isNumber == true && (lastNonEmptyLine.contains(". ") || lastNonEmptyLine.contains(") ")) {
-            return nil
+        let startsWithListOrQuote: Bool = {
+            if let firstChar = lastNonEmptyLine.first, "-*+>".contains(firstChar) { return true }
+            return lastNonEmptyLine.first?.isNumber == true && (lastNonEmptyLine.contains(". ") || lastNonEmptyLine.contains(") "))
+        }()
+        if startsWithListOrQuote {
+            let nextIsIndented = nextLine.first == " " || nextLine.first == "\t"
+            let nextIsListOrQuote: Bool = {
+                if let c = nextTrimmed.first, "-*+>".contains(c) { return true }
+                return nextTrimmed.first?.isNumber == true && (nextTrimmed.contains(". ") || nextTrimmed.contains(") "))
+            }()
+            if nextIsIndented || nextIsListOrQuote {
+                return nil
+            }
         }
         return range.upperBound
     }
@@ -527,14 +547,14 @@ struct MarkdownMessage: View {
 /// Pure helper calculating smooth typing cadence and safe character advancement.
 enum StreamingPacer {
     /// Adaptive step count based on unrendered backlog size (in characters) to provide
-    /// smooth typewriter cadence (~20 fps) without falling behind bursty cloud providers.
+    /// smooth ~60 fps typewriter cadence without falling behind bursty cloud providers.
     static func nextStep(backlog: Int) -> Int {
         if backlog <= 4 {
-            return min(max(1, backlog), 2)
+            return 1
         } else if backlog <= 16 {
-            return 4
+            return 2
         } else {
-            return min(120, max(6, backlog / 3))
+            return min(60, max(3, backlog / 6))
         }
     }
 
@@ -587,7 +607,7 @@ struct StreamingMarkdown: View {
     @State private var target = ""
     @State private var ticker: Task<Void, Never>?
 
-    private static let frameIntervalNs: UInt64 = 50_000_000 // 50ms (20 fps, aligned with kelivo)
+    private static let frameIntervalNs: UInt64 = 16_666_667 // ~60 fps smooth pacing
 
     var body: some View {
         MarkdownMessage(text: shown + "\u{258C}", isStreaming: true)
