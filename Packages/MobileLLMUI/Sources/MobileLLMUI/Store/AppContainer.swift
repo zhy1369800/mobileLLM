@@ -19,7 +19,6 @@ public final class AppContainer {
     public let conversationStore: ConversationStore
     public let models: ModelManager
     public let speech: StreamingSpeechCoordinator
-    public private(set) var kokoroModels: KokoroModelManager
     public let chat: ChatStore
     /// The per-conversation skill packs (Skills v1). Persisted beside the conversation records + tool
     /// memory; surfaced to the composer's Skill menu and the management screen.
@@ -155,9 +154,6 @@ public final class AppContainer {
             settings: settings
         )
         self.speech = speechCoordinator
-        self.kokoroModels = KokoroModelManager(
-            rootDirectory: downloadBase.appendingPathComponent("TTS", isDirectory: true)
-        )
         self.lifecycle.onEnterBackground = { [weak speechCoordinator] in
             speechCoordinator?.stop(suppressCurrentTurn: true)
         }
@@ -170,23 +166,6 @@ public final class AppContainer {
                               workflowStore: self.workflowStore,
                               openAICredentials: self.openAICredentials,
                               speech: speechCoordinator)
-        // Must be wired after `self.chat` is initialized so `[weak self]` is valid.
-        speechCoordinator.onPrepareMemoryForNeuralTTS = { [weak self] in
-            guard let self else { return true }
-            let freeBytes = availableMemory()
-            if !self.chat.isStreaming {
-                // Not generating: safe to reclaim vision mmproj & KV decode buffers when RAM < 900 MB.
-                if freeBytes > 0, freeBytes < 900 * 1024 * 1024 {
-                    await self.engine.releaseTransientMemory()
-                }
-                return true
-            }
-            // Mid-generation: avoid interrupting live KV cache; fall back to Apple voice under critical RAM pressure (< 450 MB).
-            if freeBytes > 0, freeBytes < 450 * 1024 * 1024 {
-                return false
-            }
-            return true
-        }
         // Cold launch restores identity only, so the first turn is where the weights are actually loaded.
         // A false answer stops the turn instead of generating against an empty engine.
         chat.ensureModelReady = { [weak self] in
@@ -364,29 +343,10 @@ public final class AppContainer {
         return stable.first
     }
 
-    /// Attaches the offline Kokoro neural TTS archive extractor and runtime engine after container init.
-    public func attachKokoro(
-        extractor: @escaping KokoroArchiveExtractor,
-        engineFactory: @MainActor (KokoroModelManager) -> any TTSEngine
-    ) {
-        let manager = KokoroModelManager(
-            rootDirectory: kokoroModels.rootDirectory,
-            extractor: extractor
-        )
-        manager.onWillExtract = { [weak self] in
-            guard let self else { return }
-            await self.engine.releaseTransientMemory()
-            self.suspendModel()
-        }
-        self.kokoroModels = manager
-        self.speech.kokoroEngine = engineFactory(manager)
-    }
-
     /// Free the resident model's weights while idle (app backgrounded, or the user left the chat), but
     /// keep the active-model identity so the next turn reloads it. On the 8 GB phone this is what stops
     /// a 5 GB model from being jetsam-killed in the background — and stops it hogging memory when unused.
     public func suspendModel() {
-        speech.unloadNeuralEngine()
         guard !chat.isStreaming else { return }   // never unload mid-generation
         Task { await models.suspend(); syncActive() }
     }

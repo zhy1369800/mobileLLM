@@ -3,7 +3,6 @@
 import SwiftUI
 import AppRuntime
 import MobileLLMUI
-import TTSEngineKokoro
 import LLMCore
 import LLMEngineMLX
 import LLMEngineLlama
@@ -524,14 +523,6 @@ struct MobileLLMApp: App {
         container.lifecycle.suspendModel = { [weak container] in
             container?.suspendModel()
         }
-        container.attachKokoro(
-            extractor: { archiveURL, destinationDir in
-                try await KokoroTarBz2Extractor.extract(archiveURL: archiveURL, destinationDir: destinationDir)
-            },
-            engineFactory: { manager in
-                KokoroTTSEngine(modelManager: manager)
-            }
-        )
         // Online Responses config box: the provider reads it on worker threads; the app refreshes the
         // non-secret values from Settings on the main actor at every submission.
         let onlineConfigBox = OpenAIOnlineConfigurationBox(

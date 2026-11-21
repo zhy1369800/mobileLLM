@@ -30,7 +30,6 @@ packages:
   LLMEngineLlama: { path: Packages/LLMEngineLlama }
   LLMEngineApple: { path: Packages/LLMEngineApple }
   MobileLLMUI: { path: Packages/MobileLLMUI }
-  TTSEngineKokoro: { path: Packages/TTSEngineKokoro }
 
 targets:
   mobileLLM:
@@ -90,8 +89,6 @@ targets:
         basedOnDependencyAnalysis: false
     dependencies:
       - package: MobileLLMUI
-      - package: TTSEngineKokoro
-        product: TTSEngineKokoro
       - package: LLMEngineMLX
         product: LLMEngineMLX
       - package: LLMEngineLlama
@@ -170,8 +167,6 @@ targets:
       - package: LLMCore
       - package: AppRuntime
       - package: MobileLLMUI
-      - package: TTSEngineKokoro
-        product: TTSEngineKokoro
 
 schemes:
   # The app scheme is declared explicitly because defining any scheme below turns off Xcode's implicit

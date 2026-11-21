@@ -8,13 +8,10 @@ private final class MockTTSEngine: TTSEngine {
     let id = "mock-tts"
     let displayName = "Mock TTS"
     private(set) var isSpeaking = false
-    var isReady = true
-    var onExternalInterruption: (@MainActor @Sendable () -> Void)?
+    var onExternalInterruption: (@MainActor () -> Void)?
     private(set) var spokenSegments: [String] = []
-    private(set) var lastVoiceID: String?
     private(set) var stopCount = 0
     private(set) var endSessionCount = 0
-    private(set) var unloadCount = 0
 
     var shouldHang = false
     var consecutiveErrorsRemaining = 0
@@ -34,7 +31,6 @@ private final class MockTTSEngine: TTSEngine {
             throw NSError(domain: "MockTTSEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: "Synthetic failure"])
         }
         spokenSegments.append(text)
-        lastVoiceID = voiceID
         guard shouldHang else { return }
 
         isSpeaking = true
@@ -59,10 +55,6 @@ private final class MockTTSEngine: TTSEngine {
 
     func endPlaybackSession() {
         endSessionCount += 1
-    }
-
-    func unload() {
-        unloadCount += 1
     }
 }
 
@@ -236,15 +228,11 @@ final class StreamingSpeechTests: XCTestCase {
         first.autoSpeakResponses = true
         first.ttsSpeechRate = 1.4
         first.ttsVoiceIdentifier = "com.apple.voice.enhanced.zh-CN.Tingting"
-        first.ttsEngineKind = .kokoroOffline
-        first.kokoroVoiceID = "zf_001"
 
         let reloaded = AppSettings(defaults: defaults, keychain: nil)
         XCTAssertTrue(reloaded.autoSpeakResponses)
         XCTAssertEqual(reloaded.ttsSpeechRate, 1.4, accuracy: 0.001)
         XCTAssertEqual(reloaded.ttsVoiceIdentifier, "com.apple.voice.enhanced.zh-CN.Tingting")
-        XCTAssertEqual(reloaded.ttsEngineKind, .kokoroOffline)
-        XCTAssertEqual(reloaded.kokoroVoiceID, "zf_001")
     }
 
     func testExternalInterruptionStopsAndSuppressesTurn() async {
@@ -268,77 +256,5 @@ final class StreamingSpeechTests: XCTestCase {
         coordinator.feed(delta: "Should stay silent. ", messageID: turnID)
         await Task.yield()
         XCTAssertEqual(engine.spokenSegments, ["Speaking before call."])
-    }
-
-    func testKokoroEngineSelectionAndFallbackWhenNotReady() async {
-        let settings = makeSettings(autoSpeak: true)
-        settings.ttsEngineKind = .kokoroOffline
-        settings.kokoroVoiceID = "zf_002"
-
-        let appleEngine = MockTTSEngine()
-        let kokoroEngine = MockTTSEngine()
-        kokoroEngine.isReady = false
-
-        let coordinator = StreamingSpeechCoordinator(
-            engine: appleEngine,
-            kokoroEngine: kokoroEngine,
-            settings: settings
-        )
-
-        // Not ready yet -> falls back to Apple engine.
-        coordinator.speakMessage(text: "Fallback test.", messageID: UUID())
-        for _ in 0..<10 where coordinator.isSpeaking {
-            await Task.yield()
-        }
-        XCTAssertEqual(appleEngine.spokenSegments, ["Fallback test."])
-        XCTAssertEqual(kokoroEngine.spokenSegments, [])
-
-        // Once Kokoro becomes ready -> routes to Kokoro with kokoroVoiceID.
-        kokoroEngine.isReady = true
-        coordinator.speakMessage(text: "Neural voice ready.", messageID: UUID())
-        for _ in 0..<10 where coordinator.isSpeaking {
-            await Task.yield()
-        }
-        XCTAssertEqual(kokoroEngine.spokenSegments, ["Neural voice ready."])
-        XCTAssertEqual(kokoroEngine.lastVoiceID, "zf_002")
-    }
-
-    func testNeuralEngineTriggersMemoryTrimAndUnload() async {
-        let settings = makeSettings(autoSpeak: true)
-        settings.ttsEngineKind = .kokoroOffline
-
-        let appleEngine = MockTTSEngine()
-        let kokoroEngine = MockTTSEngine()
-        kokoroEngine.isReady = true
-
-        let coordinator = StreamingSpeechCoordinator(
-            engine: appleEngine,
-            kokoroEngine: kokoroEngine,
-            settings: settings
-        )
-
-        var memoryTrimCalls = 0
-        coordinator.onPrepareMemoryForNeuralTTS = {
-            memoryTrimCalls += 1
-            return true
-        }
-
-        coordinator.speakMessage(text: "Memory check.", messageID: UUID())
-        for _ in 0..<10 where coordinator.isSpeaking {
-            await Task.yield()
-        }
-        XCTAssertEqual(memoryTrimCalls, 1)
-        XCTAssertEqual(kokoroEngine.spokenSegments, ["Memory check."])
-
-        // Under critical RAM pressure (< 450 MB), returning false falls back to Apple engine.
-        coordinator.onPrepareMemoryForNeuralTTS = { false }
-        coordinator.speakMessage(text: "Low RAM fallback.", messageID: UUID())
-        for _ in 0..<10 where coordinator.isSpeaking {
-            await Task.yield()
-        }
-        XCTAssertEqual(appleEngine.spokenSegments, ["Low RAM fallback."])
-
-        coordinator.unloadNeuralEngine()
-        XCTAssertEqual(kokoroEngine.unloadCount, 1)
     }
 }
