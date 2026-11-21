@@ -238,7 +238,10 @@ public struct AgentRunPresentation: Equatable, Sendable {
     public var needsBannerPanel: Bool {
         if pendingApproval != nil || pendingUserInput != nil { return true }
         if isWaiting { return true }
-        if state == .failed || state == .cancelled { return true }
+        if state == .failed { return true }
+        if state == .cancelled {
+            return steps.contains { $0.kind == .toolCall || $0.kind == .approval }
+        }
         return false
     }
 
