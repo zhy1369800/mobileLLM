@@ -250,14 +250,39 @@ struct SettingsView: View {
                 isOn: $settings.autoSpeakResponses
             )
             hairline
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Voice engine").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                Segmented(selection: $settings.ttsEngineKind, options: TTSEngineKind.allCases) { $0.displayName }
+                    .onChange(of: settings.ttsEngineKind) { _, newValue in
+                        container.speech.stop(suppressCurrentTurn: false)
+                        if newValue == .appleSystem {
+                            container.speech.unloadNeuralEngine()
+                        }
+                    }
+            }
+            if settings.ttsEngineKind == .kokoroOffline {
+                hairline
+                kokoroModelRow
+                hairline
+                kokoroVoicePickerRow
+            } else {
+                hairline
+                speechVoicePickerRow
+            }
+            hairline
             sliderRow("Speech rate", value: $settings.ttsSpeechRate, range: 0.5...2.0, step: 0.1, format: "%.1fx")
             hairline
-            speechVoicePickerRow
-            hairline
             HStack {
-                Text("Preview voice")
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.textSecondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Preview voice")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.textSecondary)
+                    if settings.ttsEngineKind == .kokoroOffline, !container.kokoroModels.state.isReady {
+                        Text("Using Apple voice fallback until Kokoro is downloaded.")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                }
                 Spacer()
                 Button {
                     if container.speech.isSpeaking {
@@ -277,6 +302,129 @@ struct SettingsView: View {
                     .foregroundStyle(Theme.accent)
                 }
                 .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var kokoroModelRow: some View {
+        let manager = container.kokoroModels
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Kokoro v1.1 (ZH/EN)")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.textSecondary)
+                    switch manager.state {
+                    case .notInstalled:
+                        Text("Offline neural voice · ~120 MB download")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textTertiary)
+                    case .downloading(let progress):
+                        Text("Downloading… \(Int(progress * 100))%")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textTertiary)
+                    case .extracting:
+                        Text("Extracting model files…")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textTertiary)
+                    case .ready(let sizeBytes):
+                        let sizeLabel = ByteCountFormatter.string(fromByteCount: sizeBytes, countStyle: .file)
+                        Text("Ready · \(sizeLabel)")
+                            .font(.caption)
+                            .foregroundStyle(Theme.fitGreen)
+                    case .failed(let message):
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(Theme.danger)
+                            .lineLimit(2)
+                    }
+                }
+                Spacer()
+                switch manager.state {
+                case .notInstalled, .failed:
+                    Button("Download") {
+                        manager.startDownload()
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.accent)
+                    .buttonStyle(.plain)
+                case .downloading:
+                    Button("Cancel") {
+                        manager.cancelDownload()
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.textTertiary)
+                    .buttonStyle(.plain)
+                case .extracting:
+                    ProgressView().controlSize(.small)
+                case .ready:
+                    Button("Remove") {
+                        container.speech.stop(suppressCurrentTurn: false)
+                        container.speech.unloadNeuralEngine()
+                        manager.deleteModel()
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.danger)
+                    .buttonStyle(.plain)
+                }
+            }
+            if case .downloading(let progress) = manager.state {
+                ProgressView(value: progress)
+                    .tint(Theme.accent)
+            }
+        }
+    }
+
+    private var selectedKokoroVoiceLabel: String {
+        guard let id = settings.kokoroVoiceID,
+              let preset = KokoroVoicePreset.curated.first(where: { $0.id == id }) else {
+            return "Auto (match language)"
+        }
+        return preset.name
+    }
+
+    private var kokoroVoicePickerRow: some View {
+        HStack {
+            Text("Voice").font(.subheadline).foregroundStyle(Theme.textSecondary)
+            Spacer()
+            Menu {
+                Button {
+                    settings.kokoroVoiceID = nil
+                } label: {
+                    if settings.kokoroVoiceID == nil {
+                        Label("Auto (match language)", systemImage: "checkmark")
+                    } else {
+                        Text("Auto (match language)")
+                    }
+                }
+                Section("Chinese") {
+                    ForEach(KokoroVoicePreset.curated.filter { $0.language.hasPrefix("zh") }) { preset in
+                        Button {
+                            settings.kokoroVoiceID = preset.id
+                        } label: {
+                            if settings.kokoroVoiceID == preset.id {
+                                Label(preset.name, systemImage: "checkmark")
+                            } else {
+                                Text(preset.name)
+                            }
+                        }
+                    }
+                }
+                Section("English") {
+                    ForEach(KokoroVoicePreset.curated.filter { $0.language.hasPrefix("en") }) { preset in
+                        Button {
+                            settings.kokoroVoiceID = preset.id
+                        } label: {
+                            if settings.kokoroVoiceID == preset.id {
+                                Label(preset.name, systemImage: "checkmark")
+                            } else {
+                                Text(preset.name)
+                            }
+                        }
+                    }
+                }
+            } label: {
+                menuLabel(selectedKokoroVoiceLabel)
             }
         }
     }

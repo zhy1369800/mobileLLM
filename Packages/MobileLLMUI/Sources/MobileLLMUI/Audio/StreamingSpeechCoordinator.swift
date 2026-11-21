@@ -19,6 +19,18 @@ public final class StreamingSpeechCoordinator {
     public private(set) var isSuppressedForCurrentTurn: Bool = false
 
     public let engine: any TTSEngine
+    public var kokoroEngine: (any TTSEngine)? {
+        didSet {
+            kokoroEngine?.onExternalInterruption = { [weak self] in
+                self?.stop(suppressCurrentTurn: true)
+            }
+        }
+    }
+    /// Hook invoked before loading/running the offline neural TTS engine so the app can
+    /// release transient LLM buffers (e.g. vision mmproj and KV decode cache).
+    /// Return `true` to proceed with Kokoro, or `false` to fall back to the Apple system voice for this batch.
+    public var onPrepareMemoryForNeuralTTS: (@MainActor () async -> Bool)?
+
     private let settings: AppSettings
 
     @ObservationIgnored private var segmenter = SentenceSegmenter()
@@ -28,16 +40,38 @@ public final class StreamingSpeechCoordinator {
     @ObservationIgnored private var hasFedStreamingText: Bool = false
     @ObservationIgnored private var sessionGeneration: UInt64 = 0
 
-    public init(engine: (any TTSEngine)? = nil, settings: AppSettings) {
+    public init(
+        engine: (any TTSEngine)? = nil,
+        kokoroEngine: (any TTSEngine)? = nil,
+        settings: AppSettings
+    ) {
         self.engine = engine ?? AppleSystemTTSEngine()
+        self.kokoroEngine = kokoroEngine
         self.settings = settings
         self.engine.onExternalInterruption = { [weak self] in
             self?.stop(suppressCurrentTurn: true)
         }
+        self.kokoroEngine?.onExternalInterruption = { [weak self] in
+            self?.stop(suppressCurrentTurn: true)
+        }
+    }
+
+    /// Returns the currently selected and ready engine, falling back to `engine` (Apple System)
+    /// when the offline neural model is not yet installed.
+    public func activeEngine() -> any TTSEngine {
+        if settings.ttsEngineKind == .kokoroOffline, let kokoroEngine, kokoroEngine.isReady {
+            return kokoroEngine
+        }
+        return engine
     }
 
     public func availableVoices() -> [TTSVoiceInfo] {
-        engine.availableVoices()
+        activeEngine().availableVoices()
+    }
+
+    /// Releases resident neural TTS weights from memory (e.g. when app enters background).
+    public func unloadNeuralEngine() {
+        kokoroEngine?.unload()
     }
 
     // MARK: - Streaming Turn Lifecycle
@@ -140,6 +174,8 @@ public final class StreamingSpeechCoordinator {
         drainTask = nil
         engine.stop()
         engine.endPlaybackSession()
+        kokoroEngine?.stop()
+        kokoroEngine?.endPlaybackSession()
         isSpeaking = false
         speakingMessageID = nil
     }
@@ -160,14 +196,28 @@ public final class StreamingSpeechCoordinator {
 
         drainTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            var targetEngine = self.activeEngine()
+            var usingNeural = targetEngine === self.kokoroEngine
+            if usingNeural, let prepareMemory = self.onPrepareMemoryForNeuralTTS {
+                let allowNeural = await prepareMemory()
+                if !allowNeural {
+                    targetEngine = self.engine
+                    usingNeural = false
+                }
+            }
+            guard self.sessionGeneration == generation, !Task.isCancelled else { return }
+
+            let preferredVoiceID = usingNeural
+                ? self.settings.kokoroVoiceID
+                : self.settings.ttsVoiceIdentifier
             var consecutiveFailures = 0
 
             while self.sessionGeneration == generation, !Task.isCancelled, !self.queue.isEmpty {
                 let nextSentence = self.queue.removeFirst()
                 do {
-                    try await self.engine.speak(
+                    try await targetEngine.speak(
                         text: nextSentence,
-                        voiceID: self.settings.ttsVoiceIdentifier,
+                        voiceID: preferredVoiceID,
                         rate: self.settings.ttsSpeechRate
                     )
                     consecutiveFailures = 0
@@ -187,7 +237,7 @@ public final class StreamingSpeechCoordinator {
             self.drainTask = nil
             self.isSpeaking = false
             self.speakingMessageID = nil
-            self.engine.endPlaybackSession()
+            targetEngine.endPlaybackSession()
         }
     }
 }

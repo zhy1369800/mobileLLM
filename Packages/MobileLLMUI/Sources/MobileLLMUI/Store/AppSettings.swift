@@ -190,6 +190,10 @@ public final class AppSettings {
     public var ttsSpeechRate: Double { didSet { persist() } }
     /// Optional preferred voice identifier (`nil` = auto-detect language per sentence).
     public var ttsVoiceIdentifier: String? { didSet { persist() } }
+    /// Preferred speech synthesis backend (Apple native vs. Kokoro offline neural).
+    public var ttsEngineKind: TTSEngineKind { didSet { persist() } }
+    /// Preferred Kokoro speaker identifier (e.g. `"zf_xiaobei"` or `"af_heart"`).
+    public var kokoroVoiceID: String? { didSet { persist() } }
     /// Remote MCP servers whose tools join the agent's tool set when tools are on. Bearer tokens are kept
     /// in the Keychain, not this snapshot (A2.9) — the didSet reconciles them on every change.
     public var mcpServers: [MCPServer] {
@@ -529,6 +533,8 @@ public final class AppSettings {
         autoSpeakResponses = snap?.autoSpeakResponses ?? false
         ttsSpeechRate = snap?.ttsSpeechRate ?? 1.0
         ttsVoiceIdentifier = snap?.ttsVoiceIdentifier ?? nil
+        ttsEngineKind = snap?.ttsEngineKind ?? .appleSystem
+        kokoroVoiceID = snap?.kokoroVoiceID ?? nil
         let (servers, migrated) = Self.loadMCPServers(from: snap, keychain: keychain)
         mcpServers = servers
         // Absent in pre-D2 snapshots → the default disabled set (privacy tools off), matching
@@ -748,6 +754,8 @@ public final class AppSettings {
         var autoSpeakResponses: Bool? = false
         var ttsSpeechRate: Double? = 1.0
         var ttsVoiceIdentifier: String? = nil
+        var ttsEngineKind: TTSEngineKind? = .appleSystem
+        var kokoroVoiceID: String? = nil
         var mcpServers: [MCPServer]? = []
         /// Ids of servers whose bearer token lives in the Keychain (A2.9). Absent in pre-migration
         /// snapshots — the loader then treats any inline `token` as legacy plaintext to migrate.
@@ -810,6 +818,8 @@ public final class AppSettings {
                             autoSpeakResponses: autoSpeakResponses,
                             ttsSpeechRate: ttsSpeechRate,
                             ttsVoiceIdentifier: ttsVoiceIdentifier,
+                            ttsEngineKind: ttsEngineKind,
+                            kokoroVoiceID: kokoroVoiceID,
                             mcpServers: scrubbed, mcpTokenMarkers: markers,
                             disabledBuiltInTools: disabledBuiltInTools, searchEngines: searchEngines,
                             webSearchOnlineServiceID: webSearchOnlineServiceID,
