@@ -22,6 +22,7 @@ struct SettingsView: View {
     @State private var showShortcuts = false
     @State private var showLocalLogs = false
     @State private var isAdvancedExpanded = false
+    @State private var availableVoices: [TTSVoiceInfo] = []
 
     init(container: AppContainer) {
         self.container = container
@@ -34,6 +35,7 @@ struct SettingsView: View {
                 assistantSection
                 modelsSection
                 conversationSection
+                speechSection
                 samplingSection
                 systemSection
                 privacySection
@@ -45,6 +47,13 @@ struct SettingsView: View {
         }
         .background(Theme.bg)
         .task {
+            if container.speech.engine is AppleSystemTTSEngine {
+                availableVoices = await Task.detached(priority: .utility) {
+                    AppleSystemTTSEngine.loadAvailableVoices()
+                }.value
+            } else {
+                availableVoices = container.speech.availableVoices()
+            }
             storageBytes = await container.conversationStore.storageBytes()
             await container.localModelLogs.reloadAsync()
         }
@@ -228,6 +237,103 @@ struct SettingsView: View {
             }
             hairline
             contextRow
+        }
+    }
+
+    // MARK: Speech & Voice Output
+
+    private var speechSection: some View {
+        section("Speech & Voice Output", icon: "speaker.wave.2") {
+            toggleRow(
+                "Auto-speak responses",
+                subtitle: "Stream assistant replies sentence by sentence while generating.",
+                isOn: $settings.autoSpeakResponses
+            )
+            hairline
+            sliderRow("Speech rate", value: $settings.ttsSpeechRate, range: 0.5...2.0, step: 0.1, format: "%.1fx")
+            hairline
+            speechVoicePickerRow
+            hairline
+            HStack {
+                Text("Preview voice")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textSecondary)
+                Spacer()
+                Button {
+                    if container.speech.isSpeaking {
+                        container.speech.stop(suppressCurrentTurn: false)
+                    } else {
+                        container.speech.speakMessage(
+                            text: "Hello! 你好，这是实时语音播报效果预览。",
+                            messageID: nil
+                        )
+                    }
+                } label: {
+                    Label(
+                        container.speech.isSpeaking ? "Stop" : "Test voice",
+                        systemImage: container.speech.isSpeaking ? "stop.circle.fill" : "play.circle.fill"
+                    )
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.accent)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var selectedVoiceLabel: String {
+        guard let id = settings.ttsVoiceIdentifier, !id.isEmpty else {
+            return "Auto (match language)"
+        }
+        if let voice = availableVoices.first(where: { $0.id == id }) {
+            return "\(voice.name) (\(voice.language))"
+        }
+        return "Custom voice"
+    }
+
+    private var speechVoicePickerRow: some View {
+        HStack {
+            Text("Voice").font(.subheadline).foregroundStyle(Theme.textSecondary)
+            Spacer()
+            Menu {
+                Button {
+                    settings.ttsVoiceIdentifier = nil
+                } label: {
+                    if settings.ttsVoiceIdentifier == nil {
+                        Label("Auto (match language)", systemImage: "checkmark")
+                    } else {
+                        Text("Auto (match language)")
+                    }
+                }
+                let languageGroups: [(title: String, prefix: String)] = [
+                    ("Chinese", "zh"),
+                    ("English", "en"),
+                    ("Japanese", "ja"),
+                    ("Korean", "ko"),
+                ]
+                ForEach(languageGroups, id: \.prefix) { group in
+                    let voices = availableVoices.filter { $0.language.lowercased().hasPrefix(group.prefix) }
+                    if !voices.isEmpty {
+                        Section(group.title) {
+                            ForEach(voices.prefix(15)) { voice in
+                                Button {
+                                    settings.ttsVoiceIdentifier = voice.id
+                                } label: {
+                                    let qualitySuffix = voice.qualityLabel.map { " · \($0)" } ?? ""
+                                    let title = "\(voice.name) (\(voice.language)\(qualitySuffix))"
+                                    if settings.ttsVoiceIdentifier == voice.id {
+                                        Label(title, systemImage: "checkmark")
+                                    } else {
+                                        Text(title)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } label: {
+                menuLabel(selectedVoiceLabel)
+            }
         }
     }
 

@@ -18,6 +18,7 @@ public final class AppContainer {
     public let settings: AppSettings
     public let conversationStore: ConversationStore
     public let models: ModelManager
+    public let speech: StreamingSpeechCoordinator
     public let chat: ChatStore
     /// The per-conversation skill packs (Skills v1). Persisted beside the conversation records + tool
     /// memory; surfaced to the composer's Skill menu and the management screen.
@@ -100,7 +101,8 @@ public final class AppContainer {
                 continuedProcessing: ContinuedProcessingCoordinator? = nil,
                 localModelLogs: LocalModelLogStore? = nil,
                 workflowStore: WorkflowStore? = nil,
-                mcpDiscovery: MCPDiscoveryCache = .shared) {
+                mcpDiscovery: MCPDiscoveryCache = .shared,
+                ttsEngine: (any TTSEngine)? = nil) {
         let settings = settings ?? AppSettings(fallbackDefaultModelID: LLMCatalog.defaultModel(for: device).id)
         let store = conversationStore ?? ConversationStore()
         let logStore = localModelLogs ?? LocalModelLogStore()
@@ -147,6 +149,14 @@ public final class AppContainer {
         self.toolShortcutExecutor = shortcutExecutor
         self.openAICredentials = openAICredentials ?? KeychainOpenAICredentialStore()
         self.agentRuns = agentRuns
+        let speechCoordinator = StreamingSpeechCoordinator(
+            engine: ttsEngine ?? AppleSystemTTSEngine(),
+            settings: settings
+        )
+        self.speech = speechCoordinator
+        self.lifecycle.onEnterBackground = { [weak speechCoordinator] in
+            speechCoordinator?.stop(suppressCurrentTurn: true)
+        }
         self.chat = ChatStore(engine: loggingEngine, store: store, settings: settings,
                               memoryBook: memoryBook, eventStore: eventStore,
                               locationProvider: locationProvider,
@@ -154,7 +164,8 @@ public final class AppContainer {
                               skillStore: skillStore,
                               agentRuns: agentRuns,
                               workflowStore: self.workflowStore,
-                              openAICredentials: self.openAICredentials)
+                              openAICredentials: self.openAICredentials,
+                              speech: speechCoordinator)
         // Cold launch restores identity only, so the first turn is where the weights are actually loaded.
         // A false answer stops the turn instead of generating against an empty engine.
         chat.ensureModelReady = { [weak self] in

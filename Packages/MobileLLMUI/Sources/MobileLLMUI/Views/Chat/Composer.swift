@@ -149,6 +149,11 @@ struct Composer: View {
                 break
             }
         }
+        .onChange(of: chat.speech?.isSpeaking ?? false) { _, speaking in
+            if speaking && dictation.isRecording {
+                dictation.stop()
+            }
+        }
         .onDisappear { dictation.stop() }   // never leave the audio session running behind us
     }
 
@@ -404,6 +409,7 @@ struct Composer: View {
             if dictation.isRecording {
                 dictation.stop()
             } else {
+                chat.speech?.stop(suppressCurrentTurn: true)
                 dictationBase = chat.draft
                 dictation.localeIdentifier = chat.dictationLocale
                 dictation.start()

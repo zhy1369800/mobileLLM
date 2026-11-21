@@ -620,6 +620,8 @@ struct AssistantView: View {
     var onCopy: (() -> Void)?
     var onRegenerate: (() -> Void)?
     var onShowRunTrace: (() -> Void)? = nil
+    var isSpeakingThisMessage: Bool = false
+    var onSpeak: (() -> Void)? = nil
 
     @State private var activeModalSheet: AssistantModalSheet?
 
@@ -692,6 +694,14 @@ struct AssistantView: View {
                 Button { onCopy() } label: { Image(systemName: "doc.on.doc") }
                     .buttonStyle(.plain).foregroundStyle(Theme.textTertiary)
                     .accessibilityLabel("Copy answer")
+            }
+            if let onSpeak {
+                Button { onSpeak() } label: {
+                    Image(systemName: isSpeakingThisMessage ? "stop.circle.fill" : "speaker.wave.2")
+                        .foregroundStyle(isSpeakingThisMessage ? Theme.accent : Theme.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isSpeakingThisMessage ? "Stop speaking" : "Speak answer")
             }
             if let onRegenerate {
                 Button { onRegenerate() } label: { Image(systemName: "arrow.clockwise") }

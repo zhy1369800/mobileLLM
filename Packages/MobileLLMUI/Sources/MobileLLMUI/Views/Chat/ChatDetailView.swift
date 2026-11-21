@@ -100,6 +100,29 @@ struct ChatDetailView: View {
         .toolbar {
             ToolbarItem(placement: .principal) { modelHeader }
             ToolbarItem(placement: .primaryAction) {
+                Button {
+                    if container.speech.isSpeaking {
+                        container.speech.stop(suppressCurrentTurn: true)
+                    } else {
+                        container.speech.toggleAutoSpeak()
+                    }
+                } label: {
+                    if container.speech.isSpeaking {
+                        Image(systemName: "speaker.wave.2.fill")
+                            .symbolEffect(.variableColor.iterative)
+                            .foregroundStyle(Theme.accent)
+                    } else if container.settings.autoSpeakResponses {
+                        Image(systemName: "speaker.wave.2.fill")
+                            .foregroundStyle(Theme.accent)
+                    } else {
+                        Image(systemName: "speaker.slash")
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                }
+                .help(container.speech.isSpeaking ? "Stop speaking" : (container.settings.autoSpeakResponses ? "Auto-speak is on" : "Enable auto-speak"))
+                .accessibilityLabel(container.speech.isSpeaking ? "Stop speaking" : (container.settings.autoSpeakResponses ? "Turn off auto-speak" : "Turn on auto-speak"))
+            }
+            ToolbarItem(placement: .primaryAction) {
                 // The conversation overflow menu (spec §20): conversation actions, workspace pages,
                 // and Settings, each opening its own page.
                 Menu {

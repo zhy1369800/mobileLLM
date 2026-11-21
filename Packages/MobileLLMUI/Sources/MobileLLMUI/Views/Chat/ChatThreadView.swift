@@ -292,6 +292,7 @@ struct ChatThreadView: View {
         let isStreamingRow = message.id == chat.streamingMessageID
         let isLastAssistant = message.role == .assistant &&
             (conversation.map { chat.isLastAssistantMessage(message.id, in: $0) } ?? false)
+        let isSpeakingThisMessage = chat.speech?.isSpeaking == true && chat.speech?.speakingMessageID == message.id
         MessageRowItem(
             message: message,
             isStreamingRow: isStreamingRow,
@@ -301,6 +302,10 @@ struct ChatThreadView: View {
             onCopy: { Clipboard.copy(message.answer); chat.showToast(Toast("Copied")) },
             onRegenerate: { requestRegenerate(message) },
             isLastAssistant: isLastAssistant,
+            isSpeakingThisMessage: isSpeakingThisMessage,
+            onSpeak: chat.speech.map { speech in
+                { speech.toggleSpeakMessage(text: message.answer, messageID: message.id) }
+            },
             agentRuns: agentRuns,
             onShowRunTrace: { showingAgentTrace = true },
             attachmentLoader: { await chat.attachmentData($0) },
@@ -493,6 +498,8 @@ private struct MessageRowItem: View, Equatable {
     let onCopy: () -> Void
     let onRegenerate: (() -> Void)?
     let isLastAssistant: Bool
+    let isSpeakingThisMessage: Bool
+    let onSpeak: (() -> Void)?
     let agentRuns: AgentRunStore?
     let onShowRunTrace: () -> Void
     let attachmentLoader: (ImageRef) async -> Data?
@@ -510,7 +517,8 @@ private struct MessageRowItem: View, Equatable {
         lhs.message.stats == rhs.message.stats &&
         lhs.message.emptyOutcome == rhs.message.emptyOutcome &&
         lhs.message.toolRuns == rhs.message.toolRuns &&
-        lhs.isLastAssistant == rhs.isLastAssistant
+        lhs.isLastAssistant == rhs.isLastAssistant &&
+        lhs.isSpeakingThisMessage == rhs.isSpeakingThisMessage
     }
 
     var body: some View {
@@ -558,7 +566,9 @@ private struct MessageRowItem: View, Equatable {
                 emptyOutcome: message.emptyOutcome,
                 onCopy: onCopy,
                 onRegenerate: onRegenerate,
-                onShowRunTrace: showTrace ? onShowRunTrace : nil)
+                onShowRunTrace: showTrace ? onShowRunTrace : nil,
+                isSpeakingThisMessage: isSpeakingThisMessage,
+                onSpeak: onSpeak)
         }
     }
 }

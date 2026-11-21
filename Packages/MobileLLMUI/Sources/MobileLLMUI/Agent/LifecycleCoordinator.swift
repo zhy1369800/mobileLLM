@@ -69,6 +69,8 @@ public final class LifecycleCoordinator {
     public var quiesce: (@MainActor () async -> Void)?
     /// Unloads resident local weights when memory policy requires (online runs have nothing to unload).
     public var suspendModel: (@MainActor () -> Void)?
+    /// Fired immediately when the app transitions to background (e.g. to stop active TTS playback).
+    public var onEnterBackground: (@MainActor () -> Void)?
 
     private let drainProvider: (any BackgroundDrainProviding)?
     private var drainToken: (any BackgroundDrainToken)?
@@ -97,6 +99,7 @@ public final class LifecycleCoordinator {
         isInBackground = true
         lastBackgroundTransitionAt = Date()
         didExpireDuringLastBackground = false
+        onEnterBackground?()
         stopAdmittingActions?()
         drainState = .draining
         if let drainProvider {

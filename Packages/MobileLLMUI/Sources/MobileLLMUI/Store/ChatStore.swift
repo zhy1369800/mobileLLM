@@ -61,6 +61,7 @@ public final class ChatStore {
             if activeID != oldValue {
                 contextHistoryCache = nil
                 cancelModelRestore?()
+                speech?.stop(suppressCurrentTurn: false)
             }
         }
     }
@@ -177,6 +178,8 @@ public final class ChatStore {
     /// construct a `ChatStore` without one; then `activeSkill` is always nil and composition falls back to
     /// the base system prompt. Public so the composer's Skill menu + management sheet reach the same store.
     public let skillStore: SkillStore?
+    /// Streaming & on-demand TTS coordinator (optional so isolated tests keep constructing ChatStore without audio).
+    public let speech: StreamingSpeechCoordinator?
     /// Observer notified when generation completes with final response text.
     public var onGenerationFinished: (@MainActor (String) -> Void)?
     /// Observer notified when generation starts.
@@ -244,7 +247,8 @@ public final class ChatStore {
                 skillStore: SkillStore? = nil,
                 agentRuns: AgentRunStore? = nil,
                 workflowStore: WorkflowStore? = nil,
-                openAICredentials: (any OpenAICredentialStoring)? = nil) {
+                openAICredentials: (any OpenAICredentialStoring)? = nil,
+                speech: StreamingSpeechCoordinator? = nil) {
         self.engine = engine
         self.store = store
         self.settings = settings
@@ -257,6 +261,7 @@ public final class ChatStore {
         self.agentRuns = agentRuns
         self.workflowStore = workflowStore
         self.openAICredentials = openAICredentials
+        self.speech = speech
         self.thinkingEnabled = settings.thinkingDefault
         if let agentRuns {
             attachAgentRuntime(agentRuns)
@@ -314,6 +319,7 @@ public final class ChatStore {
             case .discardProvisionalAnswer:
                 self.flushStreamingBuffer()
                 self.streaming?.answer = ""
+                self.speech?.discardBufferedStream()
                 if self.streaming?.phase != .stopping {
                     self.streaming?.phase = .warming
                 }
@@ -376,6 +382,7 @@ public final class ChatStore {
         }
         pendingStreamAnswer.append(contentsOf: delta)
         streamAnswerDirty = true
+        speech?.feed(delta: delta, messageID: streaming?.messageID)
         if isFirstToken {
             flushStreamingBuffer()
         } else {
@@ -1552,6 +1559,7 @@ public final class ChatStore {
         }
         streamingMessageID = assistant.id
         streaming = StreamingState(messageID: assistant.id)
+        speech?.resetForNewTurn(messageID: assistant.id)
         genTask = Task { @MainActor [weak self] in
             do {
                 do {
@@ -2017,6 +2025,9 @@ public final class ChatStore {
         conversations[ci].messages[mi] = message
         conversations[ci].updatedAt = Date()
         persist(conversations[ci])
+        if activeID == conversationID, streaming?.phase != .stopping, !trimmedAnswer.isEmpty {
+            speech?.finish(fullText: text, messageID: assistantMessageID)
+        }
         onGenerationFinished?(text)
         if streamingMessageID == assistantMessageID {
             resetStreamingBuffer()
@@ -2087,6 +2098,7 @@ public final class ChatStore {
         conversations[ci].updatedAt = Date()
         persist(conversations[ci])
         if streamingMessageID == assistantMessageID {
+            speech?.stop(suppressCurrentTurn: true)
             resetStreamingBuffer()
             streaming = nil
             streamingMessageID = nil
@@ -2117,6 +2129,9 @@ public final class ChatStore {
             onGenerationFinished?("生成未完成: \(errorMessage)")
         }
         if streamingMessageID == assistantMessageID {
+            if failed {
+                speech?.stop(suppressCurrentTurn: true)
+            }
             resetStreamingBuffer()
             streaming = nil
             streamingMessageID = nil
@@ -2301,6 +2316,7 @@ public final class ChatStore {
         }
         streaming = state
         streamingMessageID = assistantID
+        speech?.resetForNewTurn(messageID: assistantID)
 
         let history = convo.messages.filter { $0.id != assistantID }
         // What this turn asks about — the query the memory block is searched with, below.
@@ -2615,6 +2631,7 @@ public final class ChatStore {
             flushStreamingBuffer()
             pauseReasoningClock()
             streaming?.answer = ""
+            speech?.discardBufferedStream()
             if streaming?.phase != .stopping {
                 let hasReasoning = streaming?.reasoning.isEmpty == false
                 streaming?.phase = hasReasoning ? .thinking : .warming
@@ -2741,8 +2758,12 @@ public final class ChatStore {
         conversations.sort(by: Self.recency)
         persist(convo)
         if failed {
+            speech?.stop(suppressCurrentTurn: true)
             onGenerationFinished?("生成失败: \(stopReason.rawValue)")
-        } else if !visibleAnswer.isEmpty && stopReason != .cancelled {
+        } else if stopReason == .cancelled {
+            speech?.stop(suppressCurrentTurn: true)
+        } else if !visibleAnswer.isEmpty {
+            speech?.finish(fullText: visibleAnswer, messageID: state.messageID)
             onGenerationFinished?(visibleAnswer)
         }
     }
@@ -2753,6 +2774,7 @@ public final class ChatStore {
     /// intentional stop during a long warm-up still works.
     public func stop() {
         flushStreamingBuffer()
+        speech?.stop(suppressCurrentTurn: true)
         // Agent runtime mode: Stop is a durable cancel command, not a task cancellation.
         if agentRuntimeEnabled,
            let agentRuns,
@@ -3124,6 +3146,7 @@ public final class ChatStore {
         state.warmingNote = "正在调用快捷指令..."
         streaming = state
         streamingMessageID = assistantID
+        speech?.resetForNewTurn(messageID: assistantID)
 
         let completedTurns = convo.messages.filter { $0.id != assistantID && $0.role != .system }
         let priorHistory = completedTurns.dropLast()
@@ -3350,6 +3373,8 @@ public final class ChatStore {
             )
             return
         }
+
+        speech?.finish(fullText: text, messageID: assistantID)
 
         var currentText = ""
         let chars = Array(text)
