@@ -44,7 +44,7 @@ public protocol TTSEngine: AnyObject {
     var isSpeaking: Bool { get }
     var isReady: Bool { get }
     /// Called when an external audio interruption (e.g. phone call, headphones unplugged) halts playback.
-    var onExternalInterruption: (@MainActor () -> Void)? { get set }
+    var onExternalInterruption: (@MainActor @Sendable () -> Void)? { get set }
 
     /// Lists voices supported by this engine.
     func availableVoices() -> [TTSVoiceInfo]

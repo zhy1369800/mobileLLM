@@ -32,7 +32,7 @@ public final class KokoroTTSEngine: TTSEngine {
     public let id = "kokoro-offline"
     public let displayName = "Kokoro Neural (Offline)"
     public private(set) var isSpeaking: Bool = false
-    public var onExternalInterruption: (@MainActor () -> Void)?
+    public var onExternalInterruption: (@MainActor @Sendable () -> Void)?
 
     public var isReady: Bool {
         modelManager.resolveInstalledFiles() != nil

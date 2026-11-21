@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 5.10
 import PackageDescription
 
 // Offline neural TTS engine powered by sherpa-onnx + Kokoro v1.1 (int8).

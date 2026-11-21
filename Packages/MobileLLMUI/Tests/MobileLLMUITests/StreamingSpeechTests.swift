@@ -9,7 +9,7 @@ private final class MockTTSEngine: TTSEngine {
     let displayName = "Mock TTS"
     private(set) var isSpeaking = false
     var isReady = true
-    var onExternalInterruption: (@MainActor () -> Void)?
+    var onExternalInterruption: (@MainActor @Sendable () -> Void)?
     private(set) var spokenSegments: [String] = []
     private(set) var lastVoiceID: String?
     private(set) var stopCount = 0
