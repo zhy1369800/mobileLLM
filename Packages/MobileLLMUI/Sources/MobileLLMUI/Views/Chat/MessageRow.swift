@@ -691,31 +691,47 @@ struct AssistantView: View {
     private var actionBar: some View {
         HStack(spacing: Theme.Space.md) {
             if let onCopy {
-                Button { onCopy() } label: { Image(systemName: "doc.on.doc") }
-                    .buttonStyle(.plain).foregroundStyle(Theme.textTertiary)
-                    .accessibilityLabel("Copy answer")
+                Button { onCopy() } label: {
+                    Image(systemName: "doc.on.doc")
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).foregroundStyle(Theme.textTertiary)
+                .accessibilityLabel("Copy answer")
             }
             if let onSpeak {
                 Button { onSpeak() } label: {
                     Image(systemName: isSpeakingThisMessage ? "stop.circle.fill" : "speaker.wave.2")
+                        .font(.system(size: 15))
                         .foregroundStyle(isSpeakingThisMessage ? Theme.accent : Theme.textTertiary)
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 2)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(isSpeakingThisMessage ? "Stop speaking" : "Speak answer")
             }
             if let onRegenerate {
-                Button { onRegenerate() } label: { Image(systemName: "arrow.clockwise") }
-                    .buttonStyle(.plain).foregroundStyle(Theme.textTertiary)
-                    .accessibilityLabel("Regenerate answer")
+                Button { onRegenerate() } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).foregroundStyle(Theme.textTertiary)
+                .accessibilityLabel("Regenerate answer")
             }
             if let onShowRunTrace {
-                Button { onShowRunTrace() } label: { Image(systemName: "list.bullet.rectangle") }
-                    .buttonStyle(.plain).foregroundStyle(Theme.textTertiary)
-                    .accessibilityLabel("Show agent trace")
+                Button { onShowRunTrace() } label: {
+                    Image(systemName: "list.bullet.rectangle")
+                        .padding(.vertical, 4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).foregroundStyle(Theme.textTertiary)
+                .accessibilityLabel("Show agent trace")
             }
             Spacer()
         }
-        .font(.caption)
+        .font(.footnote)
         .padding(.top, 2)
     }
 

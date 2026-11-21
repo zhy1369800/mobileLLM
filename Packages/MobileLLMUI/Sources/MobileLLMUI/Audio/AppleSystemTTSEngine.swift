@@ -22,6 +22,10 @@ public final class AppleSystemTTSEngine: TTSEngine {
     private var cachedVoices: [TTSVoiceInfo]?
     private var audioSessionActive = false
     nonisolated(unsafe) private var audioObservers: [NSObjectProtocol] = []
+    #if os(iOS)
+    private static let audioSessionQueue = DispatchQueue(label: "com.mobilellm.tts.audiosession", qos: .userInitiated)
+    private let audioSessionTokenBox = AudioSessionTokenBox()
+    #endif
 
     public init() {
         self.delegateProxy.owner = self
@@ -122,7 +126,14 @@ public final class AppleSystemTTSEngine: TTSEngine {
         #if os(iOS)
         guard audioSessionActive else { return }
         audioSessionActive = false
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        let expectedToken = audioSessionTokenBox.current()
+        let tokenBox = audioSessionTokenBox
+        Self.audioSessionQueue.async {
+            guard tokenBox.current() == expectedToken else { return }
+            let session = AVAudioSession.sharedInstance()
+            guard session.category == .playback, session.mode == .spokenAudio else { return }
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        }
         #endif
     }
 
@@ -212,6 +223,7 @@ public final class AppleSystemTTSEngine: TTSEngine {
     private func configureAudioSessionIfNeeded() {
         #if os(iOS)
         ensureAudioInterruptionObservers()
+        audioSessionTokenBox.advance()
         let session = AVAudioSession.sharedInstance()
         do {
             if session.category != .playback || session.mode != .spokenAudio {
@@ -304,4 +316,24 @@ public final class AppleSystemTTSEngine: TTSEngine {
             }
         }
     }
+
+    #if os(iOS)
+    private final class AudioSessionTokenBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var token: UInt64 = 0
+
+        func advance() {
+            lock.lock()
+            token &+= 1
+            lock.unlock()
+        }
+
+        func current() -> UInt64 {
+            lock.lock()
+            let value = token
+            lock.unlock()
+            return value
+        }
+    }
+    #endif
 }
