@@ -28,8 +28,8 @@ public final class StreamingSpeechCoordinator {
     @ObservationIgnored private var hasFedStreamingText: Bool = false
     @ObservationIgnored private var sessionGeneration: UInt64 = 0
 
-    public init(engine: any TTSEngine = AppleSystemTTSEngine(), settings: AppSettings) {
-        self.engine = engine
+    public init(engine: (any TTSEngine)? = nil, settings: AppSettings) {
+        self.engine = engine ?? AppleSystemTTSEngine()
         self.settings = settings
         self.engine.onExternalInterruption = { [weak self] in
             self?.stop(suppressCurrentTurn: true)
