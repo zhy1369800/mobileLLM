@@ -404,6 +404,9 @@ struct AgentRunTraceSheet: View {
         }
         #if os(macOS)
         .frame(minWidth: 420, minHeight: 320)
+        #else
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
         #endif
     }
 }
