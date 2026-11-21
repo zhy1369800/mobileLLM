@@ -78,10 +78,10 @@ public struct KokoroVoicePreset: Identifiable, Hashable, Sendable {
 @MainActor
 @Observable
 public final class KokoroModelManager {
-    public static let defaultDownloadURL = URL(
+    public nonisolated static let defaultDownloadURL = URL(
         string: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-int8-multi-lang-v1_1.tar.bz2"
     )!
-    public static let bundleFolderName = "kokoro-int8-multi-lang-v1_1"
+    public nonisolated static let bundleFolderName = "kokoro-int8-multi-lang-v1_1"
 
     public private(set) var state: KokoroInstallState = .notInstalled
     public let rootDirectory: URL
@@ -95,7 +95,7 @@ public final class KokoroModelManager {
 
     public init(
         rootDirectory: URL? = nil,
-        downloadURL: URL = KokoroModelManager.defaultDownloadURL,
+        downloadURL: URL? = nil,
         extractor: KokoroArchiveExtractor? = nil
     ) {
         if let rootDirectory {
@@ -105,7 +105,7 @@ public final class KokoroModelManager {
                 ?? FileManager.default.temporaryDirectory
             self.rootDirectory = appSupport.appendingPathComponent("TTS", isDirectory: true)
         }
-        self.downloadURL = downloadURL
+        self.downloadURL = downloadURL ?? Self.defaultDownloadURL
         self.extractor = extractor
         refreshState()
     }

@@ -158,6 +158,19 @@ public final class AppContainer {
         self.kokoroModels = KokoroModelManager(
             rootDirectory: downloadBase.appendingPathComponent("TTS", isDirectory: true)
         )
+        self.lifecycle.onEnterBackground = { [weak speechCoordinator] in
+            speechCoordinator?.stop(suppressCurrentTurn: true)
+        }
+        self.chat = ChatStore(engine: loggingEngine, store: store, settings: settings,
+                              memoryBook: memoryBook, eventStore: eventStore,
+                              locationProvider: locationProvider,
+                              shortcutExecutor: shortcutExecutor,
+                              skillStore: skillStore,
+                              agentRuns: agentRuns,
+                              workflowStore: self.workflowStore,
+                              openAICredentials: self.openAICredentials,
+                              speech: speechCoordinator)
+        // Must be wired after `self.chat` is initialized so `[weak self]` is valid.
         speechCoordinator.onPrepareMemoryForNeuralTTS = { [weak self] in
             guard let self else { return true }
             let freeBytes = availableMemory()
@@ -174,18 +187,6 @@ public final class AppContainer {
             }
             return true
         }
-        self.lifecycle.onEnterBackground = { [weak speechCoordinator] in
-            speechCoordinator?.stop(suppressCurrentTurn: true)
-        }
-        self.chat = ChatStore(engine: loggingEngine, store: store, settings: settings,
-                              memoryBook: memoryBook, eventStore: eventStore,
-                              locationProvider: locationProvider,
-                              shortcutExecutor: shortcutExecutor,
-                              skillStore: skillStore,
-                              agentRuns: agentRuns,
-                              workflowStore: self.workflowStore,
-                              openAICredentials: self.openAICredentials,
-                              speech: speechCoordinator)
         // Cold launch restores identity only, so the first turn is where the weights are actually loaded.
         // A false answer stops the turn instead of generating against an empty engine.
         chat.ensureModelReady = { [weak self] in
