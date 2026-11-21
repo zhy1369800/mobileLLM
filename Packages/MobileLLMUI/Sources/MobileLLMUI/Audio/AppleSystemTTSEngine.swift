@@ -12,7 +12,7 @@ public final class AppleSystemTTSEngine: TTSEngine {
     public let displayName = "Apple System Voice"
 
     public private(set) var isSpeaking: Bool = false
-    public var onExternalInterruption: (@MainActor () -> Void)?
+    public var onExternalInterruption: (@MainActor @Sendable () -> Void)?
 
     private var synthesizer: AVSpeechSynthesizer?
     private let delegateProxy = DelegateProxy()

@@ -8,8 +8,10 @@ private final class MockTTSEngine: TTSEngine {
     let id = "mock-tts"
     let displayName = "Mock TTS"
     private(set) var isSpeaking = false
-    var onExternalInterruption: (@MainActor () -> Void)?
+    var isReady = true
+    var onExternalInterruption: (@MainActor @Sendable () -> Void)?
     private(set) var spokenSegments: [String] = []
+    private(set) var lastVoiceID: String?
     private(set) var stopCount = 0
     private(set) var endSessionCount = 0
 
@@ -31,6 +33,7 @@ private final class MockTTSEngine: TTSEngine {
             throw NSError(domain: "MockTTSEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: "Synthetic failure"])
         }
         spokenSegments.append(text)
+        lastVoiceID = voiceID
         guard shouldHang else { return }
 
         isSpeaking = true
@@ -228,11 +231,19 @@ final class StreamingSpeechTests: XCTestCase {
         first.autoSpeakResponses = true
         first.ttsSpeechRate = 1.4
         first.ttsVoiceIdentifier = "com.apple.voice.enhanced.zh-CN.Tingting"
+        first.ttsEngineKind = .cloudOpenAI
+        first.cloudTTSBaseURL = "https://api.siliconflow.cn/v1"
+        first.cloudTTSModel = "FunAudioLLM/CosyVoice2-0.5B"
+        first.cloudTTSVoice = "FunAudioLLM/CosyVoice2-0.5B:alex"
 
         let reloaded = AppSettings(defaults: defaults, keychain: nil)
         XCTAssertTrue(reloaded.autoSpeakResponses)
         XCTAssertEqual(reloaded.ttsSpeechRate, 1.4, accuracy: 0.001)
         XCTAssertEqual(reloaded.ttsVoiceIdentifier, "com.apple.voice.enhanced.zh-CN.Tingting")
+        XCTAssertEqual(reloaded.ttsEngineKind, .cloudOpenAI)
+        XCTAssertEqual(reloaded.cloudTTSBaseURL, "https://api.siliconflow.cn/v1")
+        XCTAssertEqual(reloaded.cloudTTSModel, "FunAudioLLM/CosyVoice2-0.5B")
+        XCTAssertEqual(reloaded.cloudTTSVoice, "FunAudioLLM/CosyVoice2-0.5B:alex")
     }
 
     func testExternalInterruptionStopsAndSuppressesTurn() async {
@@ -256,5 +267,63 @@ final class StreamingSpeechTests: XCTestCase {
         coordinator.feed(delta: "Should stay silent. ", messageID: turnID)
         await Task.yield()
         XCTAssertEqual(engine.spokenSegments, ["Speaking before call."])
+    }
+
+    func testCloudSpeechEndpointResolution() {
+        XCTAssertEqual(
+            CloudTTSEngine.speechEndpoint(from: "https://api.openai.com/v1")?.absoluteString,
+            "https://api.openai.com/v1/audio/speech"
+        )
+        XCTAssertEqual(
+            CloudTTSEngine.speechEndpoint(from: "https://api.siliconflow.cn")?.absoluteString,
+            "https://api.siliconflow.cn/v1/audio/speech"
+        )
+        XCTAssertEqual(
+            CloudTTSEngine.speechEndpoint(from: "https://example.com/custom/v1/audio/speech/")?.absoluteString,
+            "https://example.com/custom/v1/audio/speech"
+        )
+        XCTAssertNil(CloudTTSEngine.speechEndpoint(from: ""))
+    }
+
+    func testCloudTTSRoutingAndSeamlessFallbackToAppleOnFailure() async {
+        let settings = makeSettings(autoSpeak: true)
+        settings.ttsEngineKind = .cloudOpenAI
+        settings.cloudTTSVoice = "nova"
+        settings.ttsVoiceIdentifier = "voice-zh"
+
+        let appleEngine = MockTTSEngine()
+        let cloudEngine = MockTTSEngine()
+        cloudEngine.isReady = false
+
+        let coordinator = StreamingSpeechCoordinator(
+            engine: appleEngine,
+            cloudEngine: cloudEngine,
+            settings: settings
+        )
+
+        // 1. Not configured yet -> falls back to Apple engine directly.
+        coordinator.speakMessage(text: "Unconfigured fallback.", messageID: UUID())
+        for _ in 0..<10 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(appleEngine.spokenSegments, ["Unconfigured fallback."])
+        XCTAssertEqual(cloudEngine.spokenSegments, [])
+
+        // 2. Configured and ready -> routes to Cloud TTS with configured voice.
+        cloudEngine.isReady = true
+        coordinator.speakMessage(text: "Cloud speaks.", messageID: UUID())
+        for _ in 0..<10 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(cloudEngine.spokenSegments, ["Cloud speaks."])
+        XCTAssertEqual(cloudEngine.lastVoiceID, "nova")
+
+        // 3. Network/HTTP failure mid-batch -> immediately replays failed sentence and remaining queue on Apple engine.
+        cloudEngine.consecutiveErrorsRemaining = 1
+        coordinator.speakMessage(text: "First failed. Second continues.", messageID: UUID())
+        for _ in 0..<20 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(appleEngine.spokenSegments, ["Unconfigured fallback.", "First failed.", "Second continues."])
     }
 }

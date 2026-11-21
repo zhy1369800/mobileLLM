@@ -19,6 +19,13 @@ public final class StreamingSpeechCoordinator {
     public private(set) var isSuppressedForCurrentTurn: Bool = false
 
     public let engine: any TTSEngine
+    public var cloudEngine: (any TTSEngine)? {
+        didSet {
+            cloudEngine?.onExternalInterruption = { [weak self] in
+                self?.stop(suppressCurrentTurn: true)
+            }
+        }
+    }
     private let settings: AppSettings
 
     @ObservationIgnored private var segmenter = SentenceSegmenter()
@@ -28,16 +35,33 @@ public final class StreamingSpeechCoordinator {
     @ObservationIgnored private var hasFedStreamingText: Bool = false
     @ObservationIgnored private var sessionGeneration: UInt64 = 0
 
-    public init(engine: (any TTSEngine)? = nil, settings: AppSettings) {
+    public init(
+        engine: (any TTSEngine)? = nil,
+        cloudEngine: (any TTSEngine)? = nil,
+        settings: AppSettings
+    ) {
         self.engine = engine ?? AppleSystemTTSEngine()
+        self.cloudEngine = cloudEngine
         self.settings = settings
         self.engine.onExternalInterruption = { [weak self] in
             self?.stop(suppressCurrentTurn: true)
         }
+        self.cloudEngine?.onExternalInterruption = { [weak self] in
+            self?.stop(suppressCurrentTurn: true)
+        }
+    }
+
+    /// Returns the currently selected and ready engine, falling back to `engine` (Apple System)
+    /// when Cloud TTS is not configured.
+    public func activeEngine() -> any TTSEngine {
+        if settings.ttsEngineKind == .cloudOpenAI, let cloudEngine, cloudEngine.isReady {
+            return cloudEngine
+        }
+        return engine
     }
 
     public func availableVoices() -> [TTSVoiceInfo] {
-        engine.availableVoices()
+        activeEngine().availableVoices()
     }
 
     // MARK: - Streaming Turn Lifecycle
@@ -140,6 +164,8 @@ public final class StreamingSpeechCoordinator {
         drainTask = nil
         engine.stop()
         engine.endPlaybackSession()
+        cloudEngine?.stop()
+        cloudEngine?.endPlaybackSession()
         isSpeaking = false
         speakingMessageID = nil
     }
@@ -160,21 +186,47 @@ public final class StreamingSpeechCoordinator {
 
         drainTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            var targetEngine = self.activeEngine()
+            var usingCloud = targetEngine === self.cloudEngine
+            var preferredVoiceID: String? = usingCloud
+                ? self.settings.cloudTTSVoice
+                : self.settings.ttsVoiceIdentifier
             var consecutiveFailures = 0
 
             while self.sessionGeneration == generation, !Task.isCancelled, !self.queue.isEmpty {
                 let nextSentence = self.queue.removeFirst()
                 do {
-                    try await self.engine.speak(
+                    try await targetEngine.speak(
                         text: nextSentence,
-                        voiceID: self.settings.ttsVoiceIdentifier,
+                        voiceID: preferredVoiceID,
                         rate: self.settings.ttsSpeechRate
                     )
                     consecutiveFailures = 0
                 } catch is CancellationError {
                     break
                 } catch {
-                    consecutiveFailures += 1
+                    // Seamless automatic fallback to Apple System Voice if Cloud TTS fails (offline, HTTP error, etc.).
+                    if usingCloud {
+                        usingCloud = false
+                        targetEngine = self.engine
+                        preferredVoiceID = self.settings.ttsVoiceIdentifier
+                        do {
+                            try await self.engine.speak(
+                                text: nextSentence,
+                                voiceID: preferredVoiceID,
+                                rate: self.settings.ttsSpeechRate
+                            )
+                            consecutiveFailures = 0
+                            continue
+                        } catch is CancellationError {
+                            break
+                        } catch {
+                            consecutiveFailures += 1
+                        }
+                    } else {
+                        consecutiveFailures += 1
+                    }
+
                     // Abort draining after 2 consecutive engine failures to prevent wedged loops.
                     if consecutiveFailures >= 2 {
                         self.queue.removeAll(keepingCapacity: false)
@@ -187,7 +239,7 @@ public final class StreamingSpeechCoordinator {
             self.drainTask = nil
             self.isSpeaking = false
             self.speakingMessageID = nil
-            self.engine.endPlaybackSession()
+            targetEngine.endPlaybackSession()
         }
     }
 }

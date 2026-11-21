@@ -190,6 +190,16 @@ public final class AppSettings {
     public var ttsSpeechRate: Double { didSet { persist() } }
     /// Optional preferred voice identifier (`nil` = auto-detect language per sentence).
     public var ttsVoiceIdentifier: String? { didSet { persist() } }
+    /// Preferred speech synthesis backend (Apple native vs. Cloud OpenAI-compatible TTS).
+    public var ttsEngineKind: TTSEngineKind { didSet { persist() } }
+    /// Base URL for Cloud TTS (`/v1/audio/speech` compatible).
+    public var cloudTTSBaseURL: String { didSet { persist() } }
+    /// Model identifier for Cloud TTS (e.g. `tts-1`, `gpt-4o-mini-tts`, `FunAudioLLM/CosyVoice2-0.5B`).
+    public var cloudTTSModel: String { didSet { persist() } }
+    /// Voice identifier for Cloud TTS (e.g. `alloy`, `nova`, or provider-specific voice ID).
+    public var cloudTTSVoice: String { didSet { persist() } }
+
+    public nonisolated static let cloudTTSKeychainServiceID = "mobilellm.cloud-tts"
     /// Remote MCP servers whose tools join the agent's tool set when tools are on. Bearer tokens are kept
     /// in the Keychain, not this snapshot (A2.9) — the didSet reconciles them on every change.
     public var mcpServers: [MCPServer] {
@@ -529,6 +539,10 @@ public final class AppSettings {
         autoSpeakResponses = snap?.autoSpeakResponses ?? false
         ttsSpeechRate = snap?.ttsSpeechRate ?? 1.0
         ttsVoiceIdentifier = snap?.ttsVoiceIdentifier ?? nil
+        ttsEngineKind = snap?.ttsEngineKind ?? .appleSystem
+        cloudTTSBaseURL = snap?.cloudTTSBaseURL ?? "https://api.openai.com/v1"
+        cloudTTSModel = snap?.cloudTTSModel ?? "tts-1"
+        cloudTTSVoice = snap?.cloudTTSVoice ?? "alloy"
         let (servers, migrated) = Self.loadMCPServers(from: snap, keychain: keychain)
         mcpServers = servers
         // Absent in pre-D2 snapshots → the default disabled set (privacy tools off), matching
@@ -748,6 +762,10 @@ public final class AppSettings {
         var autoSpeakResponses: Bool? = false
         var ttsSpeechRate: Double? = 1.0
         var ttsVoiceIdentifier: String? = nil
+        var ttsEngineKind: TTSEngineKind? = .appleSystem
+        var cloudTTSBaseURL: String? = nil
+        var cloudTTSModel: String? = nil
+        var cloudTTSVoice: String? = nil
         var mcpServers: [MCPServer]? = []
         /// Ids of servers whose bearer token lives in the Keychain (A2.9). Absent in pre-migration
         /// snapshots — the loader then treats any inline `token` as legacy plaintext to migrate.
@@ -810,6 +828,10 @@ public final class AppSettings {
                             autoSpeakResponses: autoSpeakResponses,
                             ttsSpeechRate: ttsSpeechRate,
                             ttsVoiceIdentifier: ttsVoiceIdentifier,
+                            ttsEngineKind: ttsEngineKind,
+                            cloudTTSBaseURL: cloudTTSBaseURL,
+                            cloudTTSModel: cloudTTSModel,
+                            cloudTTSVoice: cloudTTSVoice,
                             mcpServers: scrubbed, mcpTokenMarkers: markers,
                             disabledBuiltInTools: disabledBuiltInTools, searchEngines: searchEngines,
                             webSearchOnlineServiceID: webSearchOnlineServiceID,

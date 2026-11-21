@@ -23,6 +23,7 @@ struct SettingsView: View {
     @State private var showLocalLogs = false
     @State private var isAdvancedExpanded = false
     @State private var availableVoices: [TTSVoiceInfo] = []
+    @State private var cloudTTSAPIKey: String = ""
 
     init(container: AppContainer) {
         self.container = container
@@ -250,14 +251,36 @@ struct SettingsView: View {
                 isOn: $settings.autoSpeakResponses
             )
             hairline
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Voice engine").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                Segmented(selection: $settings.ttsEngineKind, options: TTSEngineKind.allCases) { $0.displayName }
+                    .onChange(of: settings.ttsEngineKind) { _, _ in
+                        container.speech.stop(suppressCurrentTurn: false)
+                    }
+            }
+            if settings.ttsEngineKind == .cloudOpenAI {
+                hairline
+                cloudTTSSettingsRows
+            } else {
+                hairline
+                speechVoicePickerRow
+            }
+            hairline
             sliderRow("Speech rate", value: $settings.ttsSpeechRate, range: 0.5...2.0, step: 0.1, format: "%.1fx")
             hairline
-            speechVoicePickerRow
-            hairline
             HStack {
-                Text("Preview voice")
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.textSecondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Preview voice")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.textSecondary)
+                    if settings.ttsEngineKind == .cloudOpenAI,
+                       cloudTTSAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || CloudTTSEngine.speechEndpoint(from: settings.cloudTTSBaseURL) == nil {
+                        Text("Configure Base URL & API Key above (falls back to Apple voice).")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                }
                 Spacer()
                 Button {
                     if container.speech.isSpeaking {
@@ -277,6 +300,118 @@ struct SettingsView: View {
                     .foregroundStyle(Theme.accent)
                 }
                 .buttonStyle(.plain)
+            }
+        }
+        .onAppear {
+            cloudTTSAPIKey = container.cloudTTSAPIKey()
+        }
+    }
+
+    private var cloudTTSSettingsRows: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            if !settings.onlineServices.isEmpty {
+                HStack {
+                    Text("Endpoint").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                    Spacer()
+                    Menu {
+                        ForEach(settings.onlineServices) { service in
+                            Button(service.name.isEmpty ? service.baseURL : service.name) {
+                                settings.cloudTTSBaseURL = service.baseURL
+                                if let key = try? container.openAICredentials.loadAPIKey(serviceID: service.id),
+                                   !key.isEmpty {
+                                    cloudTTSAPIKey = key
+                                    container.saveCloudTTSAPIKey(key)
+                                }
+                            }
+                        }
+                    } label: {
+                        menuLabel("Import from Online service")
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Base URL").font(.caption).foregroundStyle(Theme.textTertiary)
+                TextField("https://api.openai.com/v1", text: $settings.cloudTTSBaseURL)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.subheadline)
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+                    #endif
+                    .autocorrectionDisabled()
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("API Key").font(.caption).foregroundStyle(Theme.textTertiary)
+                SecureField("sk-...", text: $cloudTTSAPIKey)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.subheadline)
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
+                    .autocorrectionDisabled()
+                    .onChange(of: cloudTTSAPIKey) { _, newValue in
+                        if newValue != container.cloudTTSAPIKey() {
+                            container.saveCloudTTSAPIKey(newValue)
+                        }
+                    }
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Model").font(.caption).foregroundStyle(Theme.textTertiary)
+                    Spacer()
+                    Menu {
+                        Button("tts-1 (OpenAI)") { settings.cloudTTSModel = "tts-1" }
+                        Button("gpt-4o-mini-tts (OpenAI)") { settings.cloudTTSModel = "gpt-4o-mini-tts" }
+                        Button("FunAudioLLM/CosyVoice2-0.5B (SiliconFlow)") {
+                            settings.cloudTTSModel = "FunAudioLLM/CosyVoice2-0.5B"
+                        }
+                    } label: {
+                        Text("Presets").font(.caption).foregroundStyle(Theme.accent)
+                    }
+                }
+                TextField("tts-1", text: $settings.cloudTTSModel)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.subheadline)
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
+                    .autocorrectionDisabled()
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Voice").font(.caption).foregroundStyle(Theme.textTertiary)
+                    Spacer()
+                    Menu {
+                        Section("OpenAI") {
+                            ForEach(["alloy", "nova", "shimmer", "coral", "sage"], id: \.self) { v in
+                                Button(v) { settings.cloudTTSVoice = v }
+                            }
+                        }
+                        Section("SiliconFlow CosyVoice2") {
+                            ForEach([
+                                "FunAudioLLM/CosyVoice2-0.5B:alex",
+                                "FunAudioLLM/CosyVoice2-0.5B:anna",
+                                "FunAudioLLM/CosyVoice2-0.5B:bella",
+                                "FunAudioLLM/CosyVoice2-0.5B:david",
+                            ], id: \.self) { v in
+                                Button(v) { settings.cloudTTSVoice = v }
+                            }
+                        }
+                    } label: {
+                        Text("Presets").font(.caption).foregroundStyle(Theme.accent)
+                    }
+                }
+                TextField("alloy", text: $settings.cloudTTSVoice)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.subheadline)
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    #endif
+                    .autocorrectionDisabled()
             }
         }
     }
@@ -839,6 +974,7 @@ struct SettingsView: View {
         Task {
             do {
                 try await container.eraseAllAppData()
+                cloudTTSAPIKey = ""
                 storageBytes = 0
                 container.chat.showToast(Toast("All mobileLLM data erased", kind: .success))
             } catch {

@@ -147,10 +147,21 @@ public final class AppContainer {
         self.toolEventStore = eventStore
         self.toolLocationProvider = locationProvider
         self.toolShortcutExecutor = shortcutExecutor
-        self.openAICredentials = openAICredentials ?? KeychainOpenAICredentialStore()
+        let credentialsStore = openAICredentials ?? KeychainOpenAICredentialStore()
+        self.openAICredentials = credentialsStore
         self.agentRuns = agentRuns
+        let cloudTTSEngine = CloudTTSEngine {
+            let apiKey = (try? credentialsStore.loadAPIKey(serviceID: AppSettings.cloudTTSKeychainServiceID)) ?? ""
+            return CloudTTSConfiguration(
+                baseURL: settings.cloudTTSBaseURL,
+                apiKey: apiKey,
+                model: settings.cloudTTSModel,
+                voice: settings.cloudTTSVoice
+            )
+        }
         let speechCoordinator = StreamingSpeechCoordinator(
             engine: ttsEngine ?? AppleSystemTTSEngine(),
+            cloudEngine: cloudTTSEngine,
             settings: settings
         )
         self.speech = speechCoordinator
@@ -341,6 +352,21 @@ public final class AppContainer {
         guard !persistedID.isEmpty else { return stable.first }
         if let legacy = stable.first(where: { $0.matchesPersistedID(persistedID) }) { return legacy }
         return stable.first
+    }
+
+    /// Reads the Cloud TTS API key from the Keychain.
+    public func cloudTTSAPIKey() -> String {
+        (try? openAICredentials.loadAPIKey(serviceID: AppSettings.cloudTTSKeychainServiceID)) ?? ""
+    }
+
+    /// Persists or clears the Cloud TTS API key in the Keychain.
+    public func saveCloudTTSAPIKey(_ key: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            try? openAICredentials.deleteAPIKey(serviceID: AppSettings.cloudTTSKeychainServiceID)
+        } else {
+            try? openAICredentials.saveAPIKey(trimmed, serviceID: AppSettings.cloudTTSKeychainServiceID)
+        }
     }
 
     /// Free the resident model's weights while idle (app backgrounded, or the user left the chat), but
