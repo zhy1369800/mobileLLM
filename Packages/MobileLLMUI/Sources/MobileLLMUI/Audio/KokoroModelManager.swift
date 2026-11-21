@@ -56,10 +56,12 @@ public struct KokoroVoicePreset: Identifiable, Hashable, Sendable {
         KokoroVoicePreset(id: "zf_003", sid: 5, name: "中文女声 3 (zf_003)", language: "zh-CN"),
         KokoroVoicePreset(id: "zf_004", sid: 6, name: "中文女声 4 (zf_004)", language: "zh-CN"),
         KokoroVoicePreset(id: "zf_005", sid: 7, name: "中文女声 5 (zf_005)", language: "zh-CN"),
-        // Chinese Male (zm_009 ... )
-        KokoroVoicePreset(id: "zm_009", sid: 45, name: "中文男声 1 (zm_009)", language: "zh-CN"),
-        KokoroVoicePreset(id: "zm_010", sid: 46, name: "中文男声 2 (zm_010)", language: "zh-CN"),
-        KokoroVoicePreset(id: "zm_011", sid: 47, name: "中文男声 3 (zm_011)", language: "zh-CN"),
+        // Chinese Male (zm_009 ... , sid 58...102 in Kokoro v1.1-zh)
+        KokoroVoicePreset(id: "zm_009", sid: 58, name: "中文男声 1 (zm_009)", language: "zh-CN"),
+        KokoroVoicePreset(id: "zm_010", sid: 59, name: "中文男声 2 (zm_010)", language: "zh-CN"),
+        KokoroVoicePreset(id: "zm_011", sid: 60, name: "中文男声 3 (zm_011)", language: "zh-CN"),
+        KokoroVoicePreset(id: "zm_012", sid: 61, name: "中文男声 4 (zm_012)", language: "zh-CN"),
+        KokoroVoicePreset(id: "zm_013", sid: 62, name: "中文男声 5 (zm_013)", language: "zh-CN"),
         // English Female & Male
         KokoroVoicePreset(id: "af_maple", sid: 0, name: "English Female (Maple)", language: "en-US"),
         KokoroVoicePreset(id: "af_sol", sid: 1, name: "English Female (Sol)", language: "en-US"),
