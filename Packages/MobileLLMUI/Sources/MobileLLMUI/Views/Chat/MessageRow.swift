@@ -622,6 +622,7 @@ struct AssistantView: View {
     var onShowRunTrace: (() -> Void)? = nil
     var isSpeakingThisMessage: Bool = false
     var onSpeak: (() -> Void)? = nil
+    var highFrameRateStreaming: Bool = true
 
     @State private var activeModalSheet: AssistantModalSheet?
 
@@ -666,10 +667,10 @@ struct AssistantView: View {
     private var answerBody: some View {
         Group {
             if isStreaming {
-                // Streaming: throttled markdown (~20 fps) with an inline block caret riding the tail —
+                // Streaming: throttled markdown (60fps cloud / 30fps local) with an inline block caret riding the tail —
                 // a separate caret view can't sit at the end of block-rendered markdown, so the glyph is
                 // appended to the text itself.
-                StreamingMarkdown(text: answer)
+                StreamingMarkdown(text: answer, highFrameRate: highFrameRateStreaming)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Assistant answer")
                     .accessibilityIdentifier("assistant.answer")

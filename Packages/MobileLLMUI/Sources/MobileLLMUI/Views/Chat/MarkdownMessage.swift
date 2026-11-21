@@ -603,11 +603,13 @@ enum StreamingPacer {
 /// the tail; the final text is always shown when the caller switches to non-streaming `MarkdownMessage`.
 struct StreamingMarkdown: View {
     let text: String
+    var highFrameRate: Bool = true
     @State private var shown = ""
     @State private var target = ""
     @State private var ticker: Task<Void, Never>?
 
-    private static let frameIntervalNs: UInt64 = 16_666_667 // ~60 fps smooth pacing
+    private static let highFrameIntervalNs: UInt64 = 16_666_667 // ~60 fps for fast cloud streams
+    private static let localFrameIntervalNs: UInt64 = 33_333_333 // ~30 fps for local models
 
     var body: some View {
         MarkdownMessage(text: shown + "\u{258C}", isStreaming: true)
@@ -627,13 +629,13 @@ struct StreamingMarkdown: View {
 
     private func ensureTicker() {
         guard ticker == nil, shown != target else { return }
+        let interval = highFrameRate ? Self.highFrameIntervalNs : Self.localFrameIntervalNs
         ticker = Task { @MainActor in
             while !Task.isCancelled {
                 guard shown != target else { break }
                 shown = StreamingPacer.advance(visible: shown, toward: target)
-                // Always hold the gate for a full 50ms interval after advancing so rapid
-                // single-token arrivals coalesce into `target` instead of bypassing the gate.
-                try? await Task.sleep(nanoseconds: Self.frameIntervalNs)
+                // Hold the gate for the frame interval so bursty token arrivals coalesce cleanly.
+                try? await Task.sleep(nanoseconds: interval)
             }
             ticker = nil
         }

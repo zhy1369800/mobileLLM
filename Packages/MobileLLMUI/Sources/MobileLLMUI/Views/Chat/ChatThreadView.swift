@@ -459,7 +459,8 @@ private struct StreamingRow: View {
                             isStreaming: true,
                             stats: nil,
                             modelName: modelName,
-                            toolRuns: s.toolActivity)
+                            toolRuns: s.toolActivity,
+                            highFrameRateStreaming: chat.isOnlineActive)
                         if let note = s.warmingNote {
                             HStack(spacing: Theme.Space.xs) {
                                 ProgressView().controlSize(.small)

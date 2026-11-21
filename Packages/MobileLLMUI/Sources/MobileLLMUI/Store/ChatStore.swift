@@ -392,8 +392,9 @@ public final class ChatStore {
 
     private func scheduleStreamingFlush() {
         guard streamFlushTask == nil else { return }
+        let intervalNs: UInt64 = isOnlineActive ? 16_000_000 : 33_000_000
         streamFlushTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 16_000_000)
+            try? await Task.sleep(nanoseconds: intervalNs)
             guard let self else { return }
             self.streamFlushTask = nil
             self.flushStreamingBuffer()
