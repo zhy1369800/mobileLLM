@@ -623,6 +623,7 @@ struct AssistantView: View {
     var isSpeakingThisMessage: Bool = false
     var onSpeak: (() -> Void)? = nil
     var highFrameRateStreaming: Bool = true
+    var onSelectElicitation: ((String) -> Void)? = nil
 
     @State private var activeModalSheet: AssistantModalSheet?
 
@@ -665,28 +666,73 @@ struct AssistantView: View {
     }
 
     private var answerBody: some View {
-        Group {
+        let parsed = ElicitationParser.split(answer, isStreaming: isStreaming)
+        return Group {
             if isStreaming {
                 // Streaming: throttled markdown (60fps cloud / 30fps local) with an inline block caret riding the tail —
                 // a separate caret view can't sit at the end of block-rendered markdown, so the glyph is
                 // appended to the text itself.
-                StreamingMarkdown(text: answer, highFrameRate: highFrameRateStreaming)
+                StreamingMarkdown(text: parsed.cleanText, highFrameRate: highFrameRateStreaming)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Assistant answer")
                     .accessibilityIdentifier("assistant.answer")
             } else {
                 VStack(alignment: .leading, spacing: Theme.Space.sm) {
-                    MarkdownMessage(text: answer)
-                        // Markdown rendering may consume underscores or split one answer into several
-                        // accessibility nodes. Keep the exact raw answer available as one value.
-                        .accessibilityElement(children: .contain)
-                        .accessibilityLabel("Assistant answer")
-                        .accessibilityValue(answer)
-                        .accessibilityIdentifier("assistant.answer")
+                    if !parsed.cleanText.isEmpty {
+                        MarkdownMessage(text: parsed.cleanText)
+                            // Markdown rendering may consume underscores or split one answer into several
+                            // accessibility nodes. Keep the exact raw answer available as one value.
+                            .accessibilityElement(children: .contain)
+                            .accessibilityLabel("Assistant answer")
+                            .accessibilityValue(parsed.cleanText)
+                            .accessibilityIdentifier("assistant.answer")
+                    }
                     actionBar
+                    if let section = parsed.section, let onSelectElicitation {
+                        elicitationsView(section, onSelect: onSelectElicitation)
+                    }
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func elicitationsView(_ section: ElicitationsSection, onSelect: @escaping (String) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Space.xs) {
+            if let message = section.message, !message.isEmpty {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(Theme.textTertiary)
+                    .padding(.top, Theme.Space.xs)
+            }
+            ForEach(section.items) { item in
+                Button {
+                    onSelect(item.query)
+                } label: {
+                    HStack(spacing: Theme.Space.sm) {
+                        Text(item.label)
+                            .font(.subheadline)
+                            .foregroundStyle(Theme.textPrimary)
+                            .multilineTextAlignment(.leading)
+                        Spacer(minLength: 0)
+                        Image(systemName: "arrow.up.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.accent)
+                    }
+                    .padding(.horizontal, Theme.Space.md)
+                    .padding(.vertical, Theme.Space.sm)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Theme.surface2, in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous)
+                            .strokeBorder(Theme.hairline)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.top, 2)
     }
 
     private var actionBar: some View {

@@ -557,4 +557,27 @@ final class MarkdownParsingTests: XCTestCase {
         XCTAssertTrue(code.contains("\"name\": \"李四\""))
         XCTAssertEqual(blocks[2].kind, .prose("后续说明文字。"))
     }
+
+    func testElicitationsGroupExtractionAndStreamingWithhold() {
+        let raw = """
+        这里是回答正文。
+
+        <ElicitationsGroup message="如果你想进一步了解：">
+          <Elicitation label="对比近期旗舰模型" query="对比 GPT-6.2 与 Gemini 4"/>
+          <Elicitation label="查看开源模型动态" query="整理近期开源权重模型"/>
+        </ElicitationsGroup>
+        """
+        let parsed = ElicitationParser.split(raw, isStreaming: false)
+        XCTAssertEqual(parsed.cleanText, "这里是回答正文。")
+        XCTAssertEqual(parsed.section?.message, "如果你想进一步了解：")
+        XCTAssertEqual(parsed.section?.items.count, 2)
+        XCTAssertEqual(parsed.section?.items.first?.label, "对比近期旗舰模型")
+        XCTAssertEqual(parsed.section?.items.first?.query, "对比 GPT-6.2 与 Gemini 4")
+
+        // While streaming, an unclosed `<ElicitationsGroup` tail stays hidden.
+        let streamingPartial = "这里是回答正文。\n\n<ElicitationsGroup message=\"如果你想\">\n  <Elicitation label=\"选项\""
+        let streamingParsed = ElicitationParser.split(streamingPartial, isStreaming: true)
+        XCTAssertEqual(streamingParsed.cleanText, "这里是回答正文。")
+        XCTAssertNil(streamingParsed.section)
+    }
 }

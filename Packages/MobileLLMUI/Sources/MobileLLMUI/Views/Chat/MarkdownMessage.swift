@@ -1032,3 +1032,88 @@ struct DiagramCardView: View {
         )
     }
 }
+
+// MARK: - Follow-up Elicitations Parser
+
+struct ElicitationItem: Equatable, Identifiable {
+    var id: String { "\(label)|\(query)" }
+    let label: String
+    let query: String
+}
+
+struct ElicitationsSection: Equatable {
+    let message: String?
+    let items: [ElicitationItem]
+}
+
+enum ElicitationParser {
+    /// Extracts `<ElicitationsGroup ...><Elicitation .../></ElicitationsGroup>` from assistant output.
+    /// During streaming, any unclosed `<ElicitationsGroup` tail is hidden so raw XML does not flash.
+    static func split(_ text: String, isStreaming: Bool) -> (cleanText: String, section: ElicitationsSection?) {
+        guard let openRange = text.range(of: "<ElicitationsGroup", options: .caseInsensitive) else {
+            return (text, nil)
+        }
+
+        if let closeRange = text.range(
+            of: "</ElicitationsGroup>",
+            options: .caseInsensitive,
+            range: openRange.upperBound..<text.endIndex
+        ) {
+            let groupContent = String(text[openRange.lowerBound..<closeRange.upperBound])
+            var clean = text
+            clean.removeSubrange(openRange.lowerBound..<closeRange.upperBound)
+            let trimmedClean = clean.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let section = parseGroup(groupContent)
+            return (trimmedClean, section)
+        }
+
+        if isStreaming {
+            let prefix = text[..<openRange.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+            return (prefix, nil)
+        }
+
+        return (text, nil)
+    }
+
+    private static func parseGroup(_ xml: String) -> ElicitationsSection? {
+        let groupHeader = xml.prefix(while: { $0 != ">" })
+        let message = extractAttribute("message", from: groupHeader)
+
+        var items: [ElicitationItem] = []
+        var searchStart = xml.startIndex
+        while let tagStart = xml.range(of: "<Elicitation", options: .caseInsensitive, range: searchStart..<xml.endIndex),
+              let tagEnd = xml.range(of: ">", range: tagStart.upperBound..<xml.endIndex) {
+            let tagSlice = xml[tagStart.upperBound..<tagEnd.lowerBound]
+            if let label = extractAttribute("label", from: tagSlice), !label.isEmpty {
+                let query = extractAttribute("query", from: tagSlice) ?? label
+                if !query.isEmpty {
+                    items.append(ElicitationItem(label: label, query: query))
+                }
+            }
+            searchStart = tagEnd.upperBound
+        }
+
+        guard !items.isEmpty else { return nil }
+        return ElicitationsSection(message: message, items: items)
+    }
+
+    private static func extractAttribute(_ name: String, from tag: Substring) -> String? {
+        let pattern = #"\b\#(name)\s*=\s*"([^"]*)""#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+        let raw = String(tag)
+        let nsRange = NSRange(raw.startIndex..<raw.endIndex, in: raw)
+        guard let match = regex.firstMatch(in: raw, range: nsRange),
+              let valueRange = Range(match.range(at: 1), in: raw) else {
+            return nil
+        }
+        return String(raw[valueRange])
+            .replacingOccurrences(of: "&quot;", with: "\"")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&lt;", with: "<")
+            .replacingOccurrences(of: "&gt;", with: ">")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}

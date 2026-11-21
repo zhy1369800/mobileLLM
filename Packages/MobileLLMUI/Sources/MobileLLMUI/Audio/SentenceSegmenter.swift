@@ -172,6 +172,7 @@ public struct SentenceSegmenter: Sendable {
         ("<|tool_call|>", "<|/tool_call|>"),
         ("<function_call>", "</function_call>"),
         ("<invoke", "</invoke>"),
+        ("<elicitationsgroup", "</elicitationsgroup>"),
     ]
 
     private static let partialOpenerPrefixes: [String] = [
@@ -180,6 +181,7 @@ public struct SentenceSegmenter: Sendable {
         "<|tool_call",
         "<function_call",
         "<invoke",
+        "<elicitationsgroup",
     ]
 
     /// Strips completed hidden blocks and splits out any unclosed/forming block at the tail

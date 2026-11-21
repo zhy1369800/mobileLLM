@@ -578,7 +578,8 @@ private struct MessageRowItem: View, Equatable {
                 onRegenerate: onRegenerate,
                 onShowRunTrace: showTrace ? onShowRunTrace : nil,
                 isSpeakingThisMessage: isSpeakingThisMessage,
-                onSpeak: onSpeak)
+                onSpeak: onSpeak,
+                onSelectElicitation: isLastAssistant ? { query in chat.send(query) } : nil)
         }
     }
 }
