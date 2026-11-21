@@ -237,9 +237,18 @@ struct ChatThreadView: View {
                     userScrolledUp = false
                 }
             }
-            .onChange(of: isBusy) { _, busy in
+            .onChange(of: isBusy) { wasBusy, busy in
                 if busy && atBottom {
                     userScrolledUp = false
+                } else if wasBusy && !busy, !userScrolledUp && !isUserDragging {
+                    // 回复完成瞬间，actionBar 与 statsFooter 挂载导致内容增高，此时 isBusy 已为 false
+                    // 会跳过高度监听，因此等本帧排版完成后补一次对齐底部，完整露出按钮与运行统计行
+                    DispatchQueue.main.async {
+                        guard !userScrolledUp && !isUserDragging,
+                              !metrics.isKeyboardElevated,
+                              metrics.isOverflowing else { return }
+                        proxy.scrollTo(bottomID, anchor: .bottom)
+                    }
                 }
             }
             .onChange(of: chat.activeID) { _, _ in
