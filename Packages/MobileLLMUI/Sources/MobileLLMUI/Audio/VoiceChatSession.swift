@@ -283,6 +283,7 @@ public final class VoiceChatSession {
             try engine.start()
             player.play()
             playbackController.attach(player: player, format: playbackFormat)
+            tapBridge.resetCalibration()
             self.audioEngine = engine
             self.activePlayerNode = player
             return engine
@@ -311,6 +312,7 @@ public final class VoiceChatSession {
         input.removeTap(onBus: 0)
         let token = sessionToken
         let bridge = tapBridge
+        let playback = playbackController
         let levelBox = audioLevelBox
         // Pass `format: nil` so CoreAudio binds cleanly to the VPIO node's live output format.
         input.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
@@ -318,7 +320,11 @@ public final class VoiceChatSession {
             let level = Self.computeNormalizedRMS(from: buffer)
             let bufferDuration = Double(buffer.frameLength) / max(buffer.format.sampleRate, 1)
 
-            if bridge.recordAndCheckBargeIn(level: level, duration: bufferDuration) {
+            if bridge.recordAndCheckBargeIn(
+                level: level,
+                duration: bufferDuration,
+                isPlayingAudio: playback.isPlayingAudio
+            ) {
                 Task { @MainActor [weak self] in
                     guard let self, self.sessionToken == token else { return }
                     self.interruptAndListen()
@@ -877,11 +883,21 @@ private final class AudioTapBridge: @unchecked Sendable {
     private var bargeInRequiredDuration: Double = 0.18
     private var bargeInAccumulatedDuration: Double = 0
     private var speakingElapsed: Double = 0
-    private let speakingGracePeriod: Double = 0.35
+    private var hasPlayedAudioSinceEngineStart = false
+    private let initialAECGracePeriod: Double = 0.85
+    private let steadyGracePeriod: Double = 0.30
 
     func setActiveRequest(_ request: SFSpeechAudioBufferRecognitionRequest?) {
         lock.lock()
         activeRequest = request
+        lock.unlock()
+    }
+
+    func resetCalibration() {
+        lock.lock()
+        hasPlayedAudioSinceEngineStart = false
+        bargeInAccumulatedDuration = 0
+        speakingElapsed = 0
         lock.unlock()
     }
 
@@ -940,15 +956,23 @@ private final class AudioTapBridge: @unchecked Sendable {
         }
     }
 
-    /// Evaluates barge-in by real buffer duration after an initial grace period,
-    /// avoiding frame-size variability across VPIO hardware devices.
-    func recordAndCheckBargeIn(level: Float, duration: Double) -> Bool {
+    /// Evaluates barge-in by real buffer duration after an initial grace period anchored to actual
+    /// speaker playback so hardware VPIO AEC has time to converge on the first turn.
+    func recordAndCheckBargeIn(level: Float, duration: Double, isPlayingAudio: Bool) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         guard isSpeaking else { return false }
 
+        // Do not consume the grace window while TTS is still synthesizing/buffering before playback starts.
+        if !isPlayingAudio && speakingElapsed == 0 {
+            return false
+        }
+
         speakingElapsed += duration
-        guard speakingElapsed >= speakingGracePeriod else { return false }
+        let requiredGrace = hasPlayedAudioSinceEngineStart ? steadyGracePeriod : initialAECGracePeriod
+        guard speakingElapsed >= requiredGrace else { return false }
+
+        hasPlayedAudioSinceEngineStart = true
 
         if level >= bargeInThreshold {
             bargeInAccumulatedDuration += duration
