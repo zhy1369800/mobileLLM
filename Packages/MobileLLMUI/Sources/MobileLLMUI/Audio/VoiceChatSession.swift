@@ -196,12 +196,17 @@ public final class VoiceChatSession {
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
         do {
+            // Use `.videoChat` instead of `.voiceChat` so iOS enables hardware AEC while keeping
+            // full speaker loudness and preventing earpiece-only routing.
             try session.setCategory(
                 .playAndRecord,
-                mode: .voiceChat,
+                mode: .videoChat,
                 options: [.defaultToSpeaker, .allowBluetooth]
             )
             try session.setActive(true, options: .notifyOthersOnDeactivation)
+            if !Self.isUsingHeadphones() {
+                try? session.overrideOutputAudioPort(.speaker)
+            }
         } catch {
             return nil
         }
@@ -211,8 +216,12 @@ public final class VoiceChatSession {
         let input = engine.inputNode
         #if os(iOS)
         // Enable hardware voice processing (AEC + noise suppression) on iOS;
-        // macOS split input/output devices can throw -10875 on VPIO.
+        // set minimum ducking so AVSpeechSynthesizer / AVAudioPlayer stay at full volume.
         try? input.setVoiceProcessingEnabled(true)
+        input.voiceProcessingOtherAudioDuckingConfiguration = .init(
+            enableAdvancedDucking: false,
+            duckingLevel: .min
+        )
         #endif
 
         let format = input.outputFormat(forBus: 0)
@@ -226,8 +235,9 @@ public final class VoiceChatSession {
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
             bridge.appendIfActive(buffer)
             let level = Self.computeNormalizedRMS(from: buffer)
+            let bufferDuration = Double(buffer.frameLength) / max(buffer.format.sampleRate, 1)
 
-            if bridge.recordAndCheckBargeIn(level: level) {
+            if bridge.recordAndCheckBargeIn(level: level, duration: bufferDuration) {
                 Task { @MainActor [weak self] in
                     guard let self, self.sessionToken == token else { return }
                     self.interruptAndListen()
@@ -243,6 +253,14 @@ public final class VoiceChatSession {
         engine.prepare()
         do {
             try engine.start()
+            #if os(iOS)
+            // Re-assert speaker output after VPIO engine start, which can otherwise reset the route.
+            if !Self.isUsingHeadphones() {
+                try? session.overrideOutputAudioPort(.speaker)
+            } else {
+                try? session.overrideOutputAudioPort(.none)
+            }
+            #endif
             self.audioEngine = engine
             return engine
         } catch {
@@ -262,6 +280,7 @@ public final class VoiceChatSession {
     private func restoreAudioSessionAfterCall() {
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
+        try? session.overrideOutputAudioPort(.none)
         try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
         try? session.setActive(false, options: .notifyOthersOnDeactivation)
         #endif
@@ -369,8 +388,8 @@ public final class VoiceChatSession {
     private func refreshBargeInThresholds() {
         let usingHeadphones = Self.isUsingHeadphones()
         tapBridge.configureBargeIn(
-            threshold: usingHeadphones ? 0.34 : 0.58,
-            requiredHits: usingHeadphones ? 8 : 16
+            threshold: usingHeadphones ? 0.26 : 0.42,
+            requiredDuration: usingHeadphones ? 0.12 : 0.18
         )
     }
 
@@ -571,6 +590,13 @@ public final class VoiceChatSession {
     }
 
     private func enterSpeakingState() {
+        #if os(iOS)
+        let session = AVAudioSession.sharedInstance()
+        let alreadyOnSpeaker = session.currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
+        if !Self.isUsingHeadphones() && !alreadyOnSpeaker {
+            try? session.overrideOutputAudioPort(.speaker)
+        }
+        #endif
         state = .speaking
         tapBridge.setSpeaking(true)
     }
@@ -614,9 +640,11 @@ private final class AudioTapBridge: @unchecked Sendable {
     private let lock = NSLock()
     private var activeRequest: SFSpeechAudioBufferRecognitionRequest?
     private var isSpeaking = false
-    private var bargeInThreshold: Float = 0.58
-    private var bargeInRequiredHits = 16
-    private var bargeInHits = 0
+    private var bargeInThreshold: Float = 0.42
+    private var bargeInRequiredDuration: Double = 0.18
+    private var bargeInAccumulatedDuration: Double = 0
+    private var speakingElapsed: Double = 0
+    private let speakingGracePeriod: Double = 0.35
 
     func setActiveRequest(_ request: SFSpeechAudioBufferRecognitionRequest?) {
         lock.lock()
@@ -627,7 +655,8 @@ private final class AudioTapBridge: @unchecked Sendable {
     func setSpeaking(_ speaking: Bool) {
         lock.lock()
         isSpeaking = speaking
-        bargeInHits = 0
+        bargeInAccumulatedDuration = 0
+        speakingElapsed = 0
         lock.unlock()
     }
 
@@ -638,11 +667,11 @@ private final class AudioTapBridge: @unchecked Sendable {
         return v
     }
 
-    func configureBargeIn(threshold: Float, requiredHits: Int) {
+    func configureBargeIn(threshold: Float, requiredDuration: Double) {
         lock.lock()
         bargeInThreshold = threshold
-        bargeInRequiredHits = requiredHits
-        bargeInHits = 0
+        bargeInRequiredDuration = requiredDuration
+        bargeInAccumulatedDuration = 0
         lock.unlock()
     }
 
@@ -653,20 +682,25 @@ private final class AudioTapBridge: @unchecked Sendable {
         request?.append(buffer)
     }
 
-    /// Evaluates barge-in directly on the audio callback thread so MainActor is only hopped once when triggered.
-    func recordAndCheckBargeIn(level: Float) -> Bool {
+    /// Evaluates barge-in by real buffer duration after an initial grace period,
+    /// avoiding frame-size variability across VPIO hardware devices.
+    func recordAndCheckBargeIn(level: Float, duration: Double) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         guard isSpeaking else { return false }
+
+        speakingElapsed += duration
+        guard speakingElapsed >= speakingGracePeriod else { return false }
+
         if level >= bargeInThreshold {
-            bargeInHits += 1
-            if bargeInHits >= bargeInRequiredHits {
-                bargeInHits = 0
+            bargeInAccumulatedDuration += duration
+            if bargeInAccumulatedDuration >= bargeInRequiredDuration {
+                bargeInAccumulatedDuration = 0
                 isSpeaking = false
                 return true
             }
         } else {
-            bargeInHits = max(0, bargeInHits - 1)
+            bargeInAccumulatedDuration = max(0, bargeInAccumulatedDuration - duration * 0.5)
         }
         return false
     }

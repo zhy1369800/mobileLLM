@@ -27,6 +27,7 @@ public struct RootView: View {
     #endif
     #if !os(macOS)
     @Environment(\.horizontalSizeClass) private var hSize
+    @State private var showVoiceChat = false
     #endif
 
     public init(container: AppContainer, initialSection: AppSection = .chat) {
@@ -75,7 +76,15 @@ public struct RootView: View {
             // the shell's section; clear it once honored so it fires once.
             .onChange(of: container.navigationRequest) { _, request in
                 guard let request else { return }
+                #if !os(macOS)
+                if hSize != .regular && request == .voice {
+                    tabSelection.wrappedValue = .voice
+                } else {
+                    section = request
+                }
+                #else
                 section = request
+                #endif
                 container.navigationRequest = nil
             }
     }
@@ -92,9 +101,30 @@ public struct RootView: View {
     // MARK: Compact (iPhone) — TabView
 
     #if !os(macOS)
+    private var tabSelection: Binding<AppSection> {
+        Binding(
+            get: { section },
+            set: { next in
+                if next == .voice {
+                    let needsSwitch = section != .chat
+                    container.chat.activeID = nil
+                    section = .chat
+                    if needsSwitch {
+                        Task { @MainActor in showVoiceChat = true }
+                    } else {
+                        showVoiceChat = true
+                    }
+                } else {
+                    section = next
+                }
+            }
+        )
+    }
+
     private var tabShell: some View {
-        // `selection` is bound so a navigation intent can switch tabs programmatically.
-        TabView(selection: $section) {
+        // `selection` intercepts `.voice` taps to push natively onto the Chat NavigationStack,
+        // matching `ChatDetailView`'s native swipe-back and tab-bar hiding behavior.
+        TabView(selection: tabSelection) {
             NavigationStack {
                 ConversationListView(
                     chat: container.chat,
@@ -104,6 +134,13 @@ public struct RootView: View {
                     .navigationTitle("Chat")
                     .navigationDestination(isPresented: hasActive) {
                         ChatDetailView(container: container, onOpenModels: { section = .models })
+                    }
+                    .navigationDestination(isPresented: $showVoiceChat) {
+                        VoiceChatView(container: container, onOpenModels: {
+                            showVoiceChat = false
+                            container.chat.activeID = nil
+                            section = .models
+                        })
                     }
                     .toolbar {
                         ToolbarItem(placement: .primaryAction) {
@@ -124,7 +161,7 @@ public struct RootView: View {
             .tag(AppSection.models)
             .tabItem { Label("Models", systemImage: AppSection.models.icon) }
 
-            VoiceChatView(container: container, onOpenModels: { section = .models })
+            Color.clear
                 .tag(AppSection.voice)
                 .tabItem { Label(AppSection.voice.title, systemImage: AppSection.voice.icon) }
 
@@ -134,11 +171,19 @@ public struct RootView: View {
             .tag(AppSection.settings)
             .tabItem { Label("Settings", systemImage: AppSection.settings.icon) }
         }
+        .onChange(of: showVoiceChat) { _, isPresented in
+            if !isPresented {
+                if container.voiceChat.isActive {
+                    container.voiceChat.stop()
+                }
+                container.chat.activeID = nil
+            }
+        }
     }
 
-    /// Drives the push to the thread when a conversation is active.
+    /// Drives the push to the thread when a conversation is active (suppressed while Voice Chat is pushed).
     private var hasActive: Binding<Bool> {
-        Binding(get: { container.chat.activeID != nil },
+        Binding(get: { !showVoiceChat && container.chat.activeID != nil },
                 set: { if !$0 { container.chat.activeID = nil } })
     }
     #endif
@@ -286,7 +331,12 @@ public struct RootView: View {
                 ChatDetailView(container: container, onOpenModels: { section = .models })
             }
         case .voice:
-            VoiceChatView(container: container, onOpenModels: { section = .models })
+            NavigationStack {
+                VoiceChatView(
+                    container: container,
+                    onOpenModels: { section = .models }
+                )
+            }
         case .models:
             ModelsView(models: container.models, settings: container.settings) { model, variant in
                 container.activate(model, variant: variant)

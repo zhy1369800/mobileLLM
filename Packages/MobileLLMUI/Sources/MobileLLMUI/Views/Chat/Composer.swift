@@ -97,7 +97,17 @@ struct Composer: View {
             }
         }
         .sheet(isPresented: $showToolPicker) {
-            NavigationStack { quickToolsSheet }
+            NavigationStack {
+                QuickToolsPickerSheet(
+                    chat: chat,
+                    settings: settings,
+                    toolEventStore: toolEventStore,
+                    toolLocationProvider: toolLocationProvider,
+                    toolShortcutExecutor: toolShortcutExecutor,
+                    onOpenToolSettings: onOpenToolSettings,
+                    onDone: { showToolPicker = false }
+                )
+            }
             #if os(iOS)
                 .presentationDetents([.medium, .large])
             #else
@@ -105,7 +115,13 @@ struct Composer: View {
             #endif
         }
         .sheet(isPresented: $showSkillPicker) {
-            NavigationStack { quickSkillsSheet }
+            NavigationStack {
+                QuickSkillsPickerSheet(
+                    chat: chat,
+                    onManageSkills: { showSkills = true },
+                    onDone: { showSkillPicker = false }
+                )
+            }
             #if os(iOS)
                 .presentationDetents([.medium, .large])
             #else
@@ -662,186 +678,7 @@ struct Composer: View {
         .accessibilityHint("Thinking, tools and image attachments")
     }
 
-    // MARK: Tool selection
-
-    /// Persistent multi-select quick tools sheet presented from [+]. Toggling any switch keeps
-    /// the sheet open so the user can configure multiple tools in one pass.
-    private var quickToolsSheet: some View {
-        List {
-            Section {
-                Toggle(isOn: Binding(get: { chat.toolsEnabled },
-                                     set: { newValue in
-                                         chat.toolsEnabled = newValue
-                                         chat.applyCurrentToolSelectionToActiveConversation()
-                                     })) {
-                    Label("Allow selected tools", systemImage: "hammer")
-                }
-                .tint(Theme.accent)
-            }
-
-            Section("Network") {
-                ForEach(Self.networkToolRows) { toolToggle($0).tint(Theme.accent) }
-            }
-            Section("On device") {
-                ForEach(Self.onDeviceToolRows) { toolToggle($0).tint(Theme.accent) }
-            }
-            Section("Personal data") {
-                ForEach(Self.personalToolRows) { toolToggle($0).tint(Theme.accent) }
-            }
-
-            if !settings.mcpServers.isEmpty {
-                Section("MCP servers") {
-                    ForEach(settings.mcpServers) { server in
-                        Toggle(isOn: mcpServerBinding(server.id)) {
-                            Label(server.name, systemImage: "server.rack")
-                        }
-                        .tint(Theme.accent)
-                    }
-                }
-            }
-
-            Section {
-                Button {
-                    showToolPicker = false
-                    Task { @MainActor in
-                        onOpenToolSettings()
-                    }
-                } label: {
-                    Label("Tool Settings…", systemImage: "gearshape")
-                }
-            }
-        }
-        .navigationTitle("Tools")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #endif
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button("Done") { showToolPicker = false }
-            }
-        }
-    }
-
-    private static let networkToolRows =
-        BuiltInToolRow.all.filter { ["web_search", "fetch_webpage", "wikipedia"].contains($0.id) }
-    private static let onDeviceToolRows =
-        BuiltInToolRow.all.filter { ["calculator", "clock", "memory"].contains($0.id) }
-    private static let personalToolRows =
-        BuiltInToolRow.all.filter { ["calendar", "reminders", "location", "shortcut_automation"].contains($0.id) }
-
-    private func toolToggle(_ row: BuiltInToolRow) -> some View {
-        Toggle(isOn: Binding(
-            get: { row.isOn(in: settings) },
-            set: { enabled in
-                var disabled = settings.disabledBuiltInTools
-                for id in row.toolIDs {
-                    if enabled { disabled.remove(id.rawValue) } else { disabled.insert(id.rawValue) }
-                }
-                settings.disabledBuiltInTools = disabled
-                chat.applyCurrentToolSelectionToActiveConversation()
-                if enabled, row.privacy {
-                    Task { @MainActor in
-                        if await row.requestPermission(eventStore: toolEventStore,
-                                                       locationProvider: toolLocationProvider,
-                                                       shortcutExecutor: toolShortcutExecutor) == .denied {
-                            chat.showToast(Toast(
-                                "\(row.title) is selected, but access is off in system Settings.",
-                                kind: .warning, autoDismiss: 5
-                            ))
-                        }
-                    }
-                }
-            }
-        )) {
-            Label(row.title, systemImage: row.icon)
-        }
-    }
-
-    /// Server-level switches stay compact here; the full screen exposes every discovered MCP tool so it
-    /// can be muted individually.
-    private func mcpServerBinding(_ id: String) -> Binding<Bool> {
-        Binding(
-            get: { settings.mcpServers.first(where: { $0.id == id })?.isEnabled ?? false },
-            set: { enabled in
-                var servers = settings.mcpServers
-                guard let index = servers.firstIndex(where: { $0.id == id }) else { return }
-                servers[index].isEnabled = enabled
-                settings.mcpServers = servers
-                chat.applyCurrentToolSelectionToActiveConversation()
-            }
-        )
-    }
-
     // MARK: Skill
-
-    /// Persistent multi-select skills sheet presented from [+]: allows toggling multiple skills
-    /// on or off without dismissing the sheet on each tap.
-    private var quickSkillsSheet: some View {
-        List {
-            if chat.availableSkills.isEmpty {
-                Text("No skills yet. Tap Manage Skills… below to create or import one.")
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.textSecondary)
-            } else {
-                Section {
-                    ForEach(chat.availableSkills) { skill in
-                        let selected = chat.activeSkills.contains(where: { $0.id == skill.id })
-                        Button {
-                            chat.toggleActiveSkill(skill.id)
-                        } label: {
-                            HStack(spacing: Theme.Space.sm) {
-                                Text(skill.emoji).font(.title3)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(skill.name)
-                                        .font(.subheadline.weight(.medium))
-                                        .foregroundStyle(Theme.textPrimary)
-                                    if !skill.summary.isEmpty {
-                                        Text(skill.summary)
-                                            .font(.caption)
-                                            .foregroundStyle(Theme.textTertiary)
-                                            .lineLimit(2)
-                                    }
-                                }
-                                Spacer(minLength: 0)
-                                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(selected ? Theme.accent : Theme.textTertiary)
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-
-            if !chat.activeSkills.isEmpty {
-                Section {
-                    Button("Clear selected skills", role: .destructive) {
-                        chat.setActiveSkill(nil)
-                    }
-                }
-            }
-
-            Section {
-                Button {
-                    showSkillPicker = false
-                    Task { @MainActor in
-                        showSkills = true
-                    }
-                } label: {
-                    Label("Manage Skills…", systemImage: "slider.horizontal.3")
-                }
-            }
-        }
-        .navigationTitle("Skills")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #endif
-        .toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button("Done") { showSkillPicker = false }
-            }
-        }
-    }
 
     /// Horizontal strip of active-skill chips above the input, each with an `x` to remove one skill.
     private var activeSkillChips: some View {

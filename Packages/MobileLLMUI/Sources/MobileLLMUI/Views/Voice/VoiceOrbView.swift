@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: MIT
 
 import SwiftUI
+import AppUI
 
 /// Interactive 3D particle-sphere visualizer for real-time voice conversation mode.
 /// Renders a Fibonacci lattice of 320 3D points projected onto a SwiftUI `Canvas`
-/// with audio-reactive radial wave distortion, bucketed path fills, and automatic pause when idle/hidden.
+/// with ink-wash adaptive palettes, audio-reactive radial wave distortion, and automatic pause when idle/hidden.
 public struct VoiceOrbView: View {
     public var state: VoiceChatState
     public var isPaused: Bool
     public var levelProvider: () -> Float
     public var onTap: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
 
     private static let particleCount = 320
     private static let basePoints: [SIMD3<Double>] = {
@@ -43,7 +46,8 @@ public struct VoiceOrbView: View {
                 let color = orbColor(for: state)
                 let level = isPaused ? 0.0 : Double(min(max(levelProvider(), 0), 1))
 
-                // Soft ambient radial glow behind the sphere.
+                // Soft ink-wash radial halo behind the sphere.
+                let glowAlpha = colorScheme == .light ? 0.14 : 0.22
                 let glowRadius = baseRadius * (1.28 + level * 0.25)
                 let glowRect = CGRect(
                     x: center.x - glowRadius,
@@ -54,7 +58,7 @@ public struct VoiceOrbView: View {
                 context.fill(
                     Path(ellipseIn: glowRect),
                     with: .radialGradient(
-                        Gradient(colors: [color.opacity(0.24), color.opacity(0.0)]),
+                        Gradient(colors: [color.opacity(glowAlpha), color.opacity(0.0)]),
                         center: center,
                         startRadius: baseRadius * 0.2,
                         endRadius: glowRadius
@@ -126,7 +130,9 @@ public struct VoiceOrbView: View {
                     ))
                 }
 
-                let bucketAlphas = [0.22, 0.45, 0.72, 0.96]
+                let bucketAlphas = colorScheme == .light
+                    ? [0.28, 0.52, 0.78, 0.98]
+                    : [0.22, 0.45, 0.72, 0.96]
                 for idx in 0..<4 where !bucketPaths[idx].isEmpty {
                     context.fill(bucketPaths[idx], with: .color(color.opacity(bucketAlphas[idx])))
                 }
@@ -143,17 +149,27 @@ public struct VoiceOrbView: View {
     }
 
     private func orbColor(for state: VoiceChatState) -> Color {
+        let isLight = colorScheme == .light
         switch state {
         case .idle:
-            return Color(red: 0.68, green: 0.72, blue: 0.84)
+            // 远山淡墨 — mountain ink grey
+            return isLight
+                ? Color(red: 0.43, green: 0.40, blue: 0.34)
+                : Color(red: 0.69, green: 0.64, blue: 0.57)
         case .listening:
-            return Color(red: 0.60, green: 0.67, blue: 1.0)
+            // 松烟青黛 — pine-soot slate blue
+            return isLight
+                ? Color(red: 0.17, green: 0.25, blue: 0.31)
+                : Color(red: 0.60, green: 0.69, blue: 0.74)
         case .thinking:
-            return Color(red: 0.66, green: 0.44, blue: 1.0)
+            // 暖赭石 — warm ochre
+            return Theme.fitAmber
         case .speaking:
-            return Color(red: 0.42, green: 0.90, blue: 0.72)
+            // 青瓷玉绿 — celadon jade green
+            return Theme.fitGreen
         case .denied, .unavailable:
-            return Color(red: 0.95, green: 0.45, blue: 0.42)
+            // 印章朱砂 — cinnabar seal red
+            return Theme.accent
         }
     }
 

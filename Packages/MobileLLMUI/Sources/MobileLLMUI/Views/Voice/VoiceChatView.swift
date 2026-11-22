@@ -3,9 +3,9 @@
 import SwiftUI
 import AppUI
 
-/// Full-screen immersive real-time voice conversation view (Phase 1).
-/// Integrates directly with `ChatStore` (models, tools, thinking, conversation history)
-/// and `VoiceChatSession` (full-duplex audio, VAD endpointing, barge-in).
+/// Full-screen real-time voice conversation view styled with mobileLLM's ink-wash palette (水墨).
+/// Pushed natively onto `NavigationStack` like `ChatDetailView` so interactive pop swipe-back
+/// and tab-bar hiding behave identically to the chat thread.
 public struct VoiceChatView: View {
     @Bindable var container: AppContainer
     var onOpenModels: () -> Void
@@ -13,7 +13,10 @@ public struct VoiceChatView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var isVisible = false
     @State private var showModelSwitcher = false
+    @State private var showToolPicker = false
     @State private var showToolsSheet = false
+    @State private var showSkillPicker = false
+    @State private var showSkillsManage = false
 
     public init(container: AppContainer, onOpenModels: @escaping () -> Void) {
         self.container = container
@@ -23,16 +26,30 @@ public struct VoiceChatView: View {
     private var session: VoiceChatSession { container.voiceChat }
     private var chat: ChatStore { container.chat }
 
+    private var thinkingCapable: Bool {
+        chat.isOnlineActive || (chat.activeModel?.model.architecture.thinkingCapable ?? true)
+    }
+
     public var body: some View {
         ZStack {
-            // Deep obsidian backdrop matching the immersive voice call mode.
-            Color(red: 0.04, green: 0.04, blue: 0.06)
+            // Adaptive ink-wash background: warm rice-paper (light) / wet ink night (dark).
+            Theme.bg
                 .ignoresSafeArea()
 
+            RadialGradient(
+                colors: [Theme.surface.opacity(0.45), .clear],
+                center: .center,
+                startRadius: 20,
+                endRadius: 340
+            )
+            .ignoresSafeArea()
+
             VStack(spacing: 0) {
-                topBar
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
+                if !chat.activeSkills.isEmpty {
+                    activeSkillChips
+                        .padding(.horizontal, Theme.Space.lg)
+                        .padding(.top, Theme.Space.xs)
+                }
 
                 Spacer(minLength: 12)
 
@@ -52,8 +69,8 @@ public struct VoiceChatView: View {
 
                 if let agentRuns = container.agentRuns, let activeID = chat.activeID {
                     AgentDockedBar(store: agentRuns, conversationID: activeID)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 8)
+                        .padding(.horizontal, Theme.Space.lg)
+                        .padding(.top, Theme.Space.xs)
                 }
 
                 Spacer(minLength: 20)
@@ -62,14 +79,47 @@ public struct VoiceChatView: View {
                     .padding(.bottom, 24)
             }
         }
-        .environment(\.colorScheme, .dark)
         #if os(iOS)
-        .toolbarColorScheme(.dark, for: .tabBar)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .tabBar)
         #endif
+        .toolbar {
+            ToolbarItem(placement: .principal) { modelHeader }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    if session.isActive {
+                        session.stop()
+                    }
+                    _ = chat.newConversation()
+                } label: {
+                    Image(systemName: "square.and.pencil")
+                }
+                .accessibilityLabel("New voice conversation")
+            }
+            ToolbarItem(placement: .primaryAction) { optionsMenu }
+        }
         .onAppear { isVisible = true }
         .onDisappear { isVisible = false }
         .sheet(isPresented: $showModelSwitcher) {
             ModelSwitcherSheet(container: container, onOpenModels: onOpenModels)
+        }
+        .sheet(isPresented: $showToolPicker) {
+            NavigationStack {
+                QuickToolsPickerSheet(
+                    chat: chat,
+                    settings: container.settings,
+                    toolEventStore: container.toolEventStore,
+                    toolLocationProvider: container.toolLocationProvider,
+                    toolShortcutExecutor: container.toolShortcutExecutor,
+                    onOpenToolSettings: { showToolsSheet = true },
+                    onDone: { showToolPicker = false }
+                )
+            }
+            #if os(iOS)
+                .presentationDetents([.medium, .large])
+            #else
+                .frame(minWidth: 420, minHeight: 460)
+            #endif
         }
         .sheet(isPresented: $showToolsSheet) {
             NavigationStack {
@@ -88,106 +138,135 @@ public struct VoiceChatView: View {
                 #endif
             }
         }
+        .sheet(isPresented: $showSkillPicker) {
+            NavigationStack {
+                QuickSkillsPickerSheet(
+                    chat: chat,
+                    onManageSkills: { showSkillsManage = true },
+                    onDone: { showSkillPicker = false }
+                )
+            }
+            #if os(iOS)
+                .presentationDetents([.medium, .large])
+            #else
+                .frame(minWidth: 420, minHeight: 440)
+            #endif
+        }
+        .sheet(isPresented: $showSkillsManage) {
+            if let store = chat.skillStore {
+                NavigationStack { SkillsView(store: store) }
+                #if os(macOS)
+                    .frame(minWidth: 520, minHeight: 560)
+                #endif
+            }
+        }
     }
 
-    // MARK: - Top Control Bar
+    // MARK: - Toolbar Controls
 
-    private var topBar: some View {
-        HStack(spacing: 12) {
-            Button {
-                if session.isActive {
-                    session.stop()
-                }
-                _ = chat.newConversation()
-            } label: {
-                Image(systemName: "square.and.pencil")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.85))
-                    .frame(width: 36, height: 36)
-                    .background(.white.opacity(0.1), in: Circle())
+    private var modelHeader: some View {
+        Button { showModelSwitcher = true } label: {
+            HStack(spacing: 4) {
+                Circle().fill(chat.hasModel ? Theme.fitGreen : Theme.fitGray).frame(width: 6, height: 6)
+                Text(chat.activeModelLabel)
+                    .font(.caption.weight(.medium)).foregroundStyle(Theme.textSecondary)
+                Image(systemName: "chevron.down").font(.caption2).foregroundStyle(Theme.textTertiary)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("New voice conversation")
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Active model")
+        .accessibilityValue(chat.activeModel?.subtitle ?? "No model loaded")
+        .accessibilityHint("Switch model")
+    }
 
-            Spacer()
+    private var optionsMenu: some View {
+        let capabilitiesActive = chat.toolsEnabled
+            || (thinkingCapable && chat.composerThinkingEnabled)
+            || !chat.activeSkills.isEmpty
 
-            Button {
-                showModelSwitcher = true
-            } label: {
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(chat.hasModel ? Color.green : Color.gray)
-                        .frame(width: 7, height: 7)
-                    Text(chat.activeModelLabel)
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.white.opacity(0.92))
-                        .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.6))
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(.white.opacity(0.1), in: Capsule())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Switch model")
-
-            Spacer()
-
-            Menu {
+        return Menu {
+            if thinkingCapable {
                 Toggle(isOn: Binding(
-                    get: { chat.toolsEnabled },
-                    set: { chat.toolsEnabled = $0 }
+                    get: { chat.composerThinkingEnabled },
+                    set: { chat.composerThinkingEnabled = $0 }
                 )) {
-                    Label("Enable Tools", systemImage: "wrench.and.screwdriver")
+                    Label("Thinking", systemImage: "brain")
                 }
+            }
 
+            Button {
+                showToolPicker = true
+            } label: {
+                Label("Tools", systemImage: "wrench.and.screwdriver")
+            }
+
+            if chat.skillStore != nil {
                 Button {
-                    showToolsSheet = true
+                    showSkillPicker = true
                 } label: {
-                    Label("Configure Tools & MCP…", systemImage: "slider.horizontal.3")
+                    let count = chat.activeSkills.count
+                    Label(count > 0 ? "Skills (\(count))" : "Skills", systemImage: "sparkles")
                 }
+            }
 
-                Divider()
+            Divider()
 
-                Toggle(isOn: Binding(
-                    get: { chat.thinkingEnabled },
-                    set: { chat.thinkingEnabled = $0 }
-                )) {
-                    Label("Thinking Mode", systemImage: "brain")
-                }
-
-                Divider()
-
-                Menu("Dictation Language") {
-                    ForEach(Composer.dictationLanguages, id: \.label) { lang in
-                        Button {
-                            chat.dictationLocale = lang.id
-                        } label: {
-                            if chat.dictationLocale == lang.id {
-                                Label(lang.label, systemImage: "checkmark")
-                            } else {
-                                Text(lang.label)
-                            }
+            Menu("Dictation Language") {
+                ForEach(Composer.dictationLanguages, id: \.label) { lang in
+                    Button {
+                        chat.dictationLocale = lang.id
+                    } label: {
+                        if chat.dictationLocale == lang.id {
+                            Label(lang.label, systemImage: "checkmark")
+                        } else {
+                            Text(lang.label)
                         }
                     }
                 }
-            } label: {
-                Image(systemName: chat.toolsEnabled ? "wrench.and.screwdriver.fill" : "ellipsis.circle")
-                    .font(.system(size: 16, weight: .medium))
-                    .foregroundStyle(chat.toolsEnabled ? Color(red: 0.42, green: 0.90, blue: 0.72) : .white.opacity(0.85))
-                    .frame(width: 36, height: 36)
-                    .background(.white.opacity(0.1), in: Circle())
             }
-            .accessibilityLabel("Voice call options")
+        } label: {
+            Image(systemName: capabilitiesActive ? "slider.horizontal.3" : "ellipsis.circle")
+                .foregroundStyle(capabilitiesActive ? Theme.accent : Theme.textSecondary)
+        }
+        .accessibilityLabel("Voice call options")
+    }
+
+    // MARK: - Active Skill Chips
+
+    private var activeSkillChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: Theme.Space.xs) {
+                ForEach(chat.activeSkills) { skill in
+                    HStack(spacing: Theme.Space.xs) {
+                        Text(skill.emoji).font(.caption).accessibilityHidden(true)
+                        Text(skill.name)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(Theme.accent)
+                            .lineLimit(1)
+                        Button {
+                            chat.removeActiveSkill(skill.id)
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.caption)
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(Theme.accent, Theme.accentSoft)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Deactivate \(skill.name)")
+                    }
+                    .padding(.leading, Theme.Space.sm)
+                    .padding(.trailing, Theme.Space.xs)
+                    .padding(.vertical, Theme.Space.xs)
+                    .background(Theme.accentSoft, in: Capsule())
+                }
+            }
         }
     }
 
     // MARK: - Status, Tool Capsules & Live Subtitles
 
     private var statusAndSubtitleSection: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: Theme.Space.md) {
             if let latestTool = session.activeToolRuns.last {
                 toolActivityPill(latestTool)
             }
@@ -196,7 +275,7 @@ public struct VoiceChatView: View {
                 ScrollView {
                     Text(subtitleText)
                         .font(.body)
-                        .foregroundStyle(.white.opacity(0.92))
+                        .foregroundStyle(Theme.textPrimary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity)
                 }
@@ -206,7 +285,7 @@ public struct VoiceChatView: View {
 
             Text(statusHintText)
                 .font(.caption.weight(.medium))
-                .foregroundStyle(.white.opacity(0.55))
+                .foregroundStyle(Theme.textTertiary)
                 .multilineTextAlignment(.center)
         }
         .frame(minHeight: 90)
@@ -217,20 +296,21 @@ public struct VoiceChatView: View {
             if tool.result == nil {
                 ProgressView()
                     .controlSize(.mini)
-                    .tint(.white.opacity(0.85))
+                    .tint(Theme.accent)
             } else {
                 Image(systemName: "checkmark.circle.fill")
                     .font(.caption)
-                    .foregroundStyle(Color(red: 0.42, green: 0.90, blue: 0.72))
+                    .foregroundStyle(Theme.fitGreen)
             }
             Text(tool.name)
                 .font(.caption.monospaced())
-                .foregroundStyle(.white.opacity(0.85))
+                .foregroundStyle(Theme.textSecondary)
                 .lineLimit(1)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        .background(.white.opacity(0.12), in: Capsule())
+        .background(Theme.surface, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 1))
     }
 
     private var subtitleText: String {
@@ -247,7 +327,7 @@ public struct VoiceChatView: View {
     private var statusHintText: String {
         switch session.state {
         case .idle:
-            return chat.hasModel ? "点击下方按钮或球体开始语音对话" : "请先选择或加载一个模型"
+            return chat.hasModel ? "点击下方按钮或水墨球体开始语音对话" : "请先选择或加载一个模型"
         case .listening:
             return session.liveUserTranscript.isEmpty ? "我在听…" : "停顿后自动发送"
         case .thinking:
@@ -271,10 +351,13 @@ public struct VoiceChatView: View {
                 } label: {
                     Text("结束")
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 26)
+                        .foregroundStyle(Theme.onAccent)
+                        .padding(.horizontal, 28)
                         .padding(.vertical, 10)
-                        .background(Color(red: 0.86, green: 0.22, blue: 0.24), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .background(
+                            Theme.danger,
+                            in: RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
+                        )
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("End voice call")
@@ -287,14 +370,14 @@ public struct VoiceChatView: View {
                         Text("开始语音对话")
                     }
                     .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.black)
-                    .padding(.horizontal, 24)
+                    .foregroundStyle(Theme.onAccent)
+                    .padding(.horizontal, 26)
                     .padding(.vertical, 12)
-                    .background(Color.white, in: Capsule())
+                    .background(Theme.accent, in: Capsule())
                 }
                 .buttonStyle(.plain)
                 .disabled(!chat.hasModel)
-                .opacity(chat.hasModel ? 1.0 : 0.5)
+                .opacity(chat.hasModel ? 1.0 : 0.45)
                 .accessibilityLabel("Start voice call")
             }
         }
