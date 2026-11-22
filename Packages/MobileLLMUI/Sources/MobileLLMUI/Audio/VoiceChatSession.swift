@@ -64,7 +64,6 @@ public final class VoiceChatSession {
     @ObservationIgnored private var isRestartingEngine = false
     @ObservationIgnored private var lastPublishedLiveActivity: VoiceLiveActivitySnapshot?
     @ObservationIgnored private var lastRawLiveActivityKey: RawLiveActivityKey?
-    @ObservationIgnored private var activeTurnBackgroundTask: (any BackgroundDrainToken)?
     @ObservationIgnored nonisolated(unsafe) private var audioObservers: [NSObjectProtocol] = []
 
     private struct RawLiveActivityKey: Equatable {
@@ -77,8 +76,6 @@ public final class VoiceChatSession {
 
     /// Optional Live Activity bridge for iOS Dynamic Island & Lock Screen presentation.
     public var liveActivity: (any VoiceLiveActivityProviding)?
-    /// Optional provider that acquires a finite OS background task lease per voice turn while backgrounded.
-    public var beginBackgroundTurnTask: (@MainActor (@escaping @MainActor @Sendable () -> Void) -> (any BackgroundDrainToken)?)?
     /// Invoked once the voice session has started and is actively listening (e.g. to dismiss chat banners/PiP).
     public var onSessionActivated: (@MainActor () -> Void)?
     /// Invoked after the voice session stops cleanly (e.g. to suspend idle local weights if still backgrounded).
@@ -153,7 +150,6 @@ public final class VoiceChatSession {
         consecutiveConfigRecoveries = 0
         lastPublishedLiveActivity = nil
         lastRawLiveActivityKey = nil
-        endTurnBackgroundTask()
         tapBridge.setSpeaking(false)
         liveActivity?.end()
         onSessionStopped?()
@@ -169,7 +165,6 @@ public final class VoiceChatSession {
         observationTask = nil
         sendTask?.cancel()
         sendTask = nil
-        endTurnBackgroundTask()
         tapBridge.setSpeaking(false)
         speech.stop(suppressCurrentTurn: true)
         if chat.streaming != nil {
@@ -371,7 +366,6 @@ public final class VoiceChatSession {
         consecutiveConfigRecoveries = 0
         lastPublishedLiveActivity = nil
         lastRawLiveActivityKey = nil
-        endTurnBackgroundTask()
         state = failureState
         liveActivity?.end()
         onSessionStopped?()
@@ -547,7 +541,6 @@ public final class VoiceChatSession {
 
     private func beginListening() {
         guard sessionToken != 0 else { return }
-        endTurnBackgroundTask()
         teardownRecognition()
         silenceSubmitTask?.cancel()
         silenceSubmitTask = nil
@@ -693,7 +686,6 @@ public final class VoiceChatSession {
             }
             guard !Task.isCancelled, self.sessionToken == token, self.isActive else { return }
 
-            self.beginTurnBackgroundTaskIfNeeded()
             guard self.chat.sendVoiceMessage(text) else {
                 self.beginListening()
                 return
@@ -722,7 +714,6 @@ public final class VoiceChatSession {
                         self.enterSpeakingState()
                     }
                 } else if self.speech.isSpeaking {
-                    self.endTurnBackgroundTask()
                     if self.state != .speaking {
                         self.enterSpeakingState()
                     }
@@ -730,7 +721,6 @@ public final class VoiceChatSession {
                         self.liveAssistantText = self.speech.currentSpokenSentence
                     }
                 } else {
-                    self.endTurnBackgroundTask()
                     if self.state == .thinking || self.state == .speaking {
                         self.beginListening()
                     }
@@ -756,18 +746,6 @@ public final class VoiceChatSession {
         state = .speaking
         tapBridge.setSpeaking(true)
         publishLiveActivity()
-    }
-
-    private func beginTurnBackgroundTaskIfNeeded() {
-        endTurnBackgroundTask()
-        activeTurnBackgroundTask = beginBackgroundTurnTask? { [weak self] in
-            self?.endTurnBackgroundTask()
-        }
-    }
-
-    private func endTurnBackgroundTask() {
-        activeTurnBackgroundTask?.end()
-        activeTurnBackgroundTask = nil
     }
 
     private func makeLiveActivitySnapshot() -> VoiceLiveActivitySnapshot? {
