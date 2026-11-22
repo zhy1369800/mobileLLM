@@ -277,7 +277,7 @@ public final class AppContainer {
             case .llamaCpp:
                 // Devices > 4 GB RAM offload llama.cpp layers onto Metal GPU (see LlamaEngine.load).
                 return ProcessInfo.processInfo.physicalMemory > 4_294_967_296
-            case .apple, .none:
+            case .apple, .online, .shortcuts, .none:
                 return false
             }
         }

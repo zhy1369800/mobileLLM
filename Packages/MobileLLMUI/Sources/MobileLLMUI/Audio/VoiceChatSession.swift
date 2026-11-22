@@ -415,16 +415,21 @@ public final class VoiceChatSession {
         audioObservers = [interruption, routeChange]
         #endif
 
+        let engineID = ObjectIdentifier(engine)
         let configChange = center.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
             queue: nil
-        ) { [weak self, weak engine] _ in
-            Task { @MainActor [weak self, weak engine] in
-                guard let self, let engine, self.audioEngine === engine, !engine.isRunning else {
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let currentEngine = self.audioEngine,
+                      ObjectIdentifier(currentEngine) == engineID,
+                      !currentEngine.isRunning
+                else {
                     return
                 }
-                self.scheduleConfigRecovery(for: engine)
+                self.scheduleConfigRecovery(for: currentEngine)
             }
         }
         audioObservers.append(configChange)
@@ -442,14 +447,15 @@ public final class VoiceChatSession {
     private func scheduleConfigRecovery(for engine: AVAudioEngine) {
         configRecoveryTask?.cancel()
         let token = sessionToken
-        configRecoveryTask = Task { @MainActor [weak self, weak engine] in
+        let engineID = ObjectIdentifier(engine)
+        configRecoveryTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled,
                   let self,
-                  let engine,
                   self.sessionToken == token,
                   self.isActive,
-                  self.audioEngine === engine,
+                  let engine = self.audioEngine,
+                  ObjectIdentifier(engine) == engineID,
                   !engine.isRunning
             else { return }
 
