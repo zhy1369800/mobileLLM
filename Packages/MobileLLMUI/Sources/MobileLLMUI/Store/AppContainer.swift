@@ -188,6 +188,13 @@ public final class AppContainer {
         voiceSession.onSessionStopped = { [weak self] in
             self?.lifecycle.completeDeferredBackgroundDrainIfNeeded()
         }
+        voiceSession.beginBackgroundTurnTask = { [weak self] onExpire in
+            guard let self, self.lifecycle.isInBackground else { return nil }
+            return self.lifecycle.beginTransientBackgroundTask(
+                named: "mobileLLM.voiceTurn",
+                expiration: onExpire
+            )
+        }
         self.lifecycle.onEnterBackground = { [weak speechCoordinator, weak voiceSession] in
             if voiceSession?.isActive == true {
                 voiceSession?.stop()

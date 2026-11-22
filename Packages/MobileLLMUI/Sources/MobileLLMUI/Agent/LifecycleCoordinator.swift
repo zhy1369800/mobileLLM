@@ -133,6 +133,14 @@ public final class LifecycleCoordinator {
         issueQuiesce()
     }
 
+    /// Starts an independent transient background task lease without mutating quiesce state.
+    public func beginTransientBackgroundTask(
+        named name: String,
+        expiration: @escaping @MainActor @Sendable () -> Void
+    ) -> (any BackgroundDrainToken)? {
+        drainProvider?.beginDrain(named: name, expiration: expiration)
+    }
+
     public func enterForeground() {
         guard isInBackground else { return }
         isInBackground = false

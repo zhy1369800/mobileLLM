@@ -62,4 +62,34 @@ final class VoiceLiveActivityTests: XCTestCase {
         XCTAssertTrue(enteredBackgroundHook)
         XCTAssertTrue(stoppedAdmissions)
     }
+
+    func testTransientBackgroundTaskDoesNotMutateLifecycleDrainState() {
+        let provider = TransientDrainProviderFixture()
+        let coordinator = LifecycleCoordinator(drainProvider: provider)
+        let leased = coordinator.beginTransientBackgroundTask(named: "mobileLLM.voiceTurn") {}
+        XCTAssertNotNil(leased)
+        XCTAssertEqual(provider.names, ["mobileLLM.voiceTurn"])
+        XCTAssertEqual(coordinator.drainState, .idle)
+        XCTAssertEqual(coordinator.quiesceIssueCount, 0)
+
+        leased?.end()
+        XCTAssertTrue(provider.token.ended)
+    }
+}
+
+@MainActor
+private final class TransientDrainTokenFixture: BackgroundDrainToken {
+    private(set) var isExpired = false
+    private(set) var ended = false
+    func end() { ended = true }
+}
+
+@MainActor
+private final class TransientDrainProviderFixture: BackgroundDrainProviding {
+    private(set) var names: [String] = []
+    let token = TransientDrainTokenFixture()
+    func beginDrain(named name: String, expiration: @escaping @MainActor @Sendable () -> Void) -> any BackgroundDrainToken {
+        names.append(name)
+        return token
+    }
 }
