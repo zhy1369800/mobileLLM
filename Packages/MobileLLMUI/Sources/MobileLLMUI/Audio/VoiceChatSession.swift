@@ -46,6 +46,7 @@ public final class VoiceChatSession {
     @ObservationIgnored private let playbackController: EnginePlaybackController
 
     @ObservationIgnored private var audioEngine: AVAudioEngine?
+    @ObservationIgnored private var activePlayerNode: AVAudioPlayerNode?
     @ObservationIgnored private var recognizer: SFSpeechRecognizer?
     @ObservationIgnored private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     @ObservationIgnored private var recognitionTask: SFSpeechRecognitionTask?
@@ -54,11 +55,13 @@ public final class VoiceChatSession {
     @ObservationIgnored private var observationTask: Task<Void, Never>?
     @ObservationIgnored private var renewalTask: Task<Void, Never>?
     @ObservationIgnored private var sendTask: Task<Void, Never>?
+    @ObservationIgnored private var configRecoveryTask: Task<Void, Never>?
+    @ObservationIgnored private var routeRestartTask: Task<Void, Never>?
     @ObservationIgnored private var sessionToken: UInt64 = 0
     @ObservationIgnored private var recognitionGeneration: UInt64 = 0
     @ObservationIgnored private var consecutiveRenewalFailures: Int = 0
+    @ObservationIgnored private var consecutiveConfigRecoveries: Int = 0
     @ObservationIgnored private var isRestartingEngine = false
-    @ObservationIgnored private var lastEngineStartTime: Date = .distantPast
     @ObservationIgnored nonisolated(unsafe) private var audioObservers: [NSObjectProtocol] = []
 
     /// Silence duration after user stops speaking before auto-submitting the transcript.
@@ -127,6 +130,7 @@ public final class VoiceChatSession {
         liveAssistantText = ""
         activeToolRuns = []
         consecutiveRenewalFailures = 0
+        consecutiveConfigRecoveries = 0
         tapBridge.setSpeaking(false)
     }
 
@@ -194,6 +198,7 @@ public final class VoiceChatSession {
         liveAssistantText = ""
         activeToolRuns = []
         consecutiveRenewalFailures = 0
+        consecutiveConfigRecoveries = 0
         beginListening()
     }
 
@@ -201,8 +206,6 @@ public final class VoiceChatSession {
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
         do {
-            // `.videoChat` + `.defaultToSpeaker` natively routes to the loudspeaker with full
-            // volume and hardware AEC without triggering port-override configuration loops.
             try session.setCategory(
                 .playAndRecord,
                 mode: .videoChat,
@@ -219,6 +222,9 @@ public final class VoiceChatSession {
         let player = AVAudioPlayerNode()
         engine.attach(player)
 
+        // Connect output graph first so VPIO activates full-duplex I/O negotiation cleanly.
+        engine.connect(player, to: engine.mainMixerNode, format: nil)
+
         #if os(iOS)
         // Enable hardware voice processing (AEC + noise suppression) while the engine is stopped;
         // set minimum ducking so playback stays at full volume.
@@ -229,22 +235,46 @@ public final class VoiceChatSession {
         )
         #endif
 
-        let mixerFormat = engine.mainMixerNode.outputFormat(forBus: 0)
-        let playbackFormat: AVAudioFormat
-        if mixerFormat.channelCount > 0 && mixerFormat.sampleRate > 0 {
-            playbackFormat = mixerFormat
-        } else if let fallback = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1) {
-            playbackFormat = fallback
-        } else {
+        guard let playbackFormat = resolvePlaybackFormat(for: engine) else {
             return nil
         }
         engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
 
-        let inputFormat = input.outputFormat(forBus: 0)
-        guard inputFormat.channelCount > 0, inputFormat.sampleRate > 0 else {
+        guard installMicrophoneTap(on: engine) else {
             return nil
         }
 
+        engine.prepare()
+        do {
+            try engine.start()
+            player.play()
+            playbackController.attach(player: player, format: playbackFormat)
+            self.audioEngine = engine
+            self.activePlayerNode = player
+            return engine
+        } catch {
+            playbackController.detach()
+            input.removeTap(onBus: 0)
+            return nil
+        }
+    }
+
+    private func resolvePlaybackFormat(for engine: AVAudioEngine) -> AVAudioFormat? {
+        let mixerFormat = engine.mainMixerNode.outputFormat(forBus: 0)
+        if mixerFormat.channelCount > 0 && mixerFormat.sampleRate > 0 {
+            return mixerFormat
+        }
+        return AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)
+    }
+
+    private func installMicrophoneTap(on engine: AVAudioEngine) -> Bool {
+        let input = engine.inputNode
+        let inputFormat = input.outputFormat(forBus: 0)
+        guard inputFormat.channelCount > 0, inputFormat.sampleRate > 0 else {
+            return false
+        }
+
+        input.removeTap(onBus: 0)
         let token = sessionToken
         let bridge = tapBridge
         let levelBox = audioLevelBox
@@ -264,24 +294,12 @@ public final class VoiceChatSession {
                 levelBox.set(prev * 0.55 + level * 0.45)
             }
         }
-
-        engine.prepare()
-        do {
-            try engine.start()
-            player.play()
-            playbackController.attach(player: player, format: playbackFormat)
-            lastEngineStartTime = Date()
-            self.audioEngine = engine
-            return engine
-        } catch {
-            playbackController.detach()
-            input.removeTap(onBus: 0)
-            return nil
-        }
+        return true
     }
 
     private func teardownAudioEngine() {
         playbackController.detach()
+        activePlayerNode = nil
         if let engine = audioEngine {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
@@ -309,6 +327,7 @@ public final class VoiceChatSession {
         speech.onPlaybackFinished = nil
         restoreAudioSessionAfterCall()
         audioLevelBox.set(0)
+        consecutiveConfigRecoveries = 0
         state = failureState
     }
 
@@ -321,6 +340,10 @@ public final class VoiceChatSession {
         renewalTask = nil
         sendTask?.cancel()
         sendTask = nil
+        configRecoveryTask?.cancel()
+        configRecoveryTask = nil
+        routeRestartTask?.cancel()
+        routeRestartTask = nil
     }
 
     // MARK: - Audio Session & Route Observers
@@ -353,7 +376,7 @@ public final class VoiceChatSession {
             guard reason == .newDeviceAvailable || reason == .oldDeviceUnavailable else { return }
             Task { @MainActor [weak self] in
                 self?.refreshBargeInThresholds()
-                self?.restartEngineAfterRouteChange()
+                self?.scheduleRouteRestart()
             }
         }
         audioObservers = [interruption, routeChange]
@@ -368,7 +391,7 @@ public final class VoiceChatSession {
                 guard let self, let engine, self.audioEngine === engine, !engine.isRunning else {
                     return
                 }
-                self.restartEngineAfterRouteChange()
+                self.scheduleConfigRecovery(for: engine)
             }
         }
         audioObservers.append(configChange)
@@ -381,11 +404,70 @@ public final class VoiceChatSession {
         audioObservers.removeAll()
     }
 
+    /// Recovers the existing `AVAudioEngine` in-place after iOS VPIO finishes its initial
+    /// duplex hardware format negotiation (or transient config pause), debouncing bursts by 120ms.
+    private func scheduleConfigRecovery(for engine: AVAudioEngine) {
+        configRecoveryTask?.cancel()
+        let token = sessionToken
+        configRecoveryTask = Task { @MainActor [weak self, weak engine] in
+            try? await Task.sleep(for: .milliseconds(120))
+            guard !Task.isCancelled,
+                  let self,
+                  let engine,
+                  self.sessionToken == token,
+                  self.isActive,
+                  self.audioEngine === engine,
+                  !engine.isRunning
+            else { return }
+
+            guard self.consecutiveConfigRecoveries < 3 else {
+                self.cleanupOnFailure(to: .unavailable)
+                return
+            }
+            self.consecutiveConfigRecoveries += 1
+
+            if let player = self.activePlayerNode, let playbackFormat = self.resolvePlaybackFormat(for: engine) {
+                engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
+                self.playbackController.attach(player: player, format: playbackFormat)
+            }
+
+            guard self.installMicrophoneTap(on: engine) else {
+                self.restartEngineAfterRouteChange()
+                return
+            }
+
+            engine.prepare()
+            do {
+                try engine.start()
+                self.activePlayerNode?.play()
+                if self.state == .listening {
+                    self.beginListening()
+                }
+            } catch {
+                self.restartEngineAfterRouteChange()
+            }
+        }
+    }
+
+    private func scheduleRouteRestart() {
+        routeRestartTask?.cancel()
+        let token = sessionToken
+        routeRestartTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled, let self, self.sessionToken == token, self.isActive else { return }
+            self.restartEngineAfterRouteChange()
+        }
+    }
+
     private func restartEngineAfterRouteChange() {
         guard isActive, !isRestartingEngine else { return }
-        guard Date().timeIntervalSince(lastEngineStartTime) >= 0.5 else { return }
         isRestartingEngine = true
         defer { isRestartingEngine = false }
+
+        configRecoveryTask?.cancel()
+        configRecoveryTask = nil
+        routeRestartTask?.cancel()
+        routeRestartTask = nil
 
         removeAudioObservers()
         teardownRecognition()
@@ -460,6 +542,7 @@ public final class VoiceChatSession {
                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !trimmed.isEmpty {
                         self.consecutiveRenewalFailures = 0
+                        self.consecutiveConfigRecoveries = 0
                         self.liveUserTranscript = trimmed
                         self.scheduleSilenceSubmit(token: token, recGen: recGen)
                     }
@@ -652,6 +735,7 @@ public final class VoiceChatSession {
 private final class AudioTapBridge: @unchecked Sendable {
     private let lock = NSLock()
     private var activeRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var cachedMonoFormat: AVAudioFormat?
     private var isSpeaking = false
     private var bargeInThreshold: Float = 0.42
     private var bargeInRequiredDuration: Double = 0.18
@@ -691,8 +775,33 @@ private final class AudioTapBridge: @unchecked Sendable {
     func appendIfActive(_ buffer: AVAudioPCMBuffer) {
         lock.lock()
         let request = activeRequest
+        var monoFormat = cachedMonoFormat
+        if request != nil, buffer.format.channelCount > 1 {
+            if monoFormat == nil || monoFormat?.sampleRate != buffer.format.sampleRate {
+                monoFormat = AVAudioFormat(standardFormatWithSampleRate: buffer.format.sampleRate, channels: 1)
+                cachedMonoFormat = monoFormat
+            }
+        }
         lock.unlock()
-        request?.append(buffer)
+
+        guard let request, buffer.frameLength > 0 else { return }
+        if buffer.format.channelCount == 1 {
+            request.append(buffer)
+            return
+        }
+
+        // VPIO can deliver multi-channel buffers; extract channel 0 as mono for SFSpeechRecognizer.
+        if let monoFormat,
+           let src = buffer.floatChannelData?[0],
+           let monoBuffer = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: buffer.frameLength),
+           let dst = monoBuffer.floatChannelData?[0]
+        {
+            monoBuffer.frameLength = buffer.frameLength
+            memcpy(dst, src, Int(buffer.frameLength) * MemoryLayout<Float>.size)
+            request.append(monoBuffer)
+        } else {
+            request.append(buffer)
+        }
     }
 
     /// Evaluates barge-in by real buffer duration after an initial grace period,
