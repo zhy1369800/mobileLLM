@@ -1051,7 +1051,9 @@ public final class ChatStore {
                     name: existing.name,
                     baseURL: existing.baseURL,
                     modelID: parts.model,
-                    isEnabled: true
+                    maximumOutputTokens: existing.maximumOutputTokens,
+                    isEnabled: true,
+                    supportsNativeWebSearch: existing.supportsNativeWebSearch
                 ))
             } else {
                 settings.upsertOnlineService(OnlineService(

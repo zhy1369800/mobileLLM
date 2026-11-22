@@ -7,6 +7,7 @@ import LLMCore
 import LLMEngineMLX
 import LLMEngineLlama
 import LLMEngineApple
+import AgentContracts
 import AgentRuntime
 #if os(iOS)
 import UserNotifications
@@ -1010,7 +1011,9 @@ func makeAgentSnapshot(
     text: String,
     imageRefs: [ImageRef],
     downloadBase: URL,
-    onlineConfigBox: OpenAIOnlineConfigurationBox
+    onlineConfigBox: OpenAIOnlineConfigurationBox,
+    now: Date = Date(),
+    timeZone: TimeZone = .current
 ) -> AgentRunRequestSnapshot? {
     guard let conversation = container.chat.conversation(id: conversationID) else { return nil }
 
@@ -1084,7 +1087,8 @@ func makeAgentSnapshot(
         maxTokens = container.settings.maxTokens
     }
     let toolsEnabled = conversation.toolPolicy?.masterEnabled ?? container.settings.toolsEnabled
-    let localToolNames: [String]
+    let suppressClientWebSearch = onlineService?.supportsNativeWebSearch == true
+    var localToolNames: [String]
     if let policy = conversation.toolPolicy {
         localToolNames = policy.allowedToolIDs
             .filter { $0.providerID == "builtin" }
@@ -1093,10 +1097,34 @@ func makeAgentSnapshot(
     } else {
         localToolNames = container.settings.builtInToolConfig.enabled.map(\.rawValue).sorted()
     }
+    if suppressClientWebSearch {
+        localToolNames.removeAll { $0 == "web_search" }
+    }
+    let effectiveToolPolicy: ConversationToolPolicy?
+    if suppressClientWebSearch, let policy = conversation.toolPolicy {
+        let keep: (AgentToolLogicalID) -> Bool = {
+            !($0.providerID == "builtin" && $0.name == "web_search")
+        }
+        effectiveToolPolicy = (try? ConversationToolPolicy(
+            masterEnabled: policy.masterEnabled,
+            allowedToolIDs: policy.allowedToolIDs.filter(keep),
+            pinnedToolIDs: policy.pinnedToolIDs.filter(keep),
+            selectionPolicyVersion: policy.selectionPolicyVersion,
+            materializedFromGlobalTemplate: policy.materializedFromGlobalTemplate
+        )) ?? policy
+    } else {
+        effectiveToolPolicy = conversation.toolPolicy
+    }
     // Auto-compaction (local runs only): messages up to the persisted cutoff are replaced by their summary
     // in the system prompt. Disabled, online, or a stale cutoff leaves history exactly as it was.
     var historyMessages = conversation.messages
     var systemPrompt = container.settings.effectiveSystemPrompt(id: conversation.systemPromptID)
+    let dateLine = "Current date: \(formattedCurrentDate(now, timeZone: timeZone))"
+    if systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        systemPrompt = dateLine
+    } else {
+        systemPrompt += "\n\n" + dateLine
+    }
     if container.settings.autoCompactionEnabled, onlineParts == nil,
        let summary = conversation.compactionSummary, !summary.isEmpty,
        let cutoff = conversation.compactionCutoffMessageID,
@@ -1136,7 +1164,7 @@ func makeAgentSnapshot(
             ? container.mcpDiscovery.descriptors(for: container.settings.mcpServers)
             : [],
         webSearchDestinations: {
-            guard toolsEnabled else { return [] }
+            guard toolsEnabled, localToolNames.contains("web_search") else { return [] }
             if let remoteID = container.settings.webSearchOnlineServiceID {
                 guard let remoteService = container.settings.onlineServices.first(where: { $0.id == remoteID }),
                       let url = URL(string: remoteService.baseURL),
@@ -1149,8 +1177,10 @@ func makeAgentSnapshot(
                 try AppWebSearchToolAdapter.destination(engine: $0)
             }) ?? []
         }(),
-        webSearchOnlineServiceID: container.settings.webSearchOnlineServiceID,
-        toolPolicy: conversation.toolPolicy,
+        webSearchOnlineServiceID: localToolNames.contains("web_search")
+            ? container.settings.webSearchOnlineServiceID
+            : nil,
+        toolPolicy: effectiveToolPolicy,
         onlineModelEnabled: onlineParts != nil,
         onlineModelID: onlineModelID,
         onlineServiceID: onlineParts?.serviceID,
@@ -1164,6 +1194,17 @@ func makeAgentSnapshot(
         onlineReasoningEffort: conversation.reasoningEffort ?? .medium,
         alwaysExposeTools: container.settings.alwaysExposeTools
     )
+}
+
+/// Formats `date` as an invariant `yyyy-MM-dd` string so models know the current day without
+/// busting same-day prompt/KV caches.
+private func formattedCurrentDate(_ date: Date, timeZone: TimeZone) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.timeZone = timeZone
+    formatter.dateFormat = "yyyy-MM-dd"
+    return formatter.string(from: date)
 }
 
 #if os(macOS)

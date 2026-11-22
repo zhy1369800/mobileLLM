@@ -512,4 +512,36 @@ final class SettingsPersistenceTests: XCTestCase {
         XCTAssertTrue(settings.isCompactionTargetAvailable(.online(serviceID: "online-1")))
         XCTAssertFalse(settings.isCompactionTargetAvailable(.online(serviceID: "online-2")))
     }
+
+    func testLegacyOnlineServiceJSONDecodesSupportsNativeWebSearchAsFalse() throws {
+        let legacyJSON = #"""
+        {
+          "id": "svc-legacy",
+          "name": "Legacy",
+          "baseURL": "https://api.example.com/v1",
+          "modelID": "gpt-4o",
+          "maximumOutputTokens": 4096,
+          "isEnabled": true
+        }
+        """#
+        let decoded = try JSONDecoder().decode(OnlineService.self, from: Data(legacyJSON.utf8))
+        XCTAssertEqual(decoded.id, "svc-legacy")
+        XCTAssertFalse(decoded.supportsNativeWebSearch)
+    }
+
+    func testOnlineServiceSupportsNativeWebSearchRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        settings.upsertOnlineService(OnlineService(
+            id: "svc-native-search",
+            name: "Native Search",
+            baseURL: "https://api.deepseek.com/v1",
+            modelID: "deepseek-chat",
+            isEnabled: true,
+            supportsNativeWebSearch: true
+        ))
+
+        let reloaded = AppSettings(defaults: defaults)
+        let service = reloaded.onlineServices.first { $0.id == "svc-native-search" }
+        XCTAssertEqual(service?.supportsNativeWebSearch, true)
+    }
 }

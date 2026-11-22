@@ -963,6 +963,159 @@ final class ToolV2AdapterTests: XCTestCase {
             "prose\n<tool_call>x</tool_call>"
         )
     }
+
+    @MainActor
+    func testSnapshotInjectsCurrentDateIntoSystemPrompt() throws {
+        let suite = "agent-snapshot-date-\(UUID().uuidString)"
+        let directory = FileManager.default.temporaryDirectory.appending(component: suite)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let (container, config) = makeSnapshotTestContainer(
+            directory: directory,
+            defaults: defaults
+        )
+        let model = LLMCatalog.bonsai8b
+        let conversation = Conversation(
+            modelID: model.id,
+            variantID: model.defaultVariantValue.id,
+            messages: [Message(role: .user, answer: "What models came out recently?")]
+        )
+        container.chat.conversations = [conversation]
+        var calendar = Calendar(identifier: .gregorian)
+        let utc = TimeZone(secondsFromGMT: 0)!
+        calendar.timeZone = utc
+        let fixedDate = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 11,
+            day: 22,
+            hour: 12
+        )))
+
+        let snapshot = try XCTUnwrap(makeAgentSnapshot(
+            container: container,
+            conversationID: conversation.id,
+            userTurnID: conversation.messages[0].id,
+            text: "What models came out recently?",
+            imageRefs: [],
+            downloadBase: directory,
+            onlineConfigBox: config,
+            now: fixedDate,
+            timeZone: utc
+        ))
+
+        XCTAssertTrue(snapshot.systemPrompt.contains("Current date: 2026-11-22"))
+    }
+
+    @MainActor
+    func testSnapshotOmitsClientWebSearchWhenOnlineServiceSupportsNativeWebSearch() throws {
+        let suite = "agent-snapshot-native-search-\(UUID().uuidString)"
+        let directory = FileManager.default.temporaryDirectory.appending(component: suite)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let settings = AppSettings(defaults: defaults)
+        settings.toolsEnabled = true
+        settings.disabledBuiltInTools = []
+        settings.upsertOnlineService(OnlineService(
+            id: "svc-native",
+            name: "Native Search Service",
+            baseURL: "https://api.deepseek.com/v1",
+            modelID: "deepseek-chat",
+            supportsNativeWebSearch: true
+        ))
+        settings.upsertOnlineService(OnlineService(
+            id: "svc-standard",
+            name: "Standard Online Service",
+            baseURL: "https://api.openai.com/v1",
+            modelID: "gpt-4o-mini",
+            supportsNativeWebSearch: false
+        ))
+        settings.webSearchOnlineServiceID = "svc-standard"
+
+        let (container, config) = makeSnapshotTestContainer(
+            directory: directory,
+            defaults: defaults,
+            settings: settings
+        )
+        let calculator = try AgentToolLogicalID(providerID: "builtin", name: "calculator")
+        let webSearch = try AgentToolLogicalID(providerID: "builtin", name: "web_search")
+        let policy = try ConversationToolPolicy(
+            masterEnabled: true,
+            allowedToolIDs: [calculator, webSearch],
+            pinnedToolIDs: [calculator, webSearch],
+            selectionPolicyVersion: 1,
+            materializedFromGlobalTemplate: false
+        )
+        let nativeConvo = Conversation(
+            modelID: OnlineModelIdentity.conversationModelID("svc-native", model: "deepseek-chat"),
+            variantID: OnlineModelIdentity.variantID,
+            messages: [Message(role: .user, answer: "latest ai models")],
+            toolPolicy: policy
+        )
+        let standardConvo = Conversation(
+            modelID: OnlineModelIdentity.conversationModelID("svc-standard", model: "gpt-4o-mini"),
+            variantID: OnlineModelIdentity.variantID,
+            messages: [Message(role: .user, answer: "latest ai models")],
+            toolPolicy: policy
+        )
+        container.chat.conversations = [nativeConvo, standardConvo]
+
+        let nativeSnapshot = try XCTUnwrap(makeAgentSnapshot(
+            container: container,
+            conversationID: nativeConvo.id,
+            userTurnID: nativeConvo.messages[0].id,
+            text: "latest ai models",
+            imageRefs: [],
+            downloadBase: directory,
+            onlineConfigBox: config
+        ))
+        XCTAssertFalse(nativeSnapshot.localToolNames.contains("web_search"))
+        XCTAssertTrue(nativeSnapshot.localToolNames.contains("calculator"))
+        XCTAssertEqual(nativeSnapshot.toolPolicy?.allowedToolIDs, [calculator])
+        XCTAssertEqual(nativeSnapshot.toolPolicy?.pinnedToolIDs, [calculator])
+        XCTAssertTrue(nativeSnapshot.webSearchDestinations.isEmpty)
+        XCTAssertNil(nativeSnapshot.webSearchOnlineServiceID)
+
+        let standardSnapshot = try XCTUnwrap(makeAgentSnapshot(
+            container: container,
+            conversationID: standardConvo.id,
+            userTurnID: standardConvo.messages[0].id,
+            text: "latest ai models",
+            imageRefs: [],
+            downloadBase: directory,
+            onlineConfigBox: config
+        ))
+        XCTAssertTrue(standardSnapshot.localToolNames.contains("web_search"))
+        XCTAssertEqual(standardSnapshot.toolPolicy?.allowedToolIDs, [calculator, webSearch])
+        XCTAssertFalse(standardSnapshot.webSearchDestinations.isEmpty)
+        XCTAssertEqual(standardSnapshot.webSearchOnlineServiceID, "svc-standard")
+    }
+
+    @MainActor
+    private func makeSnapshotTestContainer(
+        directory: URL,
+        defaults: UserDefaults,
+        settings: AppSettings? = nil
+    ) -> (AppContainer, OpenAIOnlineConfigurationBox) {
+        let credentials = EphemeralOpenAICredentialStore()
+        let container = AppContainer(
+            engine: MockLLMEngine(script: .init()),
+            downloadBase: directory,
+            downloader: { _, _, _, _ in },
+            settings: settings ?? AppSettings(defaults: defaults),
+            conversationStore: ConversationStore(directory: directory),
+            openAICredentials: credentials
+        )
+        let config = OpenAIOnlineConfigurationBox(
+            baseURL: "https://example.com/v1",
+            modelID: nil,
+            credentials: credentials
+        )
+        return (container, config)
+    }
 }
 
 // MARK: - Canned HTTP fixture

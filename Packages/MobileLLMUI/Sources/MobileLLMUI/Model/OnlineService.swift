@@ -19,6 +19,9 @@ public struct OnlineService: Sendable, Hashable, Codable, Identifiable {
     public var maximumOutputTokens: Int?
     /// True = this service is the active online model. The settings layer keeps at most one enabled.
     public var isEnabled: Bool
+    /// True when this service executes web search natively on the server (spec §15.5).
+    /// When active, the app omits its client-side `web_search` tool to prevent duplicate searches.
+    public var supportsNativeWebSearch: Bool
 
     /// The id used by the single-service era (and by the Mac-local config / test env seeding). Keeping
     /// it lets an upgraded install reuse the key already stored under this Keychain account.
@@ -30,7 +33,8 @@ public struct OnlineService: Sendable, Hashable, Codable, Identifiable {
         baseURL: String,
         modelID: String? = nil,
         maximumOutputTokens: Int? = nil,
-        isEnabled: Bool = false
+        isEnabled: Bool = false,
+        supportsNativeWebSearch: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -38,6 +42,31 @@ public struct OnlineService: Sendable, Hashable, Codable, Identifiable {
         self.modelID = modelID
         self.maximumOutputTokens = maximumOutputTokens
         self.isEnabled = isEnabled
+        self.supportsNativeWebSearch = supportsNativeWebSearch
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case baseURL
+        case modelID
+        case maximumOutputTokens
+        case isEnabled
+        case supportsNativeWebSearch
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        baseURL = try container.decode(String.self, forKey: .baseURL)
+        modelID = try container.decodeIfPresent(String.self, forKey: .modelID)
+        maximumOutputTokens = try container.decodeIfPresent(Int.self, forKey: .maximumOutputTokens)
+        isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
+        supportsNativeWebSearch = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .supportsNativeWebSearch
+        ) ?? false
     }
 
     /// A copy with the enabled flag replaced.

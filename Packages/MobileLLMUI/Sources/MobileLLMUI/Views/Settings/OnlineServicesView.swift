@@ -127,6 +127,7 @@ private struct OnlineServiceEditorView: View {
     @State private var maximumOutputTokens = ""
     @State private var key = ""
     @State private var enabled = false
+    @State private var supportsNativeWebSearch = false
     @State private var stored = false
     @State private var status = ""
 
@@ -166,6 +167,15 @@ private struct OnlineServiceEditorView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Active online model").font(.subheadline).foregroundStyle(Theme.textPrimary)
                         Text("The next message goes to this service instead of the on-device model.")
+                            .font(.caption).foregroundStyle(Theme.textTertiary)
+                    }
+                }
+                .tint(Theme.accent)
+
+                Toggle(isOn: $supportsNativeWebSearch) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Native web search").font(.subheadline).foregroundStyle(Theme.textPrimary)
+                        Text("This service searches the web server-side. Omits the app's web_search tool for this model to avoid duplicate searches.")
                             .font(.caption).foregroundStyle(Theme.textTertiary)
                     }
                 }
@@ -238,9 +248,11 @@ private struct OnlineServiceEditorView: View {
             modelID = service.modelID ?? ""
             maximumOutputTokens = service.maximumOutputTokens.map(String.init) ?? ""
             enabled = service.isEnabled
+            supportsNativeWebSearch = service.supportsNativeWebSearch
         } else {
             baseURL = settings.openAIBaseURL
             enabled = settings.onlineServices.isEmpty
+            supportsNativeWebSearch = false
         }
         stored = (try? store.loadAPIKey(serviceID: draftID)) != nil
     }
@@ -274,7 +286,8 @@ private struct OnlineServiceEditorView: View {
             baseURL: normalized,
             modelID: trimmedModel.isEmpty ? nil : trimmedModel,
             maximumOutputTokens: parsedMaxOutput.flatMap { $0 > 0 ? $0 : nil },
-            isEnabled: enabled
+            isEnabled: enabled,
+            supportsNativeWebSearch: supportsNativeWebSearch
         ))
         dismiss()
     }
