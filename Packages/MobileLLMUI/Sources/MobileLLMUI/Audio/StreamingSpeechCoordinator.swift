@@ -25,6 +25,13 @@ public final class StreamingSpeechCoordinator {
             cloudEngine?.preservesExternalAudioSession = isVoiceCallActive
         }
     }
+    /// Optional external audio sink injected during voice call mode so TTS shares the VPIO `AVAudioEngine`.
+    @ObservationIgnored public var externalOutputSink: (any VoiceAudioOutputSink)? {
+        didSet {
+            engine.externalOutputSink = externalOutputSink
+            cloudEngine?.externalOutputSink = externalOutputSink
+        }
+    }
     /// Invoked when the playback queue finishes draining normally (not cancelled).
     @ObservationIgnored public var onPlaybackFinished: (@MainActor @Sendable () -> Void)?
     /// Currently spoken sentence (useful for live captions / subtitles).
@@ -34,6 +41,7 @@ public final class StreamingSpeechCoordinator {
     public var cloudEngine: (any TTSEngine)? {
         didSet {
             cloudEngine?.preservesExternalAudioSession = isVoiceCallActive
+            cloudEngine?.externalOutputSink = externalOutputSink
             cloudEngine?.onExternalInterruption = { [weak self] in
                 self?.stop(suppressCurrentTurn: true)
             }

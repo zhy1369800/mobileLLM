@@ -14,11 +14,13 @@ public final class AppleSystemTTSEngine: TTSEngine {
     public private(set) var isSpeaking: Bool = false
     public var onExternalInterruption: (@MainActor @Sendable () -> Void)?
     public var preservesExternalAudioSession: Bool = false
+    public var externalOutputSink: (any VoiceAudioOutputSink)?
 
     private var synthesizer: AVSpeechSynthesizer?
     private let delegateProxy = DelegateProxy()
     private var activeContinuation: CheckedContinuation<Void, Error>?
     private var activeUtteranceToken: UInt64?
+    private let writeTokenBox = WriteTokenBox()
     private var nextUtteranceToken: UInt64 = 0
     private var cachedVoices: [TTSVoiceInfo]?
     private var audioSessionActive = false
@@ -96,6 +98,42 @@ public final class AppleSystemTTSEngine: TTSEngine {
         utterance.rate = Self.mapPlaybackRate(rate)
         utterance.voice = resolveVoice(for: trimmed, preferredID: voiceID)
 
+        if let sink = externalOutputSink {
+            isSpeaking = true
+            defer { isSpeaking = false }
+            let tokenBox = writeTokenBox
+
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    self.activeUtteranceToken = token
+                    self.activeContinuation = continuation
+                    tokenBox.set(token)
+                    synth.write(utterance) { [weak self] buffer in
+                        guard tokenBox.current() == token else { return }
+                        guard let pcm = buffer as? AVAudioPCMBuffer else { return }
+                        if pcm.frameLength == 0 {
+                            tokenBox.clearIfMatches(token)
+                            Task { @MainActor [weak self] in
+                                self?.handleUtteranceCompleted(token: token, cancelled: false)
+                            }
+                        } else {
+                            sink.enqueuePCMBuffer(pcm)
+                        }
+                    }
+                }
+                try Task.checkCancellation()
+                try await sink.drainEnqueuedPlayback()
+            } onCancel: {
+                tokenBox.clearIfMatches(token)
+                sink.stopPlayback()
+                Task { @MainActor [weak self] in
+                    guard let self, self.activeUtteranceToken == token else { return }
+                    self.stop()
+                }
+            }
+            return
+        }
+
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 self.activeUtteranceToken = token
@@ -113,11 +151,13 @@ public final class AppleSystemTTSEngine: TTSEngine {
 
     public func stop() {
         isSpeaking = false
+        writeTokenBox.clear()
         let continuation = activeContinuation
         activeContinuation = nil
         activeUtteranceToken = nil
 
-        if let synthesizer, synthesizer.isSpeaking {
+        externalOutputSink?.stopPlayback()
+        if let synthesizer {
             synthesizer.stopSpeaking(at: .immediate)
         }
         continuation?.resume(throwing: CancellationError())
@@ -338,4 +378,36 @@ public final class AppleSystemTTSEngine: TTSEngine {
         }
     }
     #endif
+
+    private final class WriteTokenBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var token: UInt64 = 0
+
+        func set(_ value: UInt64) {
+            lock.lock()
+            token = value
+            lock.unlock()
+        }
+
+        func current() -> UInt64 {
+            lock.lock()
+            let value = token
+            lock.unlock()
+            return value
+        }
+
+        func clear() {
+            lock.lock()
+            token = 0
+            lock.unlock()
+        }
+
+        func clearIfMatches(_ expected: UInt64) {
+            lock.lock()
+            if token == expected {
+                token = 0
+            }
+            lock.unlock()
+        }
+    }
 }

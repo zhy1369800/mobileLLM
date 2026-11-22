@@ -53,6 +53,7 @@ public final class CloudTTSEngine: TTSEngine {
     public private(set) var isSpeaking: Bool = false
     public var onExternalInterruption: (@MainActor @Sendable () -> Void)?
     public var preservesExternalAudioSession: Bool = false
+    public var externalOutputSink: (any VoiceAudioOutputSink)?
 
     public var isReady: Bool {
         guard let config = configurationProvider() else { return false }
@@ -196,12 +197,24 @@ public final class CloudTTSEngine: TTSEngine {
             throw CloudTTSError.emptyAudio
         }
 
+        if let sink = externalOutputSink {
+            isSpeaking = true
+            defer { isSpeaking = false }
+            try await withTaskCancellationHandler {
+                try await sink.playEncodedAudio(data)
+            } onCancel: {
+                sink.stopPlayback()
+            }
+            return
+        }
+
         try await playAudioData(data, token: token)
     }
 
     public func stop() {
         isSpeaking = false
         activePlaybackToken = nil
+        externalOutputSink?.stopPlayback()
         player?.stop()
         player = nil
         let continuation = activeContinuation

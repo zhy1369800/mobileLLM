@@ -43,8 +43,10 @@ public final class VoiceChatSession {
 
     @ObservationIgnored private let audioLevelBox = AudioLevelBox()
     @ObservationIgnored private let tapBridge = AudioTapBridge()
+    @ObservationIgnored private let playbackController: EnginePlaybackController
 
     @ObservationIgnored private var audioEngine: AVAudioEngine?
+    @ObservationIgnored private var playerNode: AVAudioPlayerNode?
     @ObservationIgnored private var recognizer: SFSpeechRecognizer?
     @ObservationIgnored private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     @ObservationIgnored private var recognitionTask: SFSpeechRecognitionTask?
@@ -66,6 +68,7 @@ public final class VoiceChatSession {
         self.chat = chat
         self.speech = speech
         self.settings = settings
+        self.playbackController = EnginePlaybackController(levelBox: audioLevelBox)
     }
 
     deinit {
@@ -107,6 +110,7 @@ public final class VoiceChatSession {
         teardownRecognition()
         teardownAudioEngine()
 
+        speech.externalOutputSink = nil
         speech.isVoiceCallActive = false
         speech.onPlaybackFinished = nil
         speech.stop(suppressCurrentTurn: true)
@@ -179,6 +183,7 @@ public final class VoiceChatSession {
         refreshBargeInThresholds()
 
         speech.isVoiceCallActive = true
+        speech.externalOutputSink = playbackController
         speech.onPlaybackFinished = { [weak self] in
             guard let self, self.isActive, self.state == .speaking else { return }
             if self.chat.streaming == nil {
@@ -216,7 +221,7 @@ public final class VoiceChatSession {
         let input = engine.inputNode
         #if os(iOS)
         // Enable hardware voice processing (AEC + noise suppression) on iOS;
-        // set minimum ducking so AVSpeechSynthesizer / AVAudioPlayer stay at full volume.
+        // set minimum ducking so playback stays at full volume.
         try? input.setVoiceProcessingEnabled(true)
         input.voiceProcessingOtherAudioDuckingConfiguration = .init(
             enableAdvancedDucking: false,
@@ -243,16 +248,38 @@ public final class VoiceChatSession {
                     self.interruptAndListen()
                 }
             } else if !bridge.isCurrentlySpeaking() {
-                // During `.speaking`, the 75ms observation loop drives the speech pulse;
-                // avoid fighting it with mic silence.
+                // During `.speaking`, the player output tap drives the real-time orb level.
                 let prev = levelBox.get()
                 levelBox.set(prev * 0.55 + level * 0.45)
             }
         }
 
+        // Attach a player node on the same AVAudioEngine so TTS output shares the VPIO AEC reference clock.
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        let mixerFormat = engine.mainMixerNode.outputFormat(forBus: 0)
+        let playbackFormat: AVAudioFormat
+        if mixerFormat.channelCount > 0 && mixerFormat.sampleRate > 0 {
+            playbackFormat = mixerFormat
+        } else if let fallback = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1) {
+            playbackFormat = fallback
+        } else {
+            input.removeTap(onBus: 0)
+            return nil
+        }
+        engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
+        player.installTap(onBus: 0, bufferSize: 1024, format: playbackFormat) { buffer, _ in
+            guard bridge.isCurrentlySpeaking() else { return }
+            let outLevel = Self.computeNormalizedRMS(from: buffer)
+            let prev = levelBox.get()
+            levelBox.set(prev * 0.45 + outLevel * 0.55)
+        }
+
         engine.prepare()
         do {
             try engine.start()
+            player.play()
+            playbackController.attach(player: player, format: playbackFormat)
             #if os(iOS)
             // Re-assert speaker output after VPIO engine start, which can otherwise reset the route.
             if !Self.isUsingHeadphones() {
@@ -261,15 +288,21 @@ public final class VoiceChatSession {
                 try? session.overrideOutputAudioPort(.none)
             }
             #endif
+            self.playerNode = player
             self.audioEngine = engine
             return engine
         } catch {
+            playbackController.detach()
+            player.removeTap(onBus: 0)
             input.removeTap(onBus: 0)
             return nil
         }
     }
 
     private func teardownAudioEngine() {
+        playbackController.detach()
+        playerNode?.removeTap(onBus: 0)
+        playerNode = nil
         if let engine = audioEngine {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
@@ -293,6 +326,7 @@ public final class VoiceChatSession {
         teardownRecognition()
         teardownAudioEngine()
         tapBridge.setSpeaking(false)
+        speech.externalOutputSink = nil
         speech.isVoiceCallActive = false
         speech.onPlaybackFinished = nil
         restoreAudioSessionAfterCall()
@@ -579,11 +613,6 @@ public final class VoiceChatSession {
                     break
                 }
 
-                if self.state == .speaking {
-                    let pulse = Float.random(in: 0.25...0.72)
-                    self.audioLevelBox.set(self.audioLevelBox.get() * 0.55 + pulse * 0.45)
-                }
-
                 try? await Task.sleep(for: .milliseconds(75))
             }
         }
@@ -721,5 +750,213 @@ private final class AudioLevelBox: @unchecked Sendable {
         lock.lock()
         value = newValue
         lock.unlock()
+    }
+}
+
+/// Schedules TTS PCM buffers and decoded audio files onto the shared `AVAudioEngine`'s
+/// `AVAudioPlayerNode` so iOS VPIO hardware AEC receives the exact speaker reference signal.
+private final class EnginePlaybackController: VoiceAudioOutputSink, @unchecked Sendable {
+    private let lock = NSLock()
+    private let levelBox: AudioLevelBox
+    private var player: AVAudioPlayerNode?
+    private var targetFormat: AVAudioFormat?
+    private var converter: AVAudioConverter?
+    private var cachedSourceFormat: AVAudioFormat?
+    private var pendingBuffers = 0
+    private var playbackGeneration: UInt64 = 0
+    private var drainContinuation: CheckedContinuation<Void, Error>?
+
+    init(levelBox: AudioLevelBox) {
+        self.levelBox = levelBox
+    }
+
+    func attach(player: AVAudioPlayerNode, format: AVAudioFormat) {
+        lock.lock()
+        self.player = player
+        self.targetFormat = format
+        self.converter = nil
+        self.cachedSourceFormat = nil
+        self.pendingBuffers = 0
+        self.playbackGeneration &+= 1
+        let cont = drainContinuation
+        self.drainContinuation = nil
+        lock.unlock()
+        cont?.resume(throwing: CancellationError())
+    }
+
+    func detach() {
+        lock.lock()
+        playbackGeneration &+= 1
+        pendingBuffers = 0
+        let oldPlayer = player
+        player = nil
+        targetFormat = nil
+        converter = nil
+        cachedSourceFormat = nil
+        let cont = drainContinuation
+        drainContinuation = nil
+        lock.unlock()
+
+        oldPlayer?.stop()
+        levelBox.set(0)
+        cont?.resume(throwing: CancellationError())
+    }
+
+    func enqueuePCMBuffer(_ buffer: AVAudioPCMBuffer) {
+        schedulePCMBuffer(buffer, expectedGeneration: nil)
+    }
+
+    private func schedulePCMBuffer(_ buffer: AVAudioPCMBuffer, expectedGeneration: UInt64?) {
+        guard buffer.frameLength > 0 else { return }
+
+        lock.lock()
+        guard let player,
+              let targetFormat,
+              player.engine?.isRunning == true,
+              expectedGeneration == nil || expectedGeneration == playbackGeneration
+        else {
+            lock.unlock()
+            return
+        }
+
+        let bufferToSchedule: AVAudioPCMBuffer
+        if buffer.format == targetFormat {
+            bufferToSchedule = buffer
+        } else {
+            if cachedSourceFormat != buffer.format || converter == nil {
+                converter = AVAudioConverter(from: buffer.format, to: targetFormat)
+                cachedSourceFormat = buffer.format
+            }
+            guard let activeConverter = converter else {
+                lock.unlock()
+                return
+            }
+            let ratio = targetFormat.sampleRate / max(buffer.format.sampleRate, 1)
+            let outCapacity = max(AVAudioFrameCount(ceil(Double(buffer.frameLength) * ratio)) + 32, 64)
+            guard let converted = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outCapacity) else {
+                lock.unlock()
+                return
+            }
+
+            var provided = false
+            var convError: NSError?
+            let status = activeConverter.convert(to: converted, error: &convError) { _, outStatus in
+                if provided {
+                    // Use `.noDataNow` rather than `.endOfStream` so resampler filter continuity
+                    // is preserved across consecutive streaming TTS chunks without clicks.
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+                provided = true
+                outStatus.pointee = .haveData
+                return buffer
+            }
+            guard convError == nil,
+                  status != .error,
+                  converted.frameLength > 0
+            else {
+                lock.unlock()
+                return
+            }
+            bufferToSchedule = converted
+        }
+
+        if !player.isPlaying {
+            player.play()
+        }
+        pendingBuffers += 1
+        let gen = playbackGeneration
+        player.scheduleBuffer(bufferToSchedule, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            self?.handleBufferCompleted(generation: gen)
+        }
+        lock.unlock()
+    }
+
+    func drainEnqueuedPlayback() async throws {
+        try Task.checkCancellation()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            lock.lock()
+            if pendingBuffers == 0 || player == nil || player?.engine?.isRunning != true {
+                lock.unlock()
+                continuation.resume(returning: ())
+                return
+            }
+            let previous = drainContinuation
+            drainContinuation = continuation
+            lock.unlock()
+            previous?.resume(throwing: CancellationError())
+        }
+    }
+
+    func playEncodedAudio(_ data: Data) async throws {
+        try Task.checkCancellation()
+        let expectedGen = currentGeneration()
+
+        try await Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self, self.currentGeneration() == expectedGen else { throw CancellationError() }
+            let tempURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("voice-tts-\(UUID().uuidString).mp3")
+            try data.write(to: tempURL, options: .atomic)
+            defer { try? FileManager.default.removeItem(at: tempURL) }
+
+            let audioFile = try AVAudioFile(forReading: tempURL)
+            let format = audioFile.processingFormat
+            let chunkFrames: AVAudioFrameCount = 8192
+
+            while audioFile.framePosition < audioFile.length {
+                guard self.currentGeneration() == expectedGen else { throw CancellationError() }
+                guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunkFrames) else { break }
+                try audioFile.read(into: buffer, frameCount: chunkFrames)
+                guard buffer.frameLength > 0 else { break }
+                self.schedulePCMBuffer(buffer, expectedGeneration: expectedGen)
+            }
+        }.value
+
+        try await drainEnqueuedPlayback()
+    }
+
+    private func currentGeneration() -> UInt64 {
+        lock.lock()
+        let gen = playbackGeneration
+        lock.unlock()
+        return gen
+    }
+
+    func stopPlayback() {
+        lock.lock()
+        playbackGeneration &+= 1
+        pendingBuffers = 0
+        converter?.reset()
+        let activePlayer = player
+        let cont = drainContinuation
+        drainContinuation = nil
+        lock.unlock()
+
+        if let activePlayer, activePlayer.engine?.isRunning == true {
+            activePlayer.stop()
+            activePlayer.play()
+        }
+        levelBox.set(0)
+        cont?.resume(throwing: CancellationError())
+    }
+
+    private func handleBufferCompleted(generation: UInt64) {
+        lock.lock()
+        guard playbackGeneration == generation else {
+            lock.unlock()
+            return
+        }
+        pendingBuffers = max(0, pendingBuffers - 1)
+        let shouldResume = pendingBuffers == 0
+        let cont = shouldResume ? drainContinuation : nil
+        if shouldResume {
+            drainContinuation = nil
+        }
+        lock.unlock()
+
+        if shouldResume {
+            levelBox.set(0)
+            cont?.resume(returning: ())
+        }
     }
 }

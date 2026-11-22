@@ -1,6 +1,17 @@
 // SPDX-License-Identifier: MIT
 
+import AVFoundation
 import Foundation
+
+/// External PCM/audio playback sink owned by `VoiceChatSession`'s `AVAudioEngine`.
+/// Routing TTS output through the same `AVAudioEngine` provides hardware VPIO AEC
+/// with an exact speaker reference signal for full-duplex barge-in.
+public protocol VoiceAudioOutputSink: AnyObject, Sendable {
+    func enqueuePCMBuffer(_ buffer: AVAudioPCMBuffer)
+    func drainEnqueuedPlayback() async throws
+    func playEncodedAudio(_ data: Data) async throws
+    func stopPlayback()
+}
 
 /// Metadata describing an available voice for a TTS engine.
 public struct TTSVoiceInfo: Identifiable, Hashable, Sendable {
@@ -47,6 +58,8 @@ public protocol TTSEngine: AnyObject {
     var onExternalInterruption: (@MainActor @Sendable () -> Void)? { get set }
     /// When true, the caller (e.g. full-duplex `VoiceChatSession`) owns the `AVAudioSession`.
     var preservesExternalAudioSession: Bool { get set }
+    /// Optional external audio engine sink for hardware-AEC-aligned playback during voice calls.
+    var externalOutputSink: (any VoiceAudioOutputSink)? { get set }
 
     /// Lists voices supported by this engine.
     func availableVoices() -> [TTSVoiceInfo]
@@ -66,6 +79,10 @@ public extension TTSEngine {
     var isReady: Bool { true }
     var preservesExternalAudioSession: Bool {
         get { false }
+        set {}
+    }
+    var externalOutputSink: (any VoiceAudioOutputSink)? {
+        get { nil }
         set {}
     }
     func endPlaybackSession() {}
