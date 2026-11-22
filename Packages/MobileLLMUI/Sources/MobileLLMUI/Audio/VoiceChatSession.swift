@@ -46,7 +46,6 @@ public final class VoiceChatSession {
     @ObservationIgnored private let playbackController: EnginePlaybackController
 
     @ObservationIgnored private var audioEngine: AVAudioEngine?
-    @ObservationIgnored private var playerNode: AVAudioPlayerNode?
     @ObservationIgnored private var recognizer: SFSpeechRecognizer?
     @ObservationIgnored private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     @ObservationIgnored private var recognitionTask: SFSpeechRecognitionTask?
@@ -59,6 +58,7 @@ public final class VoiceChatSession {
     @ObservationIgnored private var recognitionGeneration: UInt64 = 0
     @ObservationIgnored private var consecutiveRenewalFailures: Int = 0
     @ObservationIgnored private var isRestartingEngine = false
+    @ObservationIgnored private var lastEngineStartTime: Date = .distantPast
     @ObservationIgnored nonisolated(unsafe) private var audioObservers: [NSObjectProtocol] = []
 
     /// Silence duration after user stops speaking before auto-submitting the transcript.
@@ -201,17 +201,14 @@ public final class VoiceChatSession {
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
         do {
-            // Use `.videoChat` instead of `.voiceChat` so iOS enables hardware AEC while keeping
-            // full speaker loudness and preventing earpiece-only routing.
+            // `.videoChat` + `.defaultToSpeaker` natively routes to the loudspeaker with full
+            // volume and hardware AEC without triggering port-override configuration loops.
             try session.setCategory(
                 .playAndRecord,
                 mode: .videoChat,
                 options: [.defaultToSpeaker, .allowBluetooth]
             )
             try session.setActive(true, options: .notifyOthersOnDeactivation)
-            if !Self.isUsingHeadphones() {
-                try? session.overrideOutputAudioPort(.speaker)
-            }
         } catch {
             return nil
         }
@@ -219,8 +216,11 @@ public final class VoiceChatSession {
 
         let engine = AVAudioEngine()
         let input = engine.inputNode
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+
         #if os(iOS)
-        // Enable hardware voice processing (AEC + noise suppression) on iOS;
+        // Enable hardware voice processing (AEC + noise suppression) while the engine is stopped;
         // set minimum ducking so playback stays at full volume.
         try? input.setVoiceProcessingEnabled(true)
         input.voiceProcessingOtherAudioDuckingConfiguration = .init(
@@ -229,15 +229,27 @@ public final class VoiceChatSession {
         )
         #endif
 
-        let format = input.outputFormat(forBus: 0)
-        guard format.channelCount > 0, format.sampleRate > 0 else {
+        let mixerFormat = engine.mainMixerNode.outputFormat(forBus: 0)
+        let playbackFormat: AVAudioFormat
+        if mixerFormat.channelCount > 0 && mixerFormat.sampleRate > 0 {
+            playbackFormat = mixerFormat
+        } else if let fallback = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1) {
+            playbackFormat = fallback
+        } else {
+            return nil
+        }
+        engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
+
+        let inputFormat = input.outputFormat(forBus: 0)
+        guard inputFormat.channelCount > 0, inputFormat.sampleRate > 0 else {
             return nil
         }
 
         let token = sessionToken
         let bridge = tapBridge
         let levelBox = audioLevelBox
-        input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+        // Pass `format: nil` so CoreAudio binds cleanly to the VPIO node's live output format.
+        input.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
             bridge.appendIfActive(buffer)
             let level = Self.computeNormalizedRMS(from: buffer)
             let bufferDuration = Double(buffer.frameLength) / max(buffer.format.sampleRate, 1)
@@ -248,31 +260,9 @@ public final class VoiceChatSession {
                     self.interruptAndListen()
                 }
             } else if !bridge.isCurrentlySpeaking() {
-                // During `.speaking`, the player output tap drives the real-time orb level.
                 let prev = levelBox.get()
                 levelBox.set(prev * 0.55 + level * 0.45)
             }
-        }
-
-        // Attach a player node on the same AVAudioEngine so TTS output shares the VPIO AEC reference clock.
-        let player = AVAudioPlayerNode()
-        engine.attach(player)
-        let mixerFormat = engine.mainMixerNode.outputFormat(forBus: 0)
-        let playbackFormat: AVAudioFormat
-        if mixerFormat.channelCount > 0 && mixerFormat.sampleRate > 0 {
-            playbackFormat = mixerFormat
-        } else if let fallback = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1) {
-            playbackFormat = fallback
-        } else {
-            input.removeTap(onBus: 0)
-            return nil
-        }
-        engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
-        player.installTap(onBus: 0, bufferSize: 1024, format: playbackFormat) { buffer, _ in
-            guard bridge.isCurrentlySpeaking() else { return }
-            let outLevel = Self.computeNormalizedRMS(from: buffer)
-            let prev = levelBox.get()
-            levelBox.set(prev * 0.45 + outLevel * 0.55)
         }
 
         engine.prepare()
@@ -280,20 +270,11 @@ public final class VoiceChatSession {
             try engine.start()
             player.play()
             playbackController.attach(player: player, format: playbackFormat)
-            #if os(iOS)
-            // Re-assert speaker output after VPIO engine start, which can otherwise reset the route.
-            if !Self.isUsingHeadphones() {
-                try? session.overrideOutputAudioPort(.speaker)
-            } else {
-                try? session.overrideOutputAudioPort(.none)
-            }
-            #endif
-            self.playerNode = player
+            lastEngineStartTime = Date()
             self.audioEngine = engine
             return engine
         } catch {
             playbackController.detach()
-            player.removeTap(onBus: 0)
             input.removeTap(onBus: 0)
             return nil
         }
@@ -301,8 +282,6 @@ public final class VoiceChatSession {
 
     private func teardownAudioEngine() {
         playbackController.detach()
-        playerNode?.removeTap(onBus: 0)
-        playerNode = nil
         if let engine = audioEngine {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
@@ -313,7 +292,6 @@ public final class VoiceChatSession {
     private func restoreAudioSessionAfterCall() {
         #if os(iOS)
         let session = AVAudioSession.sharedInstance()
-        try? session.overrideOutputAudioPort(.none)
         try? session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers])
         try? session.setActive(false, options: .notifyOthersOnDeactivation)
         #endif
@@ -385,9 +363,12 @@ public final class VoiceChatSession {
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
             queue: nil
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.restartEngineAfterRouteChange()
+        ) { [weak self, weak engine] _ in
+            Task { @MainActor [weak self, weak engine] in
+                guard let self, let engine, self.audioEngine === engine, !engine.isRunning else {
+                    return
+                }
+                self.restartEngineAfterRouteChange()
             }
         }
         audioObservers.append(configChange)
@@ -402,6 +383,7 @@ public final class VoiceChatSession {
 
     private func restartEngineAfterRouteChange() {
         guard isActive, !isRestartingEngine else { return }
+        guard Date().timeIntervalSince(lastEngineStartTime) >= 0.5 else { return }
         isRestartingEngine = true
         defer { isRestartingEngine = false }
 
@@ -613,19 +595,21 @@ public final class VoiceChatSession {
                     break
                 }
 
+                if self.state == .speaking {
+                    if self.playbackController.isPlayingAudio {
+                        let pulse = Float.random(in: 0.25...0.70)
+                        self.audioLevelBox.set(self.audioLevelBox.get() * 0.55 + pulse * 0.45)
+                    } else {
+                        self.audioLevelBox.set(self.audioLevelBox.get() * 0.6)
+                    }
+                }
+
                 try? await Task.sleep(for: .milliseconds(75))
             }
         }
     }
 
     private func enterSpeakingState() {
-        #if os(iOS)
-        let session = AVAudioSession.sharedInstance()
-        let alreadyOnSpeaker = session.currentRoute.outputs.contains { $0.portType == .builtInSpeaker }
-        if !Self.isUsingHeadphones() && !alreadyOnSpeaker {
-            try? session.overrideOutputAudioPort(.speaker)
-        }
-        #endif
         state = .speaking
         tapBridge.setSpeaking(true)
     }
@@ -768,6 +752,13 @@ private final class EnginePlaybackController: VoiceAudioOutputSink, @unchecked S
 
     init(levelBox: AudioLevelBox) {
         self.levelBox = levelBox
+    }
+
+    var isPlayingAudio: Bool {
+        lock.lock()
+        let active = pendingBuffers > 0
+        lock.unlock()
+        return active
     }
 
     func attach(player: AVAudioPlayerNode, format: AVAudioFormat) {
