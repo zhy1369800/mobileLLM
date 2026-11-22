@@ -74,12 +74,20 @@ public final class VoiceChatSession {
         let modelName: String
     }
 
+    @ObservationIgnored public var isScreenVisible = false {
+        didSet {
+            guard isScreenVisible != oldValue else { return }
+            onScreenVisibilityChanged?(isScreenVisible)
+        }
+    }
     /// Optional Live Activity bridge for iOS Dynamic Island & Lock Screen presentation.
     public var liveActivity: (any VoiceLiveActivityProviding)?
     /// Invoked once the voice session has started and is actively listening (e.g. to dismiss chat banners/PiP).
     public var onSessionActivated: (@MainActor () -> Void)?
     /// Invoked after the voice session stops cleanly (e.g. to suspend idle local weights if still backgrounded).
     public var onSessionStopped: (@MainActor () -> Void)?
+    /// Invoked when the voice chat screen appears or disappears so the host app can suppress/restore PiP.
+    public var onScreenVisibilityChanged: (@MainActor (Bool) -> Void)?
 
     /// Silence duration after user stops speaking before auto-submitting the transcript.
     private let silenceSubmitDelay: Duration = .milliseconds(1350)

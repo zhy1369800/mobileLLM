@@ -871,7 +871,20 @@ struct MobileLLMApp: App {
         container.voiceChat.onSessionStopped = { [weak container] in
             previousOnSessionStopped?()
             guard let container, !container.lifecycle.isInBackground else { return }
-            if container.settings.pipWindowEnabled {
+            if container.settings.pipWindowEnabled && !container.voiceChat.isScreenVisible {
+                PiPCoordinator.shared.setEnabled(true)
+            }
+        }
+
+        container.voiceChat.onScreenVisibilityChanged = { [weak container] isVisible in
+            guard let container else { return }
+            if isVisible {
+                if container.settings.pipWindowEnabled || PiPCoordinator.shared.isPiPActive {
+                    PiPCoordinator.shared.setEnabled(false)
+                }
+            } else if !container.lifecycle.isInBackground,
+                      !container.voiceChat.isActive,
+                      container.settings.pipWindowEnabled {
                 PiPCoordinator.shared.setEnabled(true)
             }
         }
@@ -992,8 +1005,8 @@ struct MobileLLMApp: App {
                     // double call harmless.
                     if phase == .background {
                         container.lifecycle.enterBackground()
-                        if container.voiceChat.isActive {
-                            // 语音通话切后台走灵动岛承载状态，绝不发通知横幅或启用 PiP
+                        if container.voiceChat.isActive || container.voiceChat.isScreenVisible {
+                            // 语音通话切后台走灵动岛承载状态，停留在语音页未开对话时保持静默；均不发 Chat 通知横幅或启用 PiP
                             QuickNotificationCoordinator.dismissNotification()
                         } else {
                             if container.settings.quickNotificationEnabled {
@@ -1014,7 +1027,7 @@ struct MobileLLMApp: App {
                         if container.settings.quickNotificationEnabled {
                             QuickNotificationCoordinator.dismissNotification()
                         }
-                        if !container.voiceChat.isActive {
+                        if !container.voiceChat.isActive && !container.voiceChat.isScreenVisible {
                             if container.settings.pipWindowEnabled {
                                 PiPCoordinator.shared.setEnabled(true)
                             } else {

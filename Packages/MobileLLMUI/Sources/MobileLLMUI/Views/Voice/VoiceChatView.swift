@@ -98,8 +98,14 @@ public struct VoiceChatView: View {
             }
             ToolbarItem(placement: .primaryAction) { optionsMenu }
         }
-        .onAppear { isVisible = true }
-        .onDisappear { isVisible = false }
+        .onAppear {
+            isVisible = true
+            session.isScreenVisible = true
+        }
+        .onDisappear {
+            isVisible = false
+            session.isScreenVisible = false
+        }
         .sheet(isPresented: $showModelSwitcher) {
             ModelSwitcherSheet(container: container, onOpenModels: onOpenModels)
         }
