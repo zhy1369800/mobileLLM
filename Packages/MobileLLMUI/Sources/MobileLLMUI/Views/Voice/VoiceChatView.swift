@@ -272,15 +272,7 @@ public struct VoiceChatView: View {
             }
 
             if !subtitleText.isEmpty {
-                ScrollView {
-                    Text(subtitleText)
-                        .font(.body)
-                        .foregroundStyle(Theme.textPrimary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: .infinity)
-                }
-                .frame(maxHeight: 110)
-                .scrollIndicators(.hidden)
+                streamingSubtitleCard
             }
 
             Text(statusHintText)
@@ -311,6 +303,59 @@ public struct VoiceChatView: View {
         .padding(.vertical, 5)
         .background(Theme.surface, in: Capsule())
         .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 1))
+    }
+
+    private var streamingSubtitleCard: some View {
+        let lines = subtitleText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let parseMarkdown = (session.state != .listening)
+
+        return ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                        VoiceSubtitleLineRow(
+                            text: line.isEmpty ? " " : line,
+                            parseMarkdown: parseMarkdown
+                        )
+                        .equatable()
+                    }
+                    Color.clear
+                        .frame(height: 1)
+                        .id("voice-subtitle-bottom")
+                }
+                .padding(.top, 8)
+            }
+            .frame(maxHeight: 116)
+            .scrollIndicators(.hidden)
+            .mask(
+                VStack(spacing: 0) {
+                    LinearGradient(
+                        colors: [.clear, .black],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: 10)
+                    Rectangle().fill(.black)
+                }
+            )
+            .onAppear {
+                proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
+            }
+            .onChange(of: subtitleText) { _, _ in
+                withAnimation(.easeOut(duration: 0.10)) {
+                    proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
+                }
+            }
+        }
+        .padding(.leading, Theme.Space.md)
+        .overlay(alignment: .leading) {
+            Capsule().fill(Theme.accentSoft).frame(width: 2)
+        }
+        .padding(Theme.Space.md)
+        .background(
+            Theme.surface2.opacity(0.5),
+            in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous)
+        )
     }
 
     private var subtitleText: String {
@@ -397,6 +442,34 @@ public struct VoiceChatView: View {
             }
         case .listening:
             break
+        }
+    }
+}
+
+private struct VoiceSubtitleLineRow: View, Equatable {
+    let text: String
+    let parseMarkdown: Bool
+
+    var body: some View {
+        renderedText
+            .font(.callout)
+            .foregroundStyle(Theme.textSecondary)
+            .multilineTextAlignment(.leading)
+            .lineSpacing(3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var renderedText: some View {
+        if !parseMarkdown {
+            Text(text)
+        } else if let attributed = try? AttributedString(
+            markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        ) {
+            Text(attributed)
+        } else {
+            Text(text)
         }
     }
 }
