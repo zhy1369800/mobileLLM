@@ -62,7 +62,24 @@ public final class VoiceChatSession {
     @ObservationIgnored private var consecutiveRenewalFailures: Int = 0
     @ObservationIgnored private var consecutiveConfigRecoveries: Int = 0
     @ObservationIgnored private var isRestartingEngine = false
+    @ObservationIgnored private var lastPublishedLiveActivity: VoiceLiveActivitySnapshot?
+    @ObservationIgnored private var lastRawLiveActivityKey: RawLiveActivityKey?
     @ObservationIgnored nonisolated(unsafe) private var audioObservers: [NSObjectProtocol] = []
+
+    private struct RawLiveActivityKey: Equatable {
+        let state: VoiceChatState
+        let rawSubtitle: String
+        let toolName: String?
+        let toolRunning: Bool
+        let modelName: String
+    }
+
+    /// Optional Live Activity bridge for iOS Dynamic Island & Lock Screen presentation.
+    public var liveActivity: (any VoiceLiveActivityProviding)?
+    /// Invoked once the voice session has started and is actively listening (e.g. to dismiss chat banners/PiP).
+    public var onSessionActivated: (@MainActor () -> Void)?
+    /// Invoked after the voice session stops cleanly (e.g. to suspend idle local weights if still backgrounded).
+    public var onSessionStopped: (@MainActor () -> Void)?
 
     /// Silence duration after user stops speaking before auto-submitting the transcript.
     private let silenceSubmitDelay: Duration = .milliseconds(1350)
@@ -131,7 +148,11 @@ public final class VoiceChatSession {
         activeToolRuns = []
         consecutiveRenewalFailures = 0
         consecutiveConfigRecoveries = 0
+        lastPublishedLiveActivity = nil
+        lastRawLiveActivityKey = nil
         tapBridge.setSpeaking(false)
+        liveActivity?.end()
+        onSessionStopped?()
     }
 
     /// Interrupts current thinking or speaking and immediately switches back to listening.
@@ -177,6 +198,10 @@ public final class VoiceChatSession {
             _ = chat.newConversation()
         }
 
+        // Notify the host app BEFORE configuring AVAudioSession so PiPCoordinator releases its
+        // audio session claim first instead of deactivating the newly started voice session.
+        onSessionActivated?()
+
         guard let engine = setupAudioSessionAndEngine() else {
             cleanupOnFailure(to: .unavailable)
             return
@@ -199,7 +224,11 @@ public final class VoiceChatSession {
         activeToolRuns = []
         consecutiveRenewalFailures = 0
         consecutiveConfigRecoveries = 0
+        lastPublishedLiveActivity = nil
+        lastRawLiveActivityKey = nil
         beginListening()
+        guard isActive else { return }
+        publishLiveActivity(isStart: true)
     }
 
     private func setupAudioSessionAndEngine() -> AVAudioEngine? {
@@ -328,7 +357,11 @@ public final class VoiceChatSession {
         restoreAudioSessionAfterCall()
         audioLevelBox.set(0)
         consecutiveConfigRecoveries = 0
+        lastPublishedLiveActivity = nil
+        lastRawLiveActivityKey = nil
         state = failureState
+        liveActivity?.end()
+        onSessionStopped?()
     }
 
     private func cancelPendingTasks() {
@@ -525,6 +558,7 @@ public final class VoiceChatSession {
         self.recognitionRequest = request
         self.tapBridge.setActiveRequest(request)
         self.state = .listening
+        self.publishLiveActivity()
 
         self.recognitionTask = rec.recognitionTask(with: request) { [weak self] result, error in
             let text = result?.bestTranscription.formattedString
@@ -544,6 +578,7 @@ public final class VoiceChatSession {
                         self.consecutiveRenewalFailures = 0
                         self.consecutiveConfigRecoveries = 0
                         self.liveUserTranscript = trimmed
+                        self.publishLiveActivity()
                         self.scheduleSilenceSubmit(token: token, recGen: recGen)
                     }
                 }
@@ -626,6 +661,7 @@ public final class VoiceChatSession {
         liveAssistantText = ""
         activeToolRuns = []
         tapBridge.setSpeaking(false)
+        publishLiveActivity()
 
         let token = sessionToken
         sendTask?.cancel()
@@ -687,6 +723,7 @@ public final class VoiceChatSession {
                     }
                 }
 
+                self.publishLiveActivity()
                 try? await Task.sleep(for: .milliseconds(75))
             }
         }
@@ -695,6 +732,77 @@ public final class VoiceChatSession {
     private func enterSpeakingState() {
         state = .speaking
         tapBridge.setSpeaking(true)
+        publishLiveActivity()
+    }
+
+    private func makeLiveActivitySnapshot() -> VoiceLiveActivitySnapshot? {
+        let phase: VoiceLiveActivityPhase
+        let rawSubtitle: String
+        switch state {
+        case .listening:
+            phase = .listening
+            rawSubtitle = liveUserTranscript
+        case .thinking:
+            phase = .thinking
+            rawSubtitle = liveAssistantText
+        case .speaking:
+            phase = .speaking
+            let spoken = speech.currentSpokenSentence.trimmingCharacters(in: .whitespacesAndNewlines)
+            rawSubtitle = spoken.isEmpty ? liveAssistantText : spoken
+        case .idle, .denied, .unavailable:
+            return nil
+        }
+        let latestTool = activeToolRuns.last
+        return VoiceLiveActivitySnapshot(
+            phase: phase,
+            subtitle: rawSubtitle,
+            toolName: latestTool?.name,
+            toolRunning: latestTool != nil && latestTool?.result == nil,
+            modelName: chat.activeModelLabel
+        )
+    }
+
+    private func publishLiveActivity(isStart: Bool = false) {
+        guard let liveActivity else { return }
+        let rawSubtitle: String
+        switch state {
+        case .listening:
+            rawSubtitle = liveUserTranscript
+        case .thinking:
+            rawSubtitle = liveAssistantText
+        case .speaking:
+            let spoken = speech.currentSpokenSentence
+            rawSubtitle = spoken.isEmpty ? liveAssistantText : spoken
+        case .idle, .denied, .unavailable:
+            return
+        }
+
+        let latestTool = activeToolRuns.last
+        let toolName = latestTool?.name
+        let toolRunning = latestTool != nil && latestTool?.result == nil
+        let modelName = chat.activeModelLabel
+        let rawKey = RawLiveActivityKey(
+            state: state,
+            rawSubtitle: rawSubtitle,
+            toolName: toolName,
+            toolRunning: toolRunning,
+            modelName: modelName
+        )
+        if !isStart, rawKey == lastRawLiveActivityKey {
+            return
+        }
+        lastRawLiveActivityKey = rawKey
+
+        guard let snapshot = makeLiveActivitySnapshot() else { return }
+        if !isStart, snapshot == lastPublishedLiveActivity {
+            return
+        }
+        lastPublishedLiveActivity = snapshot
+        if isStart {
+            liveActivity.start(with: snapshot)
+        } else {
+            liveActivity.update(with: snapshot)
+        }
     }
 
     // MARK: - Helpers

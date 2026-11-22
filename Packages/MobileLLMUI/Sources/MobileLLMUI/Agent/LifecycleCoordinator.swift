@@ -117,6 +117,22 @@ public final class LifecycleCoordinator {
         issueQuiesce()
     }
 
+    /// Runs the standard background drain (`stopAdmittingActions` -> `beginDrain` -> `quiesce` -> `suspendModel`)
+    /// when a keep-alive background session (e.g. voice call) ends while the app is still in the background.
+    public func completeDeferredBackgroundDrainIfNeeded() {
+        guard isInBackground, drainState == .idle, shouldKeepAliveInBackground?() != true else { return }
+        stopAdmittingActions?()
+        drainState = .draining
+        if let drainProvider {
+            drainToken = drainProvider.beginDrain(
+                named: "mobileLLM.foregroundLost.quiesce"
+            ) { [weak self] in
+                self?.expirationFired()
+            }
+        }
+        issueQuiesce()
+    }
+
     public func enterForeground() {
         guard isInBackground else { return }
         isInBackground = false

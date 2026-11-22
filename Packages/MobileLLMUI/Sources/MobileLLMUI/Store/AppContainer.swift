@@ -182,10 +182,11 @@ public final class AppContainer {
                 voiceSession?.stop()
             }
         }
-        self.lifecycle.shouldKeepAliveInBackground = { [weak self, weak voiceSession] in
-            guard let self, voiceSession?.isActive == true else { return false }
-            // Only online API models can safely run multi-turn inference in background without iOS Metal GPU kills.
-            return self.chat.isOnlineActive
+        self.lifecycle.shouldKeepAliveInBackground = { [weak voiceSession] in
+            voiceSession?.isActive == true
+        }
+        voiceSession.onSessionStopped = { [weak self] in
+            self?.lifecycle.completeDeferredBackgroundDrainIfNeeded()
         }
         self.lifecycle.onEnterBackground = { [weak speechCoordinator, weak voiceSession] in
             if voiceSession?.isActive == true {
@@ -234,6 +235,9 @@ public final class AppContainer {
             do { try await self?.quiesceWorkflows?() }
             catch { self?.chat.showToast(Toast(error.localizedDescription, kind: .error)) }
             await self?.chat.agentRuns?.quiesceForBackground()
+            for _ in 0..<40 where self?.chat.streaming?.phase == .stopping {
+                try? await Task.sleep(for: .milliseconds(25))
+            }
         }
         lifecycle.stopAdmittingActions = { [weak self] in
             self?.chat.setAcceptingNewActions(false)
@@ -259,14 +263,23 @@ public final class AppContainer {
             self?.chat.agentRuns?.presentation(for: conversationID)?.progressFraction
         }
         continuedProcessing.isRunEligible = { [weak self] conversationID in
-            guard let run = self?.chat.agentRuns?.presentation(for: conversationID) else { return false }
+            guard let self, !self.voiceChat.isActive else { return false }
+            guard let run = self.chat.agentRuns?.presentation(for: conversationID) else { return false }
             return run.isActive && !run.isWaiting
         }
         continuedProcessing.requiresGPUForRun = { [weak self] conversationID in
             guard let self else { return false }
-            // Online runs have no local weights; only the resident local MLX engine needs GPU.
-            if self.chat.isOnlineActive { return false }
-            return self.chat.activeModel?.variant.engine == .mlx
+            // Online and Shortcuts runs have no local Metal weights.
+            if self.chat.isOnlineActive || self.chat.isShortcutsActive { return false }
+            switch self.chat.activeModel?.variant.engine {
+            case .mlx:
+                return true
+            case .llamaCpp:
+                // Devices > 4 GB RAM offload llama.cpp layers onto Metal GPU (see LlamaEngine.load).
+                return ProcessInfo.processInfo.physicalMemory > 4_294_967_296
+            case .apple, .none:
+                return false
+            }
         }
         continuedProcessing.isEnabled = { [weak self] in
             self?.settings.continuedProcessingEnabled ?? false

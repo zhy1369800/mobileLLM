@@ -395,20 +395,20 @@ final class AppNotificationDelegate: NSObject, @preconcurrency UNUserNotificatio
             return
         }
 
-        guard let prompt = promptToSend else {
+        guard let prompt = promptToSend, !container.voiceChat.isActive else {
             completionHandler()
             return
         }
 
         let taskBox = QuickReplyTaskBox(completion: completionHandler)
 
-        if container.settings.quickNotificationEnabled {
+        if container.settings.quickNotificationEnabled && !container.voiceChat.isActive {
             // 快捷指令模式下先派发 Task 触发通知，再弹出思考中横幅，保持“先Task弹窗再思考中弹窗”的顺畅时序
             if !container.chat.isShortcutsActive {
                 QuickNotificationCoordinator.postThinkingNotification()
             }
         }
-        if container.settings.pipWindowEnabled {
+        if container.settings.pipWindowEnabled && !container.voiceChat.isActive {
             PiPCoordinator.shared.setEnabled(true)
             PiPCoordinator.shared.update(status: .thinking, text: "正在思考生成中，请稍候...")
             PiPCoordinator.shared.startPiP()
@@ -443,6 +443,9 @@ struct MobileLLMApp: App {
     #if os(iOS)
     @State private var lifecycleMonitor: iOSSceneLifecycleMonitor?
     @State private var notificationDelegate: AppNotificationDelegate?
+    #if canImport(ActivityKit)
+    @State private var voiceLiveActivityBridge: VoiceLiveActivityBridge?
+    #endif
     #endif
     #if DEBUG && os(macOS)
     private let macScreenshotRequest = MacScreenshotRequest.current()
@@ -842,30 +845,68 @@ struct MobileLLMApp: App {
         QuickNotificationCoordinator.registerCategory()
         _notificationDelegate = State(initialValue: notifDelegate)
 
+        #if canImport(ActivityKit)
+        let liveActivityBridge = VoiceLiveActivityBridge()
+        liveActivityBridge.cleanupOrphanedActivities()
+        container.voiceChat.liveActivity = liveActivityBridge
+        _voiceLiveActivityBridge = State(initialValue: liveActivityBridge)
+
+        VoiceLiveActivityCommandCenter.shared.onStopRequested = { [weak container] in
+            container?.voiceChat.stop()
+        }
+        VoiceLiveActivityCommandCenter.shared.onInterruptRequested = { [weak container] in
+            container?.voiceChat.interruptAndListen()
+        }
+        #endif
+
+        container.voiceChat.onSessionActivated = {
+            QuickNotificationCoordinator.dismissNotification()
+            if PiPCoordinator.shared.isPiPActive {
+                PiPCoordinator.shared.stopPiP()
+            }
+            PiPCoordinator.shared.setEnabled(false)
+        }
+
+        let previousOnSessionStopped = container.voiceChat.onSessionStopped
+        container.voiceChat.onSessionStopped = { [weak container] in
+            previousOnSessionStopped?()
+            guard let container, !container.lifecycle.isInBackground else { return }
+            if container.settings.pipWindowEnabled {
+                PiPCoordinator.shared.setEnabled(true)
+            }
+        }
+
         container.chat.onGenerationStarted = { [weak container] in
             guard let container else { return }
-            if container.settings.pipWindowEnabled {
+            if container.settings.pipWindowEnabled && !container.voiceChat.isActive {
                 PiPCoordinator.shared.update(status: .thinking, text: "正在思考生成中，请稍候...")
             }
         }
 
         container.chat.onGenerationFinished = { [weak container] fullText in
             guard let container else { return }
-            // 仅在退到后台时，才向系统通知栏刷新回复卡片；前台聊天直接渲染在 UI 上，不发横幅打扰
-            if container.lifecycle.isInBackground, container.settings.quickNotificationEnabled {
+            // 仅在退到后台且非语音通话模式下，才向系统通知栏刷新回复卡片；语音模式交由灵动岛展示
+            if container.lifecycle.isInBackground,
+               container.settings.quickNotificationEnabled,
+               !container.voiceChat.isActive
+            {
                 QuickNotificationCoordinator.postResponseNotification(text: fullText)
             }
-            if container.settings.pipWindowEnabled {
+            if container.settings.pipWindowEnabled && !container.voiceChat.isActive {
                 PiPCoordinator.shared.update(status: .responding, text: fullText)
             }
         }
 
         container.chat.onShortcutsTaskDispatched = { [weak container] in
             guard let container else { return }
-            // 处于后台且启用了快捷通知时，在 Task 弹窗派发入队后稍作延时发出思考中通知，保证置顶展示
-            if container.lifecycle.isInBackground, container.settings.quickNotificationEnabled {
+            // 处于后台、启用了快捷通知且非语音通话模式时，在 Task 弹窗派发入队后稍作延时发出思考中通知
+            if container.lifecycle.isInBackground,
+               container.settings.quickNotificationEnabled,
+               !container.voiceChat.isActive
+            {
                 Task {
                     try? await Task.sleep(nanoseconds: 50_000_000)
+                    guard !container.voiceChat.isActive else { return }
                     QuickNotificationCoordinator.postThinkingNotification()
                 }
             }
@@ -951,12 +992,17 @@ struct MobileLLMApp: App {
                     // double call harmless.
                     if phase == .background {
                         container.lifecycle.enterBackground()
-                        if container.settings.quickNotificationEnabled {
-                            QuickNotificationCoordinator.postStandbyNotification()
-                        }
-                        if container.settings.pipWindowEnabled && !container.voiceChat.isActive {
-                            PiPCoordinator.shared.setEnabled(true)
-                            PiPCoordinator.shared.startPiP()
+                        if container.voiceChat.isActive {
+                            // 语音通话切后台走灵动岛承载状态，绝不发通知横幅或启用 PiP
+                            QuickNotificationCoordinator.dismissNotification()
+                        } else {
+                            if container.settings.quickNotificationEnabled {
+                                QuickNotificationCoordinator.postStandbyNotification()
+                            }
+                            if container.settings.pipWindowEnabled {
+                                PiPCoordinator.shared.setEnabled(true)
+                                PiPCoordinator.shared.startPiP()
+                            }
                         }
                     } else if phase == .active || phase == .inactive {
                         container.lifecycle.enterForeground()

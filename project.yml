@@ -103,6 +103,28 @@ targets:
         product: AgentRuntime
       - package: AgentContracts
         product: AgentContracts
+      - target: mobileLLMVoiceActivity
+        embed: true
+        codeSign: true
+        destinationFilters: [iOS]
+
+  mobileLLMVoiceActivity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: VoiceActivityWidget
+      - path: App/LiveActivity/VoiceChatActivityShared.swift
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: VoiceActivityWidget/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: wang.wangdongdong.mobileLLM.VoiceActivity
+        SWIFT_VERSION: "6.0"
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SKIP_INSTALL: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+        INFOPLIST_KEY_CFBundleDisplayName: mobileLLM Voice
 
   # UI regression tests (iOS simulator): the keyboard/composer geometry that burned four blind fixes —
   # asserted with XCUITest instead of eyeballs. Run:

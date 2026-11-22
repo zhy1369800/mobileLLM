@@ -68,6 +68,12 @@ public struct RootView: View {
             #endif
             .preferredColorScheme(container.settings.appearance.colorScheme)
             .bannerHost(container.chat)
+            .onOpenURL { url in
+                guard url.scheme?.lowercased() == "mobilellm" else { return }
+                if url.host?.lowercased() == "voice" {
+                    container.navigationRequest = .voice
+                }
+            }
             .task { await container.bootstrap() }
             // Neutral launch inbox: discover pending runs without loading a model, selecting a
             // conversation, or resuming anything (spec §9.4 / §20).
@@ -78,7 +84,9 @@ public struct RootView: View {
                 guard let request else { return }
                 #if !os(macOS)
                 if hSize != .regular && request == .voice {
-                    tabSelection.wrappedValue = .voice
+                    if !showVoiceChat {
+                        tabSelection.wrappedValue = .voice
+                    }
                 } else {
                     section = request
                 }
@@ -107,7 +115,9 @@ public struct RootView: View {
             set: { next in
                 if next == .voice {
                     let needsSwitch = section != .chat
-                    container.chat.activeID = nil
+                    if !container.voiceChat.isActive {
+                        container.chat.activeID = nil
+                    }
                     section = .chat
                     if needsSwitch {
                         Task { @MainActor in showVoiceChat = true }
