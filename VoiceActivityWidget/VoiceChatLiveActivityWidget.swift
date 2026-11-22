@@ -31,6 +31,7 @@ struct VoiceChatLiveActivityWidget: Widget {
                             .lineLimit(1)
                             .fixedSize()
                     }
+                    .padding(.leading, 4)
                 }
 
                 DynamicIslandExpandedRegion(.trailing) {
@@ -39,16 +40,18 @@ struct VoiceChatLiveActivityWidget: Widget {
                         .foregroundStyle(.white.opacity(0.65))
                         .lineLimit(1)
                         .truncationMode(.tail)
+                        .padding(.trailing, 4)
                 }
 
                 DynamicIslandExpandedRegion(.bottom) {
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 7) {
                         if let toolName = state.toolName, !toolName.isEmpty {
                             IslandToolBadge(toolName: toolName, isRunning: state.toolRunning)
                         }
 
                         Text(style.displaySubtitle(for: state.subtitle))
-                            .font(.subheadline)
+                            .font(.footnote)
+                            .lineSpacing(2)
                             .foregroundStyle(state.subtitle.isEmpty ? .white.opacity(0.62) : .white.opacity(0.94))
                             .lineLimit(2)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -71,8 +74,8 @@ struct VoiceChatLiveActivityWidget: Widget {
                                     .foregroundStyle(.white)
                                     .lineLimit(1)
                                     .fixedSize()
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 6)
+                                    .padding(.horizontal, 11)
+                                    .padding(.vertical, 5)
                                     .background(VoiceInkTheme.ochre.opacity(0.92), in: Capsule())
                                     .contentShape(Capsule())
                                 }
@@ -88,8 +91,8 @@ struct VoiceChatLiveActivityWidget: Widget {
                                 .foregroundStyle(.white)
                                 .lineLimit(1)
                                 .fixedSize()
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
+                                .padding(.horizontal, 11)
+                                .padding(.vertical, 5)
                                 .background(VoiceInkTheme.cinnabar, in: Capsule())
                                 .contentShape(Capsule())
                             }
@@ -97,6 +100,8 @@ struct VoiceChatLiveActivityWidget: Widget {
                         }
                     }
                     .padding(.top, 2)
+                    .padding(.horizontal, 6)
+                    .padding(.bottom, 6)
                 }
             } compactLeading: {
                 Image(systemName: style.iconName)
@@ -227,7 +232,8 @@ private struct LockScreenVoiceCardView: View {
             }
 
             Text(style.displaySubtitle(for: state.subtitle))
-                .font(.subheadline)
+                .font(.footnote)
+                .lineSpacing(2)
                 .foregroundStyle(state.subtitle.isEmpty ? secondaryInk : primaryInk)
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -321,8 +327,8 @@ private struct PhaseStyle {
         guard subtitle.isEmpty else { return subtitle }
         switch phase {
         case .listening: return "正在聆听，请随时开口…"
-        case .thinking: return "正在思考中，可点击打断…"
-        case .speaking: return "正在语音播报，随时开口可打断…"
+        case .thinking: return "正在整理思路…"
+        case .speaking: return "正在语音播报…"
         }
     }
 

@@ -19,6 +19,25 @@ final class VoiceLiveActivityTests: XCTestCase {
         XCTAssertEqual(trimmed, "…十甲乙丙丁戊己")
     }
 
+    func testSanitizedSubtitleStripsCommonMarkdownMarkers() {
+        let markdownSample = """
+        ### 核心能力
+        > - **多模态交互**：支持 `Swift` 与 __语音__ 和 ~~旧语法~~
+        * 温度约 -5℃，表达式 2 * 3，变量 foo_bar，语言 C#，标签 #话题
+        5. **总结**
+        ```swift
+        """
+        XCTAssertEqual(
+            VoiceLiveActivitySnapshot.sanitizedSubtitle(markdownSample, maxLength: 200),
+            "核心能力 多模态交互：支持 Swift 与 语音 和 旧语法 温度约 -5℃，表达式 2 * 3，变量 foo_bar，语言 C#，标签 #话题 5. 总结"
+        )
+
+        XCTAssertEqual(
+            VoiceLiveActivitySnapshot.sanitizedSubtitle("```swift\n**\n> \n"),
+            ""
+        )
+    }
+
     func testLifecycleCoordinatorSkipsQuiesceAndSuspendWhenKeepAliveEnabled() {
         let coordinator = LifecycleCoordinator()
         var enteredBackgroundHook = false

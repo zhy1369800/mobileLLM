@@ -49,15 +49,56 @@ public struct VoiceLiveActivitySnapshot: Equatable, Sendable {
         let windowText = windowStart.map { String(trimmed[$0...]) } ?? trimmed
 
         let collapsed = windowText
-            .components(separatedBy: .whitespacesAndNewlines)
-            .filter { !$0.isEmpty }
+            .split(whereSeparator: \.isNewline)
+            .compactMap { Self.stripMarkdownMarkers(from: $0) }
             .joined(separator: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+
+        guard !collapsed.isEmpty else { return "" }
 
         if collapsed.count <= maxLength && !wasWindowSliced {
             return collapsed
         }
         guard maxLength > 1 else { return String(collapsed.suffix(maxLength)) }
         return "…" + String(collapsed.suffix(maxLength - 1))
+    }
+
+    private static func stripMarkdownMarkers(from line: Substring) -> String? {
+        var text = line.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty, !text.hasPrefix("```") else { return nil }
+
+        // Strip block quote markers first so combinations like `> - **text**` or `> ### title` clean cleanly.
+        while text == ">" || (text.hasPrefix(">") && text.dropFirst().first?.isWhitespace == true) {
+            text = String(text.dropFirst()).trimmingCharacters(in: .whitespaces)
+        }
+
+        // Strip ATX headings (`# ` ... `###### `) without touching tags like `#话题`.
+        let hashCount = text.prefix(while: { $0 == "#" }).count
+        if (1...6).contains(hashCount) {
+            let remainder = text.dropFirst(hashCount)
+            if remainder.first?.isWhitespace == true {
+                text = String(remainder).trimmingCharacters(in: .whitespaces)
+            }
+        }
+
+        // Strip unordered list bullets (`- `, `* `, `+ `) without disturbing negative numbers like `-5℃`.
+        if let first = text.first, first == "-" || first == "*" || first == "+" {
+            let remainder = text.dropFirst()
+            if remainder.first?.isWhitespace == true {
+                text = String(remainder).trimmingCharacters(in: .whitespaces)
+            }
+        }
+
+        // Remove common multi-character inline markers and backticks while leaving single `*`/`_` intact.
+        for marker in ["**", "__", "~~", "`"] {
+            if text.contains(marker) {
+                text = text.replacingOccurrences(of: marker, with: "")
+            }
+        }
+
+        let cleaned = text.trimmingCharacters(in: .whitespaces)
+        return cleaned.isEmpty ? nil : cleaned
     }
 }
 
