@@ -45,6 +45,8 @@ public protocol TTSEngine: AnyObject {
     var isReady: Bool { get }
     /// Called when an external audio interruption (e.g. phone call, headphones unplugged) halts playback.
     var onExternalInterruption: (@MainActor @Sendable () -> Void)? { get set }
+    /// When true, the caller (e.g. full-duplex `VoiceChatSession`) owns the `AVAudioSession`.
+    var preservesExternalAudioSession: Bool { get set }
 
     /// Lists voices supported by this engine.
     func availableVoices() -> [TTSVoiceInfo]
@@ -62,5 +64,9 @@ public protocol TTSEngine: AnyObject {
 
 public extension TTSEngine {
     var isReady: Bool { true }
+    var preservesExternalAudioSession: Bool {
+        get { false }
+        set {}
+    }
     func endPlaybackSession() {}
 }

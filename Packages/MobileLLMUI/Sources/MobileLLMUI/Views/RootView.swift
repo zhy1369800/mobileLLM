@@ -124,6 +124,10 @@ public struct RootView: View {
             .tag(AppSection.models)
             .tabItem { Label("Models", systemImage: AppSection.models.icon) }
 
+            VoiceChatView(container: container, onOpenModels: { section = .models })
+                .tag(AppSection.voice)
+                .tabItem { Label(AppSection.voice.title, systemImage: AppSection.voice.icon) }
+
             NavigationStack {
                 SettingsView(container: container).navigationTitle("Settings")
             }
@@ -205,6 +209,7 @@ public struct RootView: View {
         // Mac sidebars read as vertical lists, not tab bars. Full-width rows give each destination a
         // generous hit target and use the same cinnabar selection tint as the rest of the app.
         VStack(spacing: 2) {
+            macSidebarButton(.voice)
             macSidebarButton(.models)
             macSidebarButton(.settings)
         }
@@ -213,6 +218,7 @@ public struct RootView: View {
         .background(Theme.bg)
         #else
         HStack(spacing: Theme.Space.sm) {
+            footerButton(.voice)
             footerButton(.models)
             footerButton(.settings)
             Spacer()
@@ -279,6 +285,8 @@ public struct RootView: View {
             NavigationStack {
                 ChatDetailView(container: container, onOpenModels: { section = .models })
             }
+        case .voice:
+            VoiceChatView(container: container, onOpenModels: { section = .models })
         case .models:
             ModelsView(models: container.models, settings: container.settings) { model, variant in
                 container.activate(model, variant: variant)

@@ -398,7 +398,7 @@ struct Composer: View {
 
     /// Dictation language choices: one `SFSpeechRecognizer` = one language, so a code-switching user
     /// picks explicitly. `nil` follows the system locale.
-    private static let dictationLanguages: [(id: String?, label: String)] = [
+    static let dictationLanguages: [(id: String?, label: String)] = [
         (nil, "System language"),
         ("zh-CN", "中文（普通话）"),
         ("en-US", "English"),
@@ -409,6 +409,7 @@ struct Composer: View {
             if dictation.isRecording {
                 dictation.stop()
             } else {
+                chat.onBeforeDictation?()
                 chat.speech?.stop(suppressCurrentTurn: true)
                 dictationBase = chat.draft
                 dictation.localeIdentifier = chat.dictationLocale

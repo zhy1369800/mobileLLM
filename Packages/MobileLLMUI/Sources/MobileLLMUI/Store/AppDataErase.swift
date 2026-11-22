@@ -60,6 +60,7 @@ public extension AppContainer {
         guard !isErasingData else { throw AppDataEraseError(failures: ["Another erase is in progress."]) }
         isErasingData = true
         defer { isErasingData = false }
+        voiceChat.stop()
         chat.setAcceptingNewActions(false)
         await chat.quiesceForConversationErase()
         var conversationsErased = false

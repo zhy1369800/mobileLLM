@@ -52,6 +52,7 @@ public final class CloudTTSEngine: TTSEngine {
     public let displayName = "Cloud TTS"
     public private(set) var isSpeaking: Bool = false
     public var onExternalInterruption: (@MainActor @Sendable () -> Void)?
+    public var preservesExternalAudioSession: Bool = false
 
     public var isReady: Bool {
         guard let config = configurationProvider() else { return false }
@@ -286,6 +287,7 @@ public final class CloudTTSEngine: TTSEngine {
         #if os(iOS)
         ensureAudioInterruptionObservers()
         audioSessionTokenBox.advance()
+        guard !preservesExternalAudioSession else { return }
         let session = AVAudioSession.sharedInstance()
         do {
             if session.category != .playback || session.mode != .spokenAudio {

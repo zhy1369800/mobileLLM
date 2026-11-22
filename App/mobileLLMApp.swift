@@ -954,7 +954,7 @@ struct MobileLLMApp: App {
                         if container.settings.quickNotificationEnabled {
                             QuickNotificationCoordinator.postStandbyNotification()
                         }
-                        if container.settings.pipWindowEnabled {
+                        if container.settings.pipWindowEnabled && !container.voiceChat.isActive {
                             PiPCoordinator.shared.setEnabled(true)
                             PiPCoordinator.shared.startPiP()
                         }
@@ -968,17 +968,20 @@ struct MobileLLMApp: App {
                         if container.settings.quickNotificationEnabled {
                             QuickNotificationCoordinator.dismissNotification()
                         }
-                        if container.settings.pipWindowEnabled {
-                            PiPCoordinator.shared.setEnabled(true)
-                        } else {
-                            PiPCoordinator.shared.stopPiP()
-                            PiPCoordinator.shared.setEnabled(false)
+                        if !container.voiceChat.isActive {
+                            if container.settings.pipWindowEnabled {
+                                PiPCoordinator.shared.setEnabled(true)
+                            } else {
+                                PiPCoordinator.shared.stopPiP()
+                                PiPCoordinator.shared.setEnabled(false)
+                            }
                         }
                     }
                     #else
                     // Free the resident model when the app leaves the foreground: it stops a 5 GB model
                     // hogging memory while unused and stops macOS jetsam-killing the app in the background.
                     if phase == .background {
+                        guard container.lifecycle.shouldKeepAliveInBackground?() != true else { return }
                         container.suspendModel()
                         // Durable agent quiescence (spec §19.1): every active run pauses at its next
                         // safe boundary; recovery is explicit user Resume, never automatic.

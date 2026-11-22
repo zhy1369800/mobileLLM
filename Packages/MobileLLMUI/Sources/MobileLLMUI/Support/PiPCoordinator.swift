@@ -93,6 +93,7 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
 
     public private(set) var isSupported: Bool = false
     public private(set) var isPiPActive: Bool = false
+    private var isAudioSessionClaimed: Bool = false
 
     private var pipController: AVPictureInPictureController?
     private var videoCallVC: AVPictureInPictureVideoCallViewController?
@@ -161,6 +162,7 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
         if enabled {
             try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
             try? AVAudioSession.sharedInstance().setActive(true)
+            isAudioSessionClaimed = true
             pipController?.canStartPictureInPictureAutomaticallyFromInline = true
             videoCallVC?.view.isHidden = false
             hostingVC?.view.alpha = 1
@@ -168,7 +170,10 @@ public final class PiPCoordinator: NSObject, @preconcurrency AVPictureInPictureC
             stopPiP()
             pipController?.canStartPictureInPictureAutomaticallyFromInline = false
             videoCallVC?.view.isHidden = true
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            if isAudioSessionClaimed {
+                isAudioSessionClaimed = false
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            }
         }
     }
 

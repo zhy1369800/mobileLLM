@@ -180,6 +180,8 @@ public final class ChatStore {
     public let skillStore: SkillStore?
     /// Streaming & on-demand TTS coordinator (optional so isolated tests keep constructing ChatStore without audio).
     public let speech: StreamingSpeechCoordinator?
+    /// Invoked right before composer dictation starts so an active voice call can yield the audio session.
+    public var onBeforeDictation: (@MainActor () -> Void)?
     /// Observer notified when generation completes with final response text.
     public var onGenerationFinished: (@MainActor (String) -> Void)?
     /// Observer notified when generation starts.
@@ -1350,6 +1352,35 @@ public final class ChatStore {
         defer { acceptingNewActions = previousAdmission }
         draft = text
         send()
+    }
+
+    /// Sends a voice transcript without touching the composer draft or staged attachments,
+    /// and strictly respects `acceptingNewActions` / erase guards.
+    @discardableResult
+    public func sendVoiceMessage(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard acceptingNewActions,
+              agentRuntimeUnavailableReason == nil,
+              !trimmed.isEmpty,
+              hasModel,
+              streaming == nil,
+              !isCompacting
+        else { return false }
+
+        let savedDraft = draft
+        let savedImages = pendingImages
+        let savedFiles = pendingFiles
+        defer {
+            draft = savedDraft
+            pendingImages = savedImages
+            pendingFiles = savedFiles
+        }
+
+        pendingImages = []
+        pendingFiles = []
+        draft = trimmed
+        send()
+        return streaming != nil
     }
 
     /// Send the composer draft (text and/or staged images): append the user turn + an empty assistant

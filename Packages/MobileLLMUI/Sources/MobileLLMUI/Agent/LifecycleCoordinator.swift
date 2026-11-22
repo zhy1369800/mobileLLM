@@ -71,6 +71,8 @@ public final class LifecycleCoordinator {
     public var suspendModel: (@MainActor () -> Void)?
     /// Fired immediately when the app transitions to background (e.g. to stop active TTS playback).
     public var onEnterBackground: (@MainActor () -> Void)?
+    /// When true (e.g. online-model voice call active), skips background quiesce and model unload.
+    public var shouldKeepAliveInBackground: (@MainActor () -> Bool)?
 
     private let drainProvider: (any BackgroundDrainProviding)?
     private var drainToken: (any BackgroundDrainToken)?
@@ -99,6 +101,9 @@ public final class LifecycleCoordinator {
         isInBackground = true
         lastBackgroundTransitionAt = Date()
         didExpireDuringLastBackground = false
+        if shouldKeepAliveInBackground?() == true {
+            return
+        }
         onEnterBackground?()
         stopAdmittingActions?()
         drainState = .draining

@@ -120,14 +120,15 @@ public enum AppearanceMode: String, CaseIterable, Codable, Sendable {
 /// raise a navigation intent — e.g. an error banner's "Download" jumping to Models — without importing the
 /// shell.
 public enum AppSection: String, CaseIterable, Identifiable, Sendable {
-    case chat, models, settings
+    case chat, voice, models, settings
     public var id: String { rawValue }
     public var title: String {
-        switch self { case .chat: "Chat"; case .models: "Models"; case .settings: "Settings" }
+        switch self { case .chat: "Chat"; case .voice: "Voice"; case .models: "Models"; case .settings: "Settings" }
     }
     public var icon: String {
         switch self {
         case .chat: "bubble.left.and.bubble.right"
+        case .voice: "waveform"
         case .models: "square.stack.3d.up"
         case .settings: "gearshape"
         }

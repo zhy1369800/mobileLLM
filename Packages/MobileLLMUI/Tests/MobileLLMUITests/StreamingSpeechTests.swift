@@ -9,6 +9,7 @@ private final class MockTTSEngine: TTSEngine {
     let displayName = "Mock TTS"
     private(set) var isSpeaking = false
     var isReady = true
+    var preservesExternalAudioSession = false
     var onExternalInterruption: (@MainActor @Sendable () -> Void)?
     private(set) var spokenSegments: [String] = []
     private(set) var lastVoiceID: String?
@@ -325,5 +326,34 @@ final class StreamingSpeechTests: XCTestCase {
             await Task.yield()
         }
         XCTAssertEqual(appleEngine.spokenSegments, ["Unconfigured fallback.", "First failed.", "Second continues."])
+    }
+
+    func testVoiceCallModeOverridesAutoSpeakAndPreservesAudioSession() async {
+        let settings = makeSettings(autoSpeak: false)
+        let engine = MockTTSEngine()
+        let coordinator = StreamingSpeechCoordinator(engine: engine, settings: settings)
+        let msgID = UUID()
+        var finishedCalled = false
+
+        coordinator.isVoiceCallActive = true
+        coordinator.onPlaybackFinished = {
+            finishedCalled = true
+        }
+
+        coordinator.resetForNewTurn(messageID: msgID)
+        coordinator.feed(delta: "Voice call reply.", messageID: msgID)
+        coordinator.finish(fullText: nil, messageID: msgID)
+
+        for _ in 0..<10 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(engine.spokenSegments, ["Voice call reply."])
+        XCTAssertTrue(finishedCalled)
+        XCTAssertEqual(engine.endSessionCount, 0)
+        XCTAssertTrue(engine.preservesExternalAudioSession)
+
+        coordinator.isVoiceCallActive = false
+        XCTAssertFalse(engine.preservesExternalAudioSession)
     }
 }

@@ -17,10 +17,23 @@ public final class StreamingSpeechCoordinator {
     public private(set) var isSpeaking: Bool = false
     public private(set) var speakingMessageID: UUID?
     public private(set) var isSuppressedForCurrentTurn: Bool = false
+    /// When true, streaming responses are always spoken regardless of `settings.autoSpeakResponses`,
+    /// and the active audio session is preserved across turns for full-duplex voice chat.
+    public var isVoiceCallActive: Bool = false {
+        didSet {
+            engine.preservesExternalAudioSession = isVoiceCallActive
+            cloudEngine?.preservesExternalAudioSession = isVoiceCallActive
+        }
+    }
+    /// Invoked when the playback queue finishes draining normally (not cancelled).
+    @ObservationIgnored public var onPlaybackFinished: (@MainActor @Sendable () -> Void)?
+    /// Currently spoken sentence (useful for live captions / subtitles).
+    public private(set) var currentSpokenSentence: String = ""
 
     public let engine: any TTSEngine
     public var cloudEngine: (any TTSEngine)? {
         didSet {
+            cloudEngine?.preservesExternalAudioSession = isVoiceCallActive
             cloudEngine?.onExternalInterruption = { [weak self] in
                 self?.stop(suppressCurrentTurn: true)
             }
@@ -80,9 +93,9 @@ public final class StreamingSpeechCoordinator {
         hasFedStreamingText = false
     }
 
-    /// Feeds an answer delta emitted by the model. Ignored when auto-speak is off or the turn was muted.
+    /// Feeds an answer delta emitted by the model. Ignored when auto-speak is off (unless in voice call) or the turn was muted.
     public func feed(delta: String, messageID: UUID?) {
-        guard settings.autoSpeakResponses, !isSuppressedForCurrentTurn, !delta.isEmpty else { return }
+        guard (settings.autoSpeakResponses || isVoiceCallActive), !isSuppressedForCurrentTurn, !delta.isEmpty else { return }
         if let activeTurnMessageID, let messageID, activeTurnMessageID != messageID {
             return
         }
@@ -95,7 +108,7 @@ public final class StreamingSpeechCoordinator {
 
     /// Flushes any remaining buffered tail when generation completes cleanly.
     public func finish(fullText: String? = nil, messageID: UUID?) {
-        guard settings.autoSpeakResponses, !isSuppressedForCurrentTurn else { return }
+        guard (settings.autoSpeakResponses || isVoiceCallActive), !isSuppressedForCurrentTurn else { return }
         if let activeTurnMessageID, let messageID, activeTurnMessageID != messageID {
             return
         }
@@ -163,11 +176,14 @@ public final class StreamingSpeechCoordinator {
         drainTask?.cancel()
         drainTask = nil
         engine.stop()
-        engine.endPlaybackSession()
         cloudEngine?.stop()
-        cloudEngine?.endPlaybackSession()
+        if !isVoiceCallActive {
+            engine.endPlaybackSession()
+            cloudEngine?.endPlaybackSession()
+        }
         isSpeaking = false
         speakingMessageID = nil
+        currentSpokenSentence = ""
     }
 
     private func enqueue(_ sentences: [String], messageID: UUID?) {
@@ -195,6 +211,7 @@ public final class StreamingSpeechCoordinator {
 
             while self.sessionGeneration == generation, !Task.isCancelled, !self.queue.isEmpty {
                 let nextSentence = self.queue.removeFirst()
+                self.currentSpokenSentence = nextSentence
                 do {
                     try await targetEngine.speak(
                         text: nextSentence,
@@ -239,7 +256,11 @@ public final class StreamingSpeechCoordinator {
             self.drainTask = nil
             self.isSpeaking = false
             self.speakingMessageID = nil
-            targetEngine.endPlaybackSession()
+            self.currentSpokenSentence = ""
+            if !self.isVoiceCallActive {
+                targetEngine.endPlaybackSession()
+            }
+            self.onPlaybackFinished?()
         }
     }
 }

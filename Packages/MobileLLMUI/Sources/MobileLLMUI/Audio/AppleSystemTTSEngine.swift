@@ -13,6 +13,7 @@ public final class AppleSystemTTSEngine: TTSEngine {
 
     public private(set) var isSpeaking: Bool = false
     public var onExternalInterruption: (@MainActor @Sendable () -> Void)?
+    public var preservesExternalAudioSession: Bool = false
 
     private var synthesizer: AVSpeechSynthesizer?
     private let delegateProxy = DelegateProxy()
@@ -224,6 +225,7 @@ public final class AppleSystemTTSEngine: TTSEngine {
         #if os(iOS)
         ensureAudioInterruptionObservers()
         audioSessionTokenBox.advance()
+        guard !preservesExternalAudioSession else { return }
         let session = AVAudioSession.sharedInstance()
         do {
             if session.category != .playback || session.mode != .spokenAudio {

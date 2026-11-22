@@ -20,6 +20,7 @@ public final class AppContainer {
     public let models: ModelManager
     public let speech: StreamingSpeechCoordinator
     public let chat: ChatStore
+    public let voiceChat: VoiceChatSession
     /// The per-conversation skill packs (Skills v1). Persisted beside the conversation records + tool
     /// memory; surfaced to the composer's Skill menu and the management screen.
     public let skills: SkillStore
@@ -165,9 +166,6 @@ public final class AppContainer {
             settings: settings
         )
         self.speech = speechCoordinator
-        self.lifecycle.onEnterBackground = { [weak speechCoordinator] in
-            speechCoordinator?.stop(suppressCurrentTurn: true)
-        }
         self.chat = ChatStore(engine: loggingEngine, store: store, settings: settings,
                               memoryBook: memoryBook, eventStore: eventStore,
                               locationProvider: locationProvider,
@@ -177,6 +175,25 @@ public final class AppContainer {
                               workflowStore: self.workflowStore,
                               openAICredentials: self.openAICredentials,
                               speech: speechCoordinator)
+        let voiceSession = VoiceChatSession(chat: self.chat, speech: speechCoordinator, settings: settings)
+        self.voiceChat = voiceSession
+        self.chat.onBeforeDictation = { [weak voiceSession] in
+            if voiceSession?.isActive == true {
+                voiceSession?.stop()
+            }
+        }
+        self.lifecycle.shouldKeepAliveInBackground = { [weak self, weak voiceSession] in
+            guard let self, voiceSession?.isActive == true else { return false }
+            // Only online API models can safely run multi-turn inference in background without iOS Metal GPU kills.
+            return self.chat.isOnlineActive
+        }
+        self.lifecycle.onEnterBackground = { [weak speechCoordinator, weak voiceSession] in
+            if voiceSession?.isActive == true {
+                voiceSession?.stop()
+                return
+            }
+            speechCoordinator?.stop(suppressCurrentTurn: true)
+        }
         // Cold launch restores identity only, so the first turn is where the weights are actually loaded.
         // A false answer stops the turn instead of generating against an empty engine.
         chat.ensureModelReady = { [weak self] in
