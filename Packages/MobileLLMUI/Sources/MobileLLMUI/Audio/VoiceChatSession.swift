@@ -320,10 +320,11 @@ public final class VoiceChatSession {
             let level = Self.computeNormalizedRMS(from: buffer)
             let bufferDuration = Double(buffer.frameLength) / max(buffer.format.sampleRate, 1)
 
+            let isPlayingAudio = bridge.needsPlaybackStartCheck() ? playback.isPlayingAudio : false
             if bridge.recordAndCheckBargeIn(
                 level: level,
                 duration: bufferDuration,
-                isPlayingAudio: playback.isPlayingAudio
+                isPlayingAudio: isPlayingAudio
             ) {
                 Task { @MainActor [weak self] in
                     guard let self, self.sessionToken == token else { return }
@@ -914,6 +915,13 @@ private final class AudioTapBridge: @unchecked Sendable {
         let v = isSpeaking
         lock.unlock()
         return v
+    }
+
+    func needsPlaybackStartCheck() -> Bool {
+        lock.lock()
+        let needed = isSpeaking && speakingElapsed == 0
+        lock.unlock()
+        return needed
     }
 
     func configureBargeIn(threshold: Float, requiredDuration: Double) {
