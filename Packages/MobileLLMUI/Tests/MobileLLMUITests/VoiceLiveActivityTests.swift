@@ -81,4 +81,38 @@ final class VoiceLiveActivityTests: XCTestCase {
         XCTAssertTrue(enteredBackgroundHook)
         XCTAssertTrue(stoppedAdmissions)
     }
+
+    func testEnterBackgroundReenteringCompleteDeferredDrainDoesNotDoubleLease() {
+        let provider = ReentryDrainProviderFixture()
+        let coordinator = LifecycleCoordinator(drainProvider: provider)
+        var stopCount = 0
+
+        coordinator.shouldKeepAliveInBackground = { false }
+        coordinator.stopAdmittingActions = { stopCount += 1 }
+        coordinator.onEnterBackground = {
+            coordinator.completeDeferredBackgroundDrainIfNeeded()
+        }
+
+        coordinator.updateSceneStates([.background])
+
+        XCTAssertEqual(provider.beginCount, 1)
+        XCTAssertEqual(coordinator.quiesceIssueCount, 1)
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(coordinator.drainState, .draining)
+    }
+}
+
+@MainActor
+private final class ReentryDrainTokenFixture: BackgroundDrainToken {
+    let isExpired = false
+    func end() {}
+}
+
+@MainActor
+private final class ReentryDrainProviderFixture: BackgroundDrainProviding {
+    private(set) var beginCount = 0
+    func beginDrain(named name: String, expiration: @escaping @MainActor @Sendable () -> Void) -> any BackgroundDrainToken {
+        beginCount += 1
+        return ReentryDrainTokenFixture()
+    }
 }

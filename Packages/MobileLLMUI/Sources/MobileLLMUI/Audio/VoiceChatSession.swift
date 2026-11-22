@@ -784,7 +784,17 @@ public final class VoiceChatSession {
     }
 
     private func publishLiveActivity(isStart: Bool = false) {
+        // Local models cannot submit Metal GPU commands in audio-only background mode, so Live Activity
+        // background presentation is restricted to online models.
         guard let liveActivity else { return }
+        guard chat.isOnlineActive else {
+            if lastPublishedLiveActivity != nil || lastRawLiveActivityKey != nil {
+                lastPublishedLiveActivity = nil
+                lastRawLiveActivityKey = nil
+                liveActivity.end()
+            }
+            return
+        }
         let rawSubtitle: String
         switch state {
         case .listening:

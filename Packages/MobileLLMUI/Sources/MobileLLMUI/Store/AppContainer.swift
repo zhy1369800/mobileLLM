@@ -182,8 +182,8 @@ public final class AppContainer {
                 voiceSession?.stop()
             }
         }
-        self.lifecycle.shouldKeepAliveInBackground = { [weak voiceSession] in
-            voiceSession?.isActive == true
+        self.lifecycle.shouldKeepAliveInBackground = { [weak voiceSession, weak self] in
+            voiceSession?.isActive == true && self?.chat.isOnlineActive == true
         }
         voiceSession.onSessionStopped = { [weak self] in
             self?.lifecycle.completeDeferredBackgroundDrainIfNeeded()

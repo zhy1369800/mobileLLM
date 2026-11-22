@@ -378,7 +378,11 @@ public struct VoiceChatView: View {
     private var statusHintText: String {
         switch session.state {
         case .idle:
-            return chat.hasModel ? "点击下方按钮或水墨球体开始语音对话" : "请先选择或加载一个模型"
+            guard chat.hasModel else { return "请先选择或加载一个模型" }
+            if chat.isOnlineActive {
+                return "点击下方按钮或水墨球体开始语音对话"
+            }
+            return "点击下方按钮或水墨球体开始语音对话\n本地模型需保持在前台对话，切后台将自动结束（云端模型支持灵动岛后台通话）"
         case .listening:
             return session.liveUserTranscript.isEmpty ? "我在听…" : "停顿后自动发送"
         case .thinking:

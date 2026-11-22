@@ -104,9 +104,11 @@ public final class LifecycleCoordinator {
         if shouldKeepAliveInBackground?() == true {
             return
         }
+        // Mark draining before `onEnterBackground?()` so a synchronous `stop()` ->
+        // `completeDeferredBackgroundDrainIfNeeded()` callback cannot start a duplicate drain lease.
+        drainState = .draining
         onEnterBackground?()
         stopAdmittingActions?()
-        drainState = .draining
         if let drainProvider {
             drainToken = drainProvider.beginDrain(
                 named: "mobileLLM.foregroundLost.quiesce"
