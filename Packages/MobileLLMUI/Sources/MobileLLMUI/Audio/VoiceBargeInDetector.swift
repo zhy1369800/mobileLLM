@@ -39,25 +39,25 @@ internal struct VoiceBargeInConfig: Equatable, Sendable {
     static let speakerWithHardwareAEC = VoiceBargeInConfig(
         enabled: true,
         isUsingHeadphones: false,
-        initialAECConvergenceDuration: 1.60,
-        steadyPlaybackGrace: 0.35,
+        initialAECConvergenceDuration: 1.15,
+        steadyPlaybackGrace: 0.20,
         farEndActiveFloor: 0.08,
-        farEndTailHoldDuration: 0.18,
-        stage1BaseThreshold: 0.54,
-        stage1NoiseMargin: 0.18,
-        stage1FarEndScale: 0.22,
-        stage1MaxThreshold: 0.88,
-        stage1RequiredDuration: 0.18,
-        stage1DecayMultiplier: 1.8,
-        stage2SettleDuration: 0.09,
-        stage2ConfirmThreshold: 0.44,
-        stage2NoiseMargin: 0.16,
-        stage2RequiredDuration: 0.12,
-        stage2QuietRejectDuration: 0.10,
-        stage2MaxDuration: 0.38,
-        falseAlarmCooldownDuration: 0.70,
-        adaptiveEchoStep: 0.06,
-        maxAdaptiveEchoOffset: 0.22,
+        farEndTailHoldDuration: 0.15,
+        stage1BaseThreshold: 0.45,
+        stage1NoiseMargin: 0.15,
+        stage1FarEndScale: 0.14,
+        stage1MaxThreshold: 0.80,
+        stage1RequiredDuration: 0.12,
+        stage1DecayMultiplier: 1.1,
+        stage2SettleDuration: 0.07,
+        stage2ConfirmThreshold: 0.34,
+        stage2NoiseMargin: 0.13,
+        stage2RequiredDuration: 0.09,
+        stage2QuietRejectDuration: 0.13,
+        stage2MaxDuration: 0.34,
+        falseAlarmCooldownDuration: 0.55,
+        adaptiveEchoStep: 0.05,
+        maxAdaptiveEchoOffset: 0.18,
         adaptiveEchoDecayPerSecond: 0.008
     )
 
@@ -167,7 +167,7 @@ internal struct VoiceBargeInDetector: Sendable {
                 basePlusNoise + farEndEnvelope * config.stage1FarEndScale + adaptiveEchoOffset
             )
         }
-        let quietBase: Float = config.isUsingHeadphones ? config.stage1BaseThreshold : 0.48
+        let quietBase: Float = config.isUsingHeadphones ? config.stage1BaseThreshold : 0.40
         return min(
             config.stage1MaxThreshold,
             max(quietBase, ambientNoiseFloor + config.stage1NoiseMargin)

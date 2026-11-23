@@ -87,14 +87,14 @@ final class VoiceBargeInTests: XCTestCase {
         XCTAssertEqual(detector.aecConvergedPlaybackDuration, 0.30, accuracy: 1e-6)
         XCTAssertFalse(detector.isAECConverged)
 
-        // Sentence 2 plays for 1.00s (total active playback 1.30s < 1.60s) with loud echo.
-        let sentence2Actions = feedFrames(&detector, count: 50, micLevel: 0.85, farEndLevel: 0.70)
+        // Sentence 2 plays for 0.80s (total active playback 1.10s < 1.15s) with loud echo.
+        let sentence2Actions = feedFrames(&detector, count: 40, micLevel: 0.85, farEndLevel: 0.70)
         XCTAssertTrue(sentence2Actions.allSatisfy { $0 == .none })
-        XCTAssertEqual(detector.aecConvergedPlaybackDuration, 1.30, accuracy: 1e-6)
+        XCTAssertEqual(detector.aecConvergedPlaybackDuration, 1.10, accuracy: 1e-6)
         XCTAssertFalse(detector.isAECConverged)
 
-        // Remaining 0.36s of playback brings total active speech past 1.60s convergence threshold.
-        _ = feedFrames(&detector, count: 18, micLevel: 0.20, farEndLevel: 0.70)
+        // Remaining 0.10s of playback brings total active speech past 1.15s convergence threshold.
+        _ = feedFrames(&detector, count: 5, micLevel: 0.20, farEndLevel: 0.70)
         XCTAssertTrue(detector.isAECConverged)
     }
 
@@ -102,19 +102,19 @@ final class VoiceBargeInTests: XCTestCase {
         var detector = VoiceBargeInDetector(config: .speakerWithHardwareAEC)
         detector.setSpeaking(true)
 
-        // Warm up AEC past 1.60s + steady grace.
-        _ = feedFrames(&detector, count: 85, micLevel: 0.25, farEndLevel: 0.65)
+        // Warm up AEC past 1.15s + steady grace (1.30s).
+        _ = feedFrames(&detector, count: 65, micLevel: 0.25, farEndLevel: 0.65)
         XCTAssertTrue(detector.isAECConverged)
 
-        // Sustained residual echo below dynamic far-end threshold (~0.683) must stay quiet.
-        let steadyEcho = feedFrames(&detector, count: 50, micLevel: 0.58, farEndLevel: 0.65)
+        // Sustained residual echo below dynamic far-end threshold (~0.541) must stay quiet.
+        let steadyEcho = feedFrames(&detector, count: 50, micLevel: 0.48, farEndLevel: 0.65)
         XCTAssertTrue(steadyEcho.allSatisfy { $0 == .none })
         XCTAssertEqual(detector.stage1Accumulated, 0, accuracy: 1e-6)
 
-        // Intermittent 0.75 peaks (60ms on / 60ms off) decay 1.8x faster than they accumulate.
+        // Intermittent 0.62 peaks (40ms on / 40ms off) decay 1.1x faster than they accumulate.
         for _ in 0..<20 {
-            let on = feedFrames(&detector, count: 3, micLevel: 0.75, farEndLevel: 0.65)
-            let off = feedFrames(&detector, count: 3, micLevel: 0.20, farEndLevel: 0.65)
+            let on = feedFrames(&detector, count: 2, micLevel: 0.62, farEndLevel: 0.65)
+            let off = feedFrames(&detector, count: 2, micLevel: 0.20, farEndLevel: 0.65)
             XCTAssertTrue(on.allSatisfy { $0 == .none })
             XCTAssertTrue(off.allSatisfy { $0 == .none })
         }
@@ -126,41 +126,41 @@ final class VoiceBargeInTests: XCTestCase {
         var detector = VoiceBargeInDetector(config: .speakerWithHardwareAEC)
         detector.setSpeaking(true)
 
-        // Warm up AEC (1.80s active playback at farEnd = 0.60 -> Stage 1 threshold = 0.672).
-        _ = feedFrames(&detector, count: 90, micLevel: 0.20, farEndLevel: 0.60)
+        // Warm up AEC (1.30s active playback at farEnd = 0.60 -> Stage 1 threshold = 0.534).
+        _ = feedFrames(&detector, count: 65, micLevel: 0.20, farEndLevel: 0.60)
 
-        // Sustained loud echo (0.72) crosses Stage 1 (0.672) over 0.18s (9 * 0.02s) -> duck playback.
-        let stage1 = feedFrames(&detector, count: 9, micLevel: 0.72, farEndLevel: 0.60)
+        // Sustained loud echo (0.57) crosses Stage 1 (0.534) over 0.12s (6 * 0.02s) -> duck playback.
+        let stage1 = feedFrames(&detector, count: 6, micLevel: 0.57, farEndLevel: 0.60)
         XCTAssertEqual(stage1.dropLast().allSatisfy { $0 == .none }, true)
         XCTAssertEqual(stage1.last, .duckPlayback)
         XCTAssertTrue(detector.isVerifying)
 
-        // Settle period (0.08s < 0.09s) while acoustic echo tails off.
-        let settle = feedFrames(&detector, count: 4, micLevel: 0.50, farEndLevel: 0.05)
+        // Settle period (0.06s < 0.07s) while acoustic echo tails off.
+        let settle = feedFrames(&detector, count: 3, micLevel: 0.40, farEndLevel: 0.05)
         XCTAssertTrue(settle.allSatisfy { $0 == .none })
 
-        // Once playback is ducked, echo drops to 0.18 for 0.10s (5 frames) -> reject & restore playback.
-        let verify = feedFrames(&detector, count: 5, micLevel: 0.18, farEndLevel: 0.05)
+        // Once playback is ducked, echo drops to 0.18 for 0.14s (7 frames >= 0.13s) -> reject & restore playback.
+        let verify = feedFrames(&detector, count: 7, micLevel: 0.18, farEndLevel: 0.05)
         XCTAssertEqual(verify.dropLast().allSatisfy { $0 == .none }, true)
         XCTAssertEqual(verify.last, .restorePlayback)
         XCTAssertFalse(detector.isVerifying)
         XCTAssertTrue(detector.isSpeaking)
-        XCTAssertEqual(detector.cooldownRemaining, 0.70, accuracy: 1e-6)
-        XCTAssertEqual(detector.adaptiveEchoOffset, 0.06, accuracy: 1e-6)
+        XCTAssertEqual(detector.cooldownRemaining, 0.55, accuracy: 1e-6)
+        XCTAssertEqual(detector.adaptiveEchoOffset, 0.05, accuracy: 1e-6)
 
-        // Cooldown period (0.70s) suppresses immediate re-triggering.
-        let cooldown = feedFrames(&detector, count: 35, micLevel: 0.72, farEndLevel: 0.60)
+        // Cooldown period (0.55s) suppresses immediate re-triggering.
+        let cooldown = feedFrames(&detector, count: 28, micLevel: 0.57, farEndLevel: 0.60)
         XCTAssertTrue(cooldown.allSatisfy { $0 == .none })
         XCTAssertEqual(detector.cooldownRemaining, 0, accuracy: 1e-6)
 
-        // Post-cooldown: persistent 0.72 echo stays locked out without decaying into periodic re-ducking.
-        let postCooldown = feedFrames(&detector, count: 150, micLevel: 0.72, farEndLevel: 0.60)
+        // Post-cooldown: persistent 0.57 echo stays locked out without decaying into periodic re-ducking.
+        let postCooldown = feedFrames(&detector, count: 150, micLevel: 0.57, farEndLevel: 0.60)
         XCTAssertTrue(postCooldown.allSatisfy { $0 == .none })
         XCTAssertFalse(detector.isVerifying)
-        XCTAssertEqual(detector.adaptiveEchoOffset, 0.06, accuracy: 1e-6)
+        XCTAssertEqual(detector.adaptiveEchoOffset, 0.05, accuracy: 1e-6)
 
         // Clean active playback well below threshold gradually decays adaptiveEchoOffset back to zero.
-        let cleanPlayback = feedFrames(&detector, count: 400, micLevel: 0.20, farEndLevel: 0.60)
+        let cleanPlayback = feedFrames(&detector, count: 330, micLevel: 0.18, farEndLevel: 0.60)
         XCTAssertTrue(cleanPlayback.allSatisfy { $0 == .none })
         XCTAssertEqual(detector.adaptiveEchoOffset, 0, accuracy: 1e-6)
     }
@@ -169,26 +169,26 @@ final class VoiceBargeInTests: XCTestCase {
         var detector = VoiceBargeInDetector(config: .speakerWithHardwareAEC)
         detector.setSpeaking(true)
 
-        _ = feedFrames(&detector, count: 90, micLevel: 0.20, farEndLevel: 0.60)
+        _ = feedFrames(&detector, count: 65, micLevel: 0.20, farEndLevel: 0.60)
 
-        // Brief loud cough (0.85 for 0.18s) triggers Stage 1, then stops before Stage 2 confirms.
-        let stage1 = feedFrames(&detector, count: 9, micLevel: 0.85, farEndLevel: 0.60)
+        // Brief loud cough (0.80 for 0.12s) triggers Stage 1, then stops before Stage 2 confirms.
+        let stage1 = feedFrames(&detector, count: 6, micLevel: 0.80, farEndLevel: 0.60)
         XCTAssertEqual(stage1.last, .duckPlayback)
 
-        _ = feedFrames(&detector, count: 4, micLevel: 0.30, farEndLevel: 0.05)
-        let verify = feedFrames(&detector, count: 5, micLevel: 0.15, farEndLevel: 0.05)
+        _ = feedFrames(&detector, count: 3, micLevel: 0.30, farEndLevel: 0.05)
+        let verify = feedFrames(&detector, count: 7, micLevel: 0.15, farEndLevel: 0.05)
         XCTAssertEqual(verify.last, .restorePlayback)
 
-        // Offset steps up by a single bounded increment (0.06) rather than jumping near max (0.22).
-        XCTAssertEqual(detector.adaptiveEchoOffset, 0.06, accuracy: 1e-6)
+        // Offset steps up by a single bounded increment (0.05) rather than jumping near max (0.18).
+        XCTAssertEqual(detector.adaptiveEchoOffset, 0.05, accuracy: 1e-6)
         XCTAssertLessThan(detector.adaptiveEchoOffset, detector.config.maxAdaptiveEchoOffset)
 
-        // Wait out cooldown, then confirm subsequent real speech (0.78) still interrupts cleanly.
-        _ = feedFrames(&detector, count: 35, micLevel: 0.20, farEndLevel: 0.60)
-        let bargeIn1 = feedFrames(&detector, count: 9, micLevel: 0.78, farEndLevel: 0.60)
+        // Wait out cooldown, then confirm subsequent normal user speech (0.62) still interrupts cleanly.
+        _ = feedFrames(&detector, count: 28, micLevel: 0.20, farEndLevel: 0.60)
+        let bargeIn1 = feedFrames(&detector, count: 6, micLevel: 0.62, farEndLevel: 0.60)
         XCTAssertEqual(bargeIn1.last, .duckPlayback)
 
-        let bargeIn2 = feedFrames(&detector, count: 10, micLevel: 0.72, farEndLevel: 0.05)
+        let bargeIn2 = feedFrames(&detector, count: 8, micLevel: 0.52, farEndLevel: 0.05)
         XCTAssertEqual(bargeIn2.last, .confirmInterrupt)
     }
 
@@ -196,14 +196,14 @@ final class VoiceBargeInTests: XCTestCase {
         var detector = VoiceBargeInDetector(config: .speakerWithHardwareAEC)
         detector.setSpeaking(true)
 
-        _ = feedFrames(&detector, count: 90, micLevel: 0.20, farEndLevel: 0.60)
+        _ = feedFrames(&detector, count: 65, micLevel: 0.20, farEndLevel: 0.60)
 
-        // User speaks over playback -> Stage 1 ducks audio after 0.18s.
-        let stage1 = feedFrames(&detector, count: 9, micLevel: 0.78, farEndLevel: 0.60)
+        // Normal user speech (0.60) over playback -> Stage 1 ducks audio after 0.12s.
+        let stage1 = feedFrames(&detector, count: 6, micLevel: 0.60, farEndLevel: 0.60)
         XCTAssertEqual(stage1.last, .duckPlayback)
 
-        // User keeps speaking loudly (0.72) even though speaker playback was ducked (0.05).
-        let stage2 = feedFrames(&detector, count: 10, micLevel: 0.72, farEndLevel: 0.05)
+        // User keeps speaking at normal volume (0.48) while speaker playback is ducked (0.05).
+        let stage2 = feedFrames(&detector, count: 8, micLevel: 0.48, farEndLevel: 0.05)
         XCTAssertEqual(stage2.dropLast().allSatisfy { $0 == .none }, true)
         XCTAssertEqual(stage2.last, .confirmInterrupt)
         XCTAssertFalse(detector.isSpeaking)

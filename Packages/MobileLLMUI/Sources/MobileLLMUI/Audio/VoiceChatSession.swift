@@ -1004,7 +1004,7 @@ private final class AudioTapBridge: @unchecked Sendable {
         }
     }
 
-    /// Updates ambient noise floor while in `.thinking` state using the same 250 Hz high-pass
+    /// Updates ambient noise floor while in `.thinking` state using the same 100 Hz high-pass
     /// pipeline used for barge-in evaluation so baseline and trigger energy match.
     func sampleAmbientIfNeeded(buffer: AVAudioPCMBuffer) {
         lock.lock()
@@ -1066,8 +1066,8 @@ private final class AudioTapBridge: @unchecked Sendable {
         return action
     }
 
-    /// 1-pole high-pass filter (~250 Hz cutoff) that strips DC offset, handling rumble,
-    /// and low-frequency speaker chassis resonance before normalizing RMS.
+    /// 1-pole high-pass filter (~100 Hz cutoff) that strips DC offset, handling rumble,
+    /// and sub-vocal resonance while preserving human voice fundamentals before normalizing RMS.
     private static func computeHighPassNormalizedRMS(
         from buffer: AVAudioPCMBuffer,
         prevInput: inout Float,
@@ -1078,7 +1078,7 @@ private final class AudioTapBridge: @unchecked Sendable {
         guard frameLength > 0 else { return 0 }
 
         let sampleRate = max(buffer.format.sampleRate, 1.0)
-        let rc = 1.0 / (2.0 * Double.pi * 250.0)
+        let rc = 1.0 / (2.0 * Double.pi * 100.0)
         let dt = 1.0 / sampleRate
         let alpha = Float(rc / (rc + dt))
 
