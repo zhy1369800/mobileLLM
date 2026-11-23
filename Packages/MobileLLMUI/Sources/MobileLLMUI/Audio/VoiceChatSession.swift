@@ -62,6 +62,7 @@ public final class VoiceChatSession {
     @ObservationIgnored private var consecutiveRenewalFailures: Int = 0
     @ObservationIgnored private var consecutiveConfigRecoveries: Int = 0
     @ObservationIgnored private var isRestartingEngine = false
+    @ObservationIgnored private var isHardwareAECEnabled = false
     @ObservationIgnored private var lastPublishedLiveActivity: VoiceLiveActivitySnapshot?
     @ObservationIgnored private var lastRawLiveActivityKey: RawLiveActivityKey?
     @ObservationIgnored nonisolated(unsafe) private var audioObservers: [NSObjectProtocol] = []
@@ -158,7 +159,9 @@ public final class VoiceChatSession {
         consecutiveConfigRecoveries = 0
         lastPublishedLiveActivity = nil
         lastRawLiveActivityKey = nil
+        tapBridge.setSamplingAmbient(false)
         tapBridge.setSpeaking(false)
+        playbackController.setDucked(false)
         liveActivity?.end()
         onSessionStopped?()
     }
@@ -173,8 +176,10 @@ public final class VoiceChatSession {
         observationTask = nil
         sendTask?.cancel()
         sendTask = nil
+        tapBridge.setSamplingAmbient(false)
         tapBridge.setSpeaking(false)
         speech.stop(suppressCurrentTurn: true)
+        playbackController.setDucked(false)
         if chat.streaming != nil {
             chat.stop()
         }
@@ -209,6 +214,7 @@ public final class VoiceChatSession {
         // Notify the host app BEFORE configuring AVAudioSession so PiPCoordinator releases its
         // audio session claim first instead of deactivating the newly started voice session.
         onSessionActivated?()
+        speech.prewarmForVoiceCall()
 
         guard let engine = setupAudioSessionAndEngine() else {
             cleanupOnFailure(to: .unavailable)
@@ -265,11 +271,20 @@ public final class VoiceChatSession {
         #if os(iOS)
         // Enable hardware voice processing (AEC + noise suppression) while the engine is stopped;
         // set minimum ducking so playback stays at full volume.
-        try? input.setVoiceProcessingEnabled(true)
-        input.voiceProcessingOtherAudioDuckingConfiguration = .init(
-            enableAdvancedDucking: false,
-            duckingLevel: .min
-        )
+        var vpioEnabled = false
+        do {
+            try input.setVoiceProcessingEnabled(true)
+            input.voiceProcessingOtherAudioDuckingConfiguration = .init(
+                enableAdvancedDucking: false,
+                duckingLevel: .min
+            )
+            vpioEnabled = input.isVoiceProcessingEnabled
+        } catch {
+            vpioEnabled = false
+        }
+        self.isHardwareAECEnabled = vpioEnabled
+        #else
+        self.isHardwareAECEnabled = false
         #endif
 
         guard let playbackFormat = resolvePlaybackFormat(for: engine) else {
@@ -320,22 +335,34 @@ public final class VoiceChatSession {
         // Pass `format: nil` so CoreAudio binds cleanly to the VPIO node's live output format.
         input.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, _ in
             bridge.appendIfActive(buffer)
-            let level = Self.computeNormalizedRMS(from: buffer)
             let bufferDuration = Double(buffer.frameLength) / max(buffer.format.sampleRate, 1)
 
-            let isPlayingAudio = bridge.needsPlaybackStartCheck() ? playback.isPlayingAudio : false
-            if bridge.recordAndCheckBargeIn(
-                level: level,
-                duration: bufferDuration,
-                isPlayingAudio: isPlayingAudio
-            ) {
-                Task { @MainActor [weak self] in
-                    guard let self, self.sessionToken == token else { return }
-                    self.interruptAndListen()
+            if bridge.isCurrentlySpeaking() {
+                let farEndLevel = playback.currentPlaybackLevel
+                let action = bridge.processSpeakingFrame(
+                    buffer: buffer,
+                    duration: bufferDuration,
+                    farEndLevel: farEndLevel
+                )
+                switch action {
+                case .none:
+                    break
+                case .duckPlayback:
+                    playback.setDucked(true)
+                case .restorePlayback:
+                    playback.setDucked(false)
+                case .confirmInterrupt:
+                    playback.muteForInterrupt()
+                    Task { @MainActor [weak self] in
+                        guard let self, self.sessionToken == token else { return }
+                        self.interruptAndListen()
+                    }
                 }
-            } else if !bridge.isCurrentlySpeaking() {
+            } else {
+                let rawLevel = Self.computeNormalizedRMS(from: buffer)
+                bridge.sampleAmbientIfNeeded(buffer: buffer)
                 let prev = levelBox.get()
-                levelBox.set(prev * 0.55 + level * 0.45)
+                levelBox.set(prev * 0.55 + rawLevel * 0.45)
             }
         }
         return true
@@ -344,6 +371,7 @@ public final class VoiceChatSession {
     private func teardownAudioEngine() {
         playbackController.detach()
         activePlayerNode = nil
+        isHardwareAECEnabled = false
         if let engine = audioEngine {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
@@ -365,7 +393,9 @@ public final class VoiceChatSession {
         removeAudioObservers()
         teardownRecognition()
         teardownAudioEngine()
+        tapBridge.setSamplingAmbient(false)
         tapBridge.setSpeaking(false)
+        playbackController.setDucked(false)
         speech.externalOutputSink = nil
         speech.isVoiceCallActive = false
         speech.onPlaybackFinished = nil
@@ -482,7 +512,7 @@ public final class VoiceChatSession {
 
             if let player = self.activePlayerNode, let playbackFormat = self.resolvePlaybackFormat(for: engine) {
                 engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
-                self.playbackController.attach(player: player, format: playbackFormat)
+                self.playbackController.reattachForRecovery(player: player, format: playbackFormat)
             }
 
             guard self.installMicrophoneTap(on: engine) else {
@@ -494,6 +524,11 @@ public final class VoiceChatSession {
             do {
                 try engine.start()
                 self.activePlayerNode?.play()
+                self.tapBridge.resetCalibration()
+                #if os(iOS)
+                self.isHardwareAECEnabled = engine.inputNode.isVoiceProcessingEnabled
+                #endif
+                self.refreshBargeInThresholds()
                 if self.state == .listening {
                     self.beginListening()
                 }
@@ -538,11 +573,20 @@ public final class VoiceChatSession {
     }
 
     private func refreshBargeInThresholds() {
-        let usingHeadphones = Self.isUsingHeadphones()
-        tapBridge.configureBargeIn(
-            threshold: usingHeadphones ? 0.26 : 0.42,
-            requiredDuration: usingHeadphones ? 0.12 : 0.18
-        )
+        let config: VoiceBargeInConfig
+        #if os(iOS)
+        if Self.isUsingHeadphones() {
+            config = .headphones
+        } else if isHardwareAECEnabled {
+            config = .speakerWithHardwareAEC
+        } else {
+            config = .disabled
+        }
+        #else
+        // macOS does not enable hardware VPIO AEC; disable voice barge-in to avoid speaker duck/restore pumping.
+        config = .disabled
+        #endif
+        tapBridge.configureBargeIn(config)
     }
 
     // MARK: - Listening & VAD Endpointing
@@ -554,7 +598,9 @@ public final class VoiceChatSession {
         silenceSubmitTask = nil
         renewalTask?.cancel()
         renewalTask = nil
+        tapBridge.setSamplingAmbient(false)
         tapBridge.setSpeaking(false)
+        playbackController.setDucked(false)
         liveUserTranscript = ""
         activeToolRuns = []
 
@@ -682,6 +728,8 @@ public final class VoiceChatSession {
         liveAssistantText = ""
         activeToolRuns = []
         tapBridge.setSpeaking(false)
+        playbackController.setDucked(false)
+        tapBridge.setSamplingAmbient(true)
         publishLiveActivity()
 
         let token = sessionToken
@@ -736,9 +784,10 @@ public final class VoiceChatSession {
                 }
 
                 if self.state == .speaking {
-                    if self.playbackController.isPlayingAudio {
-                        let pulse = Float.random(in: 0.25...0.70)
-                        self.audioLevelBox.set(self.audioLevelBox.get() * 0.55 + pulse * 0.45)
+                    let playbackLevel = self.playbackController.currentPlaybackLevel
+                    if playbackLevel > 0.04 {
+                        let visual = min(max(playbackLevel * 0.85, 0.18), 0.82)
+                        self.audioLevelBox.set(self.audioLevelBox.get() * 0.50 + visual * 0.50)
                     } else {
                         self.audioLevelBox.set(self.audioLevelBox.get() * 0.6)
                     }
@@ -752,6 +801,7 @@ public final class VoiceChatSession {
 
     private func enterSpeakingState() {
         state = .speaking
+        tapBridge.setSamplingAmbient(false)
         tapBridge.setSpeaking(true)
         publishLiveActivity()
     }
@@ -862,12 +912,11 @@ public final class VoiceChatSession {
         var sum: Float = 0
         for i in 0..<frameLength {
             let sample = channelData[i]
-            sum += sample * sample
+            let safe = sample.isFinite ? sample : 0
+            sum += safe * safe
         }
         let rms = sqrt(sum / Float(frameLength))
-        let db = 20 * log10(max(rms, 1e-6))
-        let normalized = (db + 52) / 44
-        return min(max(normalized, 0), 1)
+        return VoiceBargeInDetector.normalizeRMS(rms)
     }
 }
 
@@ -875,14 +924,11 @@ private final class AudioTapBridge: @unchecked Sendable {
     private let lock = NSLock()
     private var activeRequest: SFSpeechAudioBufferRecognitionRequest?
     private var cachedMonoFormat: AVAudioFormat?
-    private var isSpeaking = false
-    private var bargeInThreshold: Float = 0.42
-    private var bargeInRequiredDuration: Double = 0.18
-    private var bargeInAccumulatedDuration: Double = 0
-    private var speakingElapsed: Double = 0
-    private var hasPlayedAudioSinceEngineStart = false
-    private let initialAECGracePeriod: Double = 0.85
-    private let steadyGracePeriod: Double = 0.30
+    private var detector = VoiceBargeInDetector(config: .speakerWithHardwareAEC)
+    private var isSamplingAmbient = false
+    private var hpfPrevInput: Float = 0
+    private var hpfPrevOutput: Float = 0
+    private var hpfSampleRate: Double = 0
 
     func setActiveRequest(_ request: SFSpeechAudioBufferRecognitionRequest?) {
         lock.lock()
@@ -892,39 +938,37 @@ private final class AudioTapBridge: @unchecked Sendable {
 
     func resetCalibration() {
         lock.lock()
-        hasPlayedAudioSinceEngineStart = false
-        bargeInAccumulatedDuration = 0
-        speakingElapsed = 0
+        detector.resetCalibration()
+        hpfPrevInput = 0
+        hpfPrevOutput = 0
+        hpfSampleRate = 0
+        lock.unlock()
+    }
+
+    func setSamplingAmbient(_ enabled: Bool) {
+        lock.lock()
+        isSamplingAmbient = enabled
         lock.unlock()
     }
 
     func setSpeaking(_ speaking: Bool) {
         lock.lock()
-        isSpeaking = speaking
-        bargeInAccumulatedDuration = 0
-        speakingElapsed = 0
+        _ = detector.setSpeaking(speaking)
+        hpfPrevInput = 0
+        hpfPrevOutput = 0
         lock.unlock()
     }
 
     func isCurrentlySpeaking() -> Bool {
         lock.lock()
-        let v = isSpeaking
+        let v = detector.isSpeaking
         lock.unlock()
         return v
     }
 
-    func needsPlaybackStartCheck() -> Bool {
+    func configureBargeIn(_ config: VoiceBargeInConfig) {
         lock.lock()
-        let needed = isSpeaking && speakingElapsed == 0
-        lock.unlock()
-        return needed
-    }
-
-    func configureBargeIn(threshold: Float, requiredDuration: Double) {
-        lock.lock()
-        bargeInThreshold = threshold
-        bargeInRequiredDuration = requiredDuration
-        bargeInAccumulatedDuration = 0
+        detector.configure(config)
         lock.unlock()
     }
 
@@ -960,35 +1004,102 @@ private final class AudioTapBridge: @unchecked Sendable {
         }
     }
 
-    /// Evaluates barge-in by real buffer duration after an initial grace period anchored to actual
-    /// speaker playback so hardware VPIO AEC has time to converge on the first turn.
-    func recordAndCheckBargeIn(level: Float, duration: Double, isPlayingAudio: Bool) -> Bool {
+    /// Updates ambient noise floor while in `.thinking` state using the same 250 Hz high-pass
+    /// pipeline used for barge-in evaluation so baseline and trigger energy match.
+    func sampleAmbientIfNeeded(buffer: AVAudioPCMBuffer) {
         lock.lock()
-        defer { lock.unlock() }
-        guard isSpeaking else { return false }
+        let shouldSample = isSamplingAmbient && !detector.isSpeaking
+        let sampleRate = buffer.format.sampleRate
+        var xPrev = hpfSampleRate == sampleRate ? hpfPrevInput : 0
+        var yPrev = hpfSampleRate == sampleRate ? hpfPrevOutput : 0
+        lock.unlock()
 
-        // Do not consume the grace window while TTS is still synthesizing/buffering before playback starts.
-        if !isPlayingAudio && speakingElapsed == 0 {
-            return false
+        guard shouldSample else { return }
+        let level = Self.computeHighPassNormalizedRMS(
+            from: buffer,
+            prevInput: &xPrev,
+            prevOutput: &yPrev
+        )
+
+        lock.lock()
+        if isSamplingAmbient && !detector.isSpeaking {
+            hpfSampleRate = sampleRate
+            hpfPrevInput = xPrev
+            hpfPrevOutput = yPrev
+            detector.updateAmbientNoise(level: level)
+        }
+        lock.unlock()
+    }
+
+    /// Evaluates high-pass filtered microphone energy against `VoiceBargeInDetector`.
+    func processSpeakingFrame(
+        buffer: AVAudioPCMBuffer,
+        duration: Double,
+        farEndLevel: Float
+    ) -> VoiceBargeInAction {
+        lock.lock()
+        let speaking = detector.isSpeaking
+        let enabled = detector.config.enabled
+        let sampleRate = buffer.format.sampleRate
+        var xPrev = hpfSampleRate == sampleRate ? hpfPrevInput : 0
+        var yPrev = hpfSampleRate == sampleRate ? hpfPrevOutput : 0
+        lock.unlock()
+
+        guard speaking, enabled, duration > 0 else { return .none }
+
+        let level = Self.computeHighPassNormalizedRMS(
+            from: buffer,
+            prevInput: &xPrev,
+            prevOutput: &yPrev
+        )
+
+        lock.lock()
+        hpfSampleRate = sampleRate
+        hpfPrevInput = xPrev
+        hpfPrevOutput = yPrev
+        let action = detector.process(
+            micLevel: level,
+            farEndLevel: farEndLevel,
+            duration: duration
+        )
+        lock.unlock()
+        return action
+    }
+
+    /// 1-pole high-pass filter (~250 Hz cutoff) that strips DC offset, handling rumble,
+    /// and low-frequency speaker chassis resonance before normalizing RMS.
+    private static func computeHighPassNormalizedRMS(
+        from buffer: AVAudioPCMBuffer,
+        prevInput: inout Float,
+        prevOutput: inout Float
+    ) -> Float {
+        guard let channelData = buffer.floatChannelData?[0] else { return 0 }
+        let frameLength = Int(buffer.frameLength)
+        guard frameLength > 0 else { return 0 }
+
+        let sampleRate = max(buffer.format.sampleRate, 1.0)
+        let rc = 1.0 / (2.0 * Double.pi * 250.0)
+        let dt = 1.0 / sampleRate
+        let alpha = Float(rc / (rc + dt))
+
+        var xPrev = prevInput.isFinite ? prevInput : 0
+        var yPrev = prevOutput.isFinite ? prevOutput : 0
+        var sum: Float = 0
+
+        for i in 0..<frameLength {
+            let raw = channelData[i]
+            let x = raw.isFinite ? raw : 0
+            let y = alpha * (yPrev + x - xPrev)
+            let safeY = y.isFinite ? y : 0
+            xPrev = x
+            yPrev = safeY
+            sum += safeY * safeY
         }
 
-        speakingElapsed += duration
-        let requiredGrace = hasPlayedAudioSinceEngineStart ? steadyGracePeriod : initialAECGracePeriod
-        guard speakingElapsed >= requiredGrace else { return false }
-
-        hasPlayedAudioSinceEngineStart = true
-
-        if level >= bargeInThreshold {
-            bargeInAccumulatedDuration += duration
-            if bargeInAccumulatedDuration >= bargeInRequiredDuration {
-                bargeInAccumulatedDuration = 0
-                isSpeaking = false
-                return true
-            }
-        } else {
-            bargeInAccumulatedDuration = max(0, bargeInAccumulatedDuration - duration * 0.5)
-        }
-        return false
+        prevInput = xPrev
+        prevOutput = yPrev
+        let rms = sqrt(sum / Float(frameLength))
+        return VoiceBargeInDetector.normalizeRMS(rms)
     }
 }
 
@@ -1015,6 +1126,7 @@ private final class AudioLevelBox: @unchecked Sendable {
 private final class EnginePlaybackController: VoiceAudioOutputSink, @unchecked Sendable {
     private let lock = NSLock()
     private let levelBox: AudioLevelBox
+    private let playbackLevelBox = AudioLevelBox()
     private var player: AVAudioPlayerNode?
     private var targetFormat: AVAudioFormat?
     private var converter: AVAudioConverter?
@@ -1022,6 +1134,9 @@ private final class EnginePlaybackController: VoiceAudioOutputSink, @unchecked S
     private var pendingBuffers = 0
     private var playbackGeneration: UInt64 = 0
     private var drainContinuation: CheckedContinuation<Void, Error>?
+    private var currentVolume: Float = 1.0
+    private var scheduledChunkLevels: [Float] = []
+    private var chunkHeadIndex: Int = 0
 
     init(levelBox: AudioLevelBox) {
         self.levelBox = levelBox
@@ -1034,24 +1149,87 @@ private final class EnginePlaybackController: VoiceAudioOutputSink, @unchecked S
         return active
     }
 
+    var currentPlaybackLevel: Float {
+        playbackLevelBox.get()
+    }
+
+    private func syncPlaybackLevelBoxLocked() {
+        let level: Float
+        if pendingBuffers > 0, chunkHeadIndex < scheduledChunkLevels.count {
+            level = scheduledChunkLevels[chunkHeadIndex] * currentVolume
+        } else {
+            level = 0
+        }
+        playbackLevelBox.set(level)
+    }
+
+    func setDucked(_ ducked: Bool) {
+        let targetVolume: Float = ducked ? 0.08 : 1.0
+        lock.lock()
+        if currentVolume == targetVolume {
+            lock.unlock()
+            return
+        }
+        currentVolume = targetVolume
+        syncPlaybackLevelBoxLocked()
+        let activePlayer = player
+        lock.unlock()
+        activePlayer?.volume = targetVolume
+    }
+
+    func muteForInterrupt() {
+        lock.lock()
+        currentVolume = 0
+        syncPlaybackLevelBoxLocked()
+        let activePlayer = player
+        lock.unlock()
+        activePlayer?.volume = 0
+    }
+
     func attach(player: AVAudioPlayerNode, format: AVAudioFormat) {
+        resetAttachment(player: player, format: format, failDrainWithCancellation: true)
+    }
+
+    func reattachForRecovery(player: AVAudioPlayerNode, format: AVAudioFormat) {
+        resetAttachment(player: player, format: format, failDrainWithCancellation: false)
+    }
+
+    private func resetAttachment(
+        player: AVAudioPlayerNode,
+        format: AVAudioFormat,
+        failDrainWithCancellation: Bool
+    ) {
         lock.lock()
         self.player = player
         self.targetFormat = format
         self.converter = nil
         self.cachedSourceFormat = nil
         self.pendingBuffers = 0
+        self.scheduledChunkLevels.removeAll(keepingCapacity: false)
+        self.chunkHeadIndex = 0
+        self.currentVolume = 1.0
         self.playbackGeneration &+= 1
+        syncPlaybackLevelBoxLocked()
         let cont = drainContinuation
         self.drainContinuation = nil
         lock.unlock()
-        cont?.resume(throwing: CancellationError())
+
+        player.volume = 1.0
+        if failDrainWithCancellation {
+            cont?.resume(throwing: CancellationError())
+        } else {
+            cont?.resume(returning: ())
+        }
     }
 
     func detach() {
         lock.lock()
         playbackGeneration &+= 1
         pendingBuffers = 0
+        scheduledChunkLevels.removeAll(keepingCapacity: false)
+        chunkHeadIndex = 0
+        currentVolume = 1.0
+        syncPlaybackLevelBoxLocked()
         let oldPlayer = player
         player = nil
         targetFormat = nil
@@ -1062,6 +1240,7 @@ private final class EnginePlaybackController: VoiceAudioOutputSink, @unchecked S
         lock.unlock()
 
         oldPlayer?.stop()
+        oldPlayer?.volume = 1.0
         levelBox.set(0)
         cont?.resume(throwing: CancellationError())
     }
@@ -1128,11 +1307,18 @@ private final class EnginePlaybackController: VoiceAudioOutputSink, @unchecked S
         if !player.isPlaying {
             player.play()
         }
-        pendingBuffers += 1
+        let maxChunkFrames = AVAudioFrameCount(max(targetFormat.sampleRate * 0.08, 1024))
+        let chunks = Self.sliceFloat32Buffer(bufferToSchedule, maxFrames: maxChunkFrames)
         let gen = playbackGeneration
-        player.scheduleBuffer(bufferToSchedule, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-            self?.handleBufferCompleted(generation: gen)
+        for chunk in chunks {
+            let chunkLevel = Self.computeChunkNormalizedRMS(from: chunk)
+            scheduledChunkLevels.append(chunkLevel)
+            pendingBuffers += 1
+            player.scheduleBuffer(chunk, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                self?.handleBufferCompleted(generation: gen)
+            }
         }
+        syncPlaybackLevelBoxLocked()
         lock.unlock()
     }
 
@@ -1190,15 +1376,24 @@ private final class EnginePlaybackController: VoiceAudioOutputSink, @unchecked S
         lock.lock()
         playbackGeneration &+= 1
         pendingBuffers = 0
+        scheduledChunkLevels.removeAll(keepingCapacity: false)
+        chunkHeadIndex = 0
+        currentVolume = 1.0
+        syncPlaybackLevelBoxLocked()
         converter?.reset()
         let activePlayer = player
         let cont = drainContinuation
         drainContinuation = nil
         lock.unlock()
 
-        if let activePlayer, activePlayer.engine?.isRunning == true {
-            activePlayer.stop()
-            activePlayer.play()
+        if let activePlayer {
+            if activePlayer.engine?.isRunning == true {
+                activePlayer.stop()
+                activePlayer.volume = 1.0
+                activePlayer.play()
+            } else {
+                activePlayer.volume = 1.0
+            }
         }
         levelBox.set(0)
         cont?.resume(throwing: CancellationError())
@@ -1211,6 +1406,17 @@ private final class EnginePlaybackController: VoiceAudioOutputSink, @unchecked S
             return
         }
         pendingBuffers = max(0, pendingBuffers - 1)
+        if chunkHeadIndex < scheduledChunkLevels.count {
+            chunkHeadIndex += 1
+        }
+        if pendingBuffers == 0 || chunkHeadIndex >= scheduledChunkLevels.count {
+            scheduledChunkLevels.removeAll(keepingCapacity: false)
+            chunkHeadIndex = 0
+        } else if chunkHeadIndex >= 32 {
+            scheduledChunkLevels.removeFirst(chunkHeadIndex)
+            chunkHeadIndex = 0
+        }
+        syncPlaybackLevelBoxLocked()
         let shouldResume = pendingBuffers == 0
         let cont = shouldResume ? drainContinuation : nil
         if shouldResume {
@@ -1221,6 +1427,75 @@ private final class EnginePlaybackController: VoiceAudioOutputSink, @unchecked S
         if shouldResume {
             levelBox.set(0)
             cont?.resume(returning: ())
+        }
+    }
+
+    private static func sliceFloat32Buffer(
+        _ buffer: AVAudioPCMBuffer,
+        maxFrames: AVAudioFrameCount
+    ) -> [AVAudioPCMBuffer] {
+        let totalFrames = buffer.frameLength
+        guard totalFrames > maxFrames,
+              buffer.format.commonFormat == .pcmFormatFloat32,
+              !buffer.format.isInterleaved,
+              let srcChannels = buffer.floatChannelData
+        else {
+            return [buffer]
+        }
+
+        let channelCount = Int(buffer.format.channelCount)
+        var chunks: [AVAudioPCMBuffer] = []
+        chunks.reserveCapacity(Int((totalFrames + maxFrames - 1) / maxFrames))
+
+        var offset: AVAudioFrameCount = 0
+        while offset < totalFrames {
+            let count = min(maxFrames, totalFrames - offset)
+            guard let slice = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: count),
+                  let dstChannels = slice.floatChannelData
+            else {
+                return [buffer]
+            }
+            slice.frameLength = count
+            let byteCount = Int(count) * MemoryLayout<Float>.size
+            for ch in 0..<channelCount {
+                memcpy(dstChannels[ch], srcChannels[ch].advanced(by: Int(offset)), byteCount)
+            }
+            chunks.append(slice)
+            offset += count
+        }
+        return chunks
+    }
+
+    private static func computeChunkNormalizedRMS(from buffer: AVAudioPCMBuffer) -> Float {
+        let frameLength = Int(buffer.frameLength)
+        let channelCount = max(Int(buffer.format.channelCount), 1)
+        guard frameLength > 0,
+              buffer.format.commonFormat == .pcmFormatFloat32,
+              let channels = buffer.floatChannelData
+        else { return 0 }
+
+        var sum: Float = 0
+        if buffer.format.isInterleaved {
+            let sampleCount = frameLength * channelCount
+            let ptr = channels[0]
+            for i in 0..<sampleCount {
+                let raw = ptr[i]
+                let safe = raw.isFinite ? raw : 0
+                sum += safe * safe
+            }
+            let rms = sqrt(sum / Float(sampleCount))
+            return VoiceBargeInDetector.normalizeRMS(rms)
+        } else {
+            for ch in 0..<channelCount {
+                let ptr = channels[ch]
+                for i in 0..<frameLength {
+                    let raw = ptr[i]
+                    let safe = raw.isFinite ? raw : 0
+                    sum += safe * safe
+                }
+            }
+            let rms = sqrt(sum / Float(frameLength * channelCount))
+            return VoiceBargeInDetector.normalizeRMS(rms)
         }
     }
 }

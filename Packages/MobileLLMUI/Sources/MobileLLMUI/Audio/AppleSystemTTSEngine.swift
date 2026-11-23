@@ -34,6 +34,10 @@ public final class AppleSystemTTSEngine: TTSEngine {
         self.delegateProxy.owner = self
     }
 
+    public func prewarm() {
+        _ = ensureSynthesizer()
+    }
+
     deinit {
         for observer in audioObservers {
             NotificationCenter.default.removeObserver(observer)

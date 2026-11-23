@@ -85,6 +85,12 @@ public final class StreamingSpeechCoordinator {
         activeEngine().availableVoices()
     }
 
+    /// Prewarms the underlying TTS backend ahead of a voice call without touching `AVAudioSession`.
+    public func prewarmForVoiceCall() {
+        engine.prewarm()
+        cloudEngine?.prewarm()
+    }
+
     // MARK: - Streaming Turn Lifecycle
 
     /// Prepares the coordinator for a brand-new assistant response turn.

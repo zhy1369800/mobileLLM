@@ -73,6 +73,9 @@ public protocol TTSEngine: AnyObject {
 
     /// Releases or deactivates any underlying audio session once a playback batch completes.
     func endPlaybackSession()
+
+    /// Optionally prepares synthesis infrastructure ahead of a voice call without activating audio sessions.
+    func prewarm()
 }
 
 public extension TTSEngine {
@@ -86,4 +89,5 @@ public extension TTSEngine {
         set {}
     }
     func endPlaybackSession() {}
+    func prewarm() {}
 }
