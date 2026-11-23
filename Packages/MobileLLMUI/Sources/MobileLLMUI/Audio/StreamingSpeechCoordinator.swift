@@ -49,12 +49,33 @@ public final class StreamingSpeechCoordinator {
     }
     private let settings: AppSettings
 
+    private struct PrefetchedChunk {
+        let text: String
+        let voiceID: String?
+        let rate: Double
+        let task: Task<Data, Error>
+    }
+
+    private struct ActiveDrainContext {
+        let generation: UInt64
+        var engine: any TTSEngine
+        var usingCloud: Bool
+        var preferredVoiceID: String?
+        var isPlayingCurrent: Bool
+    }
+
     @ObservationIgnored private var segmenter = SentenceSegmenter()
     @ObservationIgnored private var queue: [String] = []
     @ObservationIgnored private var drainTask: Task<Void, Never>?
     @ObservationIgnored private var activeTurnMessageID: UUID?
     @ObservationIgnored private var hasFedStreamingText: Bool = false
     @ObservationIgnored private var sessionGeneration: UInt64 = 0
+    @ObservationIgnored private var prefetchedChunk: PrefetchedChunk?
+    @ObservationIgnored private var activeDrainContext: ActiveDrainContext?
+    @ObservationIgnored private var isCurrentBatchComplete: Bool = false
+
+    private let voiceCallBatchCharacterLimit = 140
+    private let streamingPrefetchMinCharacters = 80
 
     public init(
         engine: (any TTSEngine)? = nil,
@@ -114,6 +135,7 @@ public final class StreamingSpeechCoordinator {
             return
         }
         hasFedStreamingText = true
+        isCurrentBatchComplete = false
         let sentences = segmenter.append(delta)
         if !sentences.isEmpty {
             enqueue(sentences, messageID: messageID ?? activeTurnMessageID)
@@ -127,6 +149,7 @@ public final class StreamingSpeechCoordinator {
             return
         }
 
+        isCurrentBatchComplete = true
         let sentences: [String]
         if hasFedStreamingText {
             sentences = segmenter.finish()
@@ -140,6 +163,8 @@ public final class StreamingSpeechCoordinator {
 
         if !sentences.isEmpty {
             enqueue(sentences, messageID: messageID ?? activeTurnMessageID)
+        } else {
+            maybeSchedulePrefetch()
         }
     }
 
@@ -157,9 +182,13 @@ public final class StreamingSpeechCoordinator {
     /// Speaks a full message on demand, segmented sentence by sentence.
     public func speakMessage(text: String, messageID: UUID?) {
         haltPlayback(suppressCurrentTurn: false)
+        isCurrentBatchComplete = true
         var oneShot = SentenceSegmenter()
         let sentences = oneShot.append(text) + oneShot.finish()
-        guard !sentences.isEmpty else { return }
+        guard !sentences.isEmpty else {
+            isCurrentBatchComplete = false
+            return
+        }
         enqueue(sentences, messageID: messageID)
     }
 
@@ -185,6 +214,9 @@ public final class StreamingSpeechCoordinator {
         if suppressCurrentTurn {
             isSuppressedForCurrentTurn = true
         }
+        isCurrentBatchComplete = false
+        activeDrainContext = nil
+        cancelPrefetch()
         queue.removeAll(keepingCapacity: false)
         segmenter.reset()
         drainTask?.cancel()
@@ -208,42 +240,112 @@ public final class StreamingSpeechCoordinator {
         }
         isSpeaking = true
         ensureDraining()
+        maybeSchedulePrefetch()
     }
 
     private func ensureDraining() {
         guard drainTask == nil else { return }
         let generation = sessionGeneration
 
+        let initialEngine = self.activeEngine()
+        let initialUsingCloud = initialEngine === self.cloudEngine
+        let initialVoiceID: String? = initialUsingCloud
+            ? self.settings.cloudTTSVoice
+            : self.settings.ttsVoiceIdentifier
+        self.activeDrainContext = ActiveDrainContext(
+            generation: generation,
+            engine: initialEngine,
+            usingCloud: initialUsingCloud,
+            preferredVoiceID: initialVoiceID,
+            isPlayingCurrent: false
+        )
+
         drainTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            var targetEngine = self.activeEngine()
-            var usingCloud = targetEngine === self.cloudEngine
-            var preferredVoiceID: String? = usingCloud
-                ? self.settings.cloudTTSVoice
-                : self.settings.ttsVoiceIdentifier
             var consecutiveFailures = 0
 
-            while self.sessionGeneration == generation, !Task.isCancelled, !self.queue.isEmpty {
-                let nextSentence = self.queue.removeFirst()
-                self.currentSpokenSentence = nextSentence
+            while self.sessionGeneration == generation,
+                  !Task.isCancelled,
+                  (self.prefetchedChunk != nil || !self.queue.isEmpty)
+            {
+                let ctx = self.activeDrainContext
+                var targetEngine = ctx?.engine ?? self.activeEngine()
+                var usingCloud = ctx?.usingCloud ?? (targetEngine === self.cloudEngine)
+                var preferredVoiceID = ctx?.preferredVoiceID ?? (usingCloud ? self.settings.cloudTTSVoice : self.settings.ttsVoiceIdentifier)
+                var currentTextToSpeak: String?
+
                 do {
-                    try await targetEngine.speak(
-                        text: nextSentence,
-                        voiceID: preferredVoiceID,
-                        rate: self.settings.ttsSpeechRate
-                    )
+                    if let prefetchEngine = targetEngine as? any PrefetchableTTSEngine {
+                        let nextText: String
+                        let audioData: Data
+                        if let prefetched = self.prefetchedChunk {
+                            self.prefetchedChunk = nil
+                            nextText = prefetched.text
+                            currentTextToSpeak = nextText
+                            self.currentSpokenSentence = nextText
+                            if prefetched.voiceID == preferredVoiceID,
+                               abs(prefetched.rate - self.settings.ttsSpeechRate) < 0.001
+                            {
+                                audioData = try await prefetched.task.value
+                            } else {
+                                prefetched.task.cancel()
+                                audioData = try await prefetchEngine.synthesize(
+                                    text: nextText,
+                                    voiceID: preferredVoiceID,
+                                    rate: self.settings.ttsSpeechRate
+                                )
+                            }
+                        } else {
+                            nextText = self.dequeueNextBatch(maxCharacters: self.effectiveBatchCharacterLimit(for: prefetchEngine))
+                            currentTextToSpeak = nextText
+                            self.currentSpokenSentence = nextText
+                            audioData = try await prefetchEngine.synthesize(
+                                text: nextText,
+                                voiceID: preferredVoiceID,
+                                rate: self.settings.ttsSpeechRate
+                            )
+                        }
+
+                        guard self.sessionGeneration == generation, !Task.isCancelled else { break }
+
+                        self.activeDrainContext?.isPlayingCurrent = true
+                        self.maybeSchedulePrefetch()
+                        defer { self.activeDrainContext?.isPlayingCurrent = false }
+                        try await prefetchEngine.play(synthesizedData: audioData)
+                    } else {
+                        let nextText = self.dequeueNextBatch(maxCharacters: self.effectiveBatchCharacterLimit(for: targetEngine))
+                        currentTextToSpeak = nextText
+                        self.currentSpokenSentence = nextText
+                        try await targetEngine.speak(
+                            text: nextText,
+                            voiceID: preferredVoiceID,
+                            rate: self.settings.ttsSpeechRate
+                        )
+                    }
                     consecutiveFailures = 0
                 } catch is CancellationError {
                     break
                 } catch {
+                    if Task.isCancelled || self.sessionGeneration != generation {
+                        break
+                    }
+                    self.requeuePrefetchAndCancel()
+
                     // Seamless automatic fallback to Apple System Voice if Cloud TTS fails (offline, HTTP error, etc.).
-                    if usingCloud {
+                    if usingCloud, let fallbackText = currentTextToSpeak {
                         usingCloud = false
                         targetEngine = self.engine
                         preferredVoiceID = self.settings.ttsVoiceIdentifier
+                        self.activeDrainContext = ActiveDrainContext(
+                            generation: generation,
+                            engine: targetEngine,
+                            usingCloud: false,
+                            preferredVoiceID: preferredVoiceID,
+                            isPlayingCurrent: false
+                        )
                         do {
                             try await self.engine.speak(
-                                text: nextSentence,
+                                text: fallbackText,
                                 voiceID: preferredVoiceID,
                                 rate: self.settings.ttsSpeechRate
                             )
@@ -252,6 +354,7 @@ public final class StreamingSpeechCoordinator {
                         } catch is CancellationError {
                             break
                         } catch {
+                            guard !Task.isCancelled, self.sessionGeneration == generation else { break }
                             consecutiveFailures += 1
                         }
                     } else {
@@ -261,20 +364,110 @@ public final class StreamingSpeechCoordinator {
                     // Abort draining after 2 consecutive engine failures to prevent wedged loops.
                     if consecutiveFailures >= 2 {
                         self.queue.removeAll(keepingCapacity: false)
+                        self.cancelPrefetch()
                         break
                     }
                 }
             }
 
             guard self.sessionGeneration == generation else { return }
+            let endingEngine = self.activeDrainContext?.engine ?? initialEngine
+            self.cancelPrefetch()
+            self.activeDrainContext = nil
+            self.isCurrentBatchComplete = false
             self.drainTask = nil
             self.isSpeaking = false
             self.speakingMessageID = nil
             self.currentSpokenSentence = ""
             if !self.isVoiceCallActive {
-                targetEngine.endPlaybackSession()
+                endingEngine.endPlaybackSession()
             }
             self.onPlaybackFinished?()
+        }
+    }
+
+    private func effectiveBatchCharacterLimit(for engine: any TTSEngine) -> Int {
+        let base = engine.preferredBatchCharacterLimit
+        guard base > 0 else { return 0 }
+        return isVoiceCallActive ? min(base, voiceCallBatchCharacterLimit) : base
+    }
+
+    private func dequeueNextBatch(maxCharacters: Int) -> String {
+        var batch = queue.removeFirst()
+        guard maxCharacters > 0 else { return batch }
+
+        while let next = queue.first {
+            let separator = Self.joinSeparator(between: batch, and: next)
+            if batch.count + separator.count + next.count <= maxCharacters {
+                queue.removeFirst()
+                batch += separator + next
+            } else {
+                break
+            }
+        }
+        return batch
+    }
+
+    private func queuedCharacterCount() -> Int {
+        queue.reduce(0) { $0 + $1.count }
+    }
+
+    private func maybeSchedulePrefetch() {
+        guard prefetchedChunk == nil,
+              !queue.isEmpty,
+              let ctx = activeDrainContext,
+              ctx.generation == sessionGeneration,
+              ctx.isPlayingCurrent,
+              let prefetchEngine = ctx.engine as? any PrefetchableTTSEngine else {
+            return
+        }
+        guard isCurrentBatchComplete || queuedCharacterCount() >= streamingPrefetchMinCharacters else {
+            return
+        }
+
+        let nextText = dequeueNextBatch(maxCharacters: effectiveBatchCharacterLimit(for: prefetchEngine))
+        let voiceID = ctx.preferredVoiceID
+        let rate = settings.ttsSpeechRate
+        let task = Task<Data, Error> { @MainActor in
+            try await prefetchEngine.synthesize(text: nextText, voiceID: voiceID, rate: rate)
+        }
+        prefetchedChunk = PrefetchedChunk(text: nextText, voiceID: voiceID, rate: rate, task: task)
+    }
+
+    private func cancelPrefetch() {
+        prefetchedChunk?.task.cancel()
+        prefetchedChunk = nil
+    }
+
+    private func requeuePrefetchAndCancel() {
+        guard let prefetched = prefetchedChunk else { return }
+        prefetchedChunk = nil
+        prefetched.task.cancel()
+        queue.insert(prefetched.text, at: 0)
+    }
+
+    private static let terminalOrPausePunctuation: Set<Character> = [
+        "。", "！", "？", "!", "?", "…", "；", ";", "：", ":", "，", ",", ".",
+        "）", ")", "」", "』", "\"", "'", "”", "’", "】", "》"
+    ]
+
+    private static func joinSeparator(between lhs: String, and rhs: String) -> String {
+        guard let last = lhs.last else { return "" }
+        if terminalOrPausePunctuation.contains(last) {
+            if last.isASCII && rhs.first?.isASCII == true {
+                return " "
+            }
+            return ""
+        }
+        return (containsCJK(lhs) || containsCJK(rhs)) ? "。" : ". "
+    }
+
+    private static func containsCJK(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            (0x4E00...0x9FFF).contains(scalar.value)
+                || (0x3400...0x4DBF).contains(scalar.value)
+                || (0x3040...0x30FF).contains(scalar.value)
+                || (0xAC00...0xD7AF).contains(scalar.value)
         }
     }
 }

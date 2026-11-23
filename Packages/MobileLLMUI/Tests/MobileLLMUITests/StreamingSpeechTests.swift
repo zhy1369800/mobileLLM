@@ -63,6 +63,94 @@ private final class MockTTSEngine: TTSEngine {
 }
 
 @MainActor
+private final class MockPrefetchableTTSEngine: PrefetchableTTSEngine {
+    let id = "mock-prefetch-cloud"
+    let displayName = "Mock Prefetch Cloud"
+    private(set) var isSpeaking = false
+    var isReady = true
+    var preservesExternalAudioSession = false
+    var onExternalInterruption: (@MainActor @Sendable () -> Void)?
+    var preferredBatchCharacterLimit: Int
+
+    private(set) var synthesizedSegments: [String] = []
+    private(set) var playedSegments: [String] = []
+    private(set) var cancelledSynthesizeCount = 0
+
+    var failSynthesizeAtCallIndex: Int?
+    var hangPlayOnCallIndex: Int?
+    var hangSynthesizeOnCallIndex: Int?
+
+    private var playContinuation: CheckedContinuation<Void, Error>?
+    private var synthesizeContinuation: CheckedContinuation<Data, Error>?
+
+    init(preferredBatchCharacterLimit: Int = 280) {
+        self.preferredBatchCharacterLimit = preferredBatchCharacterLimit
+    }
+
+    func availableVoices() -> [TTSVoiceInfo] { [] }
+
+    func synthesize(text: String, voiceID: String?, rate: Double) async throws -> Data {
+        synthesizedSegments.append(text)
+        let callIndex = synthesizedSegments.count
+        if failSynthesizeAtCallIndex == callIndex {
+            throw NSError(domain: "MockPrefetch", code: 500, userInfo: [NSLocalizedDescriptionKey: "Synthetic prefetch failure"])
+        }
+        if hangSynthesizeOnCallIndex == callIndex {
+            return try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { cont in
+                    self.synthesizeContinuation = cont
+                }
+            } onCancel: {
+                Task { @MainActor [weak self] in
+                    self?.cancelledSynthesizeCount += 1
+                    let cont = self?.synthesizeContinuation
+                    self?.synthesizeContinuation = nil
+                    cont?.resume(throwing: CancellationError())
+                }
+            }
+        }
+        return Data(text.utf8)
+    }
+
+    func play(synthesizedData data: Data) async throws {
+        let text = String(decoding: data, as: UTF8.self)
+        let callIndex = playedSegments.count + 1
+        playedSegments.append(text)
+        guard hangPlayOnCallIndex == callIndex else { return }
+
+        isSpeaking = true
+        defer { isSpeaking = false }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { cont in
+                self.playContinuation = cont
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.stop()
+            }
+        }
+    }
+
+    func resumePendingPlay() {
+        let cont = playContinuation
+        playContinuation = nil
+        cont?.resume(returning: ())
+    }
+
+    func speak(text: String, voiceID: String?, rate: Double) async throws {
+        let data = try await synthesize(text: text, voiceID: voiceID, rate: rate)
+        try await play(synthesizedData: data)
+    }
+
+    func stop() {
+        isSpeaking = false
+        let playCont = playContinuation
+        playContinuation = nil
+        playCont?.resume(throwing: CancellationError())
+    }
+}
+
+@MainActor
 final class StreamingSpeechTests: XCTestCase {
 
     private func makeSettings(autoSpeak: Bool = true) -> AppSettings {
@@ -355,5 +443,105 @@ final class StreamingSpeechTests: XCTestCase {
 
         coordinator.isVoiceCallActive = false
         XCTAssertFalse(engine.preservesExternalAudioSession)
+    }
+
+    func testBatchCoalescingJoinsShortSentencesAndInsertsPunctuationForHeadings() async {
+        let settings = makeSettings(autoSpeak: false)
+        settings.ttsEngineKind = .cloudOpenAI
+        let cloudEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 280)
+        let coordinator = StreamingSpeechCoordinator(
+            engine: MockTTSEngine(),
+            cloudEngine: cloudEngine,
+            settings: settings
+        )
+
+        coordinator.speakMessage(text: "## 核心能力\n第一句。\n第二句！", messageID: UUID())
+        for _ in 0..<15 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(cloudEngine.synthesizedSegments, ["核心能力。第一句。第二句！"])
+        XCTAssertEqual(cloudEngine.playedSegments, ["核心能力。第一句。第二句！"])
+    }
+
+    func testPrefetchableEngineSynthesizesNextChunkWhileCurrentPlays() async {
+        let settings = makeSettings(autoSpeak: false)
+        settings.ttsEngineKind = .cloudOpenAI
+        let cloudEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 15)
+        cloudEngine.hangPlayOnCallIndex = 1
+        let coordinator = StreamingSpeechCoordinator(
+            engine: MockTTSEngine(),
+            cloudEngine: cloudEngine,
+            settings: settings
+        )
+
+        coordinator.speakMessage(text: "第一段内容需要足够长一点才行。第二段紧接着自动开始。", messageID: UUID())
+        for _ in 0..<10 where cloudEngine.synthesizedSegments.count < 2 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(cloudEngine.synthesizedSegments, ["第一段内容需要足够长一点才行。", "第二段紧接着自动开始。"])
+        XCTAssertEqual(cloudEngine.playedSegments, ["第一段内容需要足够长一点才行。"])
+
+        cloudEngine.resumePendingPlay()
+        for _ in 0..<15 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(cloudEngine.playedSegments, ["第一段内容需要足够长一点才行。", "第二段紧接着自动开始。"])
+        XCTAssertFalse(coordinator.isSpeaking)
+    }
+
+    func testStopCancelsInFlightPrefetchTask() async {
+        let settings = makeSettings(autoSpeak: false)
+        settings.ttsEngineKind = .cloudOpenAI
+        let cloudEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 15)
+        cloudEngine.hangPlayOnCallIndex = 1
+        cloudEngine.hangSynthesizeOnCallIndex = 2
+        let coordinator = StreamingSpeechCoordinator(
+            engine: MockTTSEngine(),
+            cloudEngine: cloudEngine,
+            settings: settings
+        )
+
+        coordinator.speakMessage(text: "第一段内容需要足够长一点才行。第二段合成将被立即取消。", messageID: UUID())
+        for _ in 0..<10 where cloudEngine.synthesizedSegments.count < 2 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(cloudEngine.playedSegments, ["第一段内容需要足够长一点才行。"])
+        coordinator.stop(suppressCurrentTurn: true)
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(cloudEngine.cancelledSynthesizeCount, 1)
+        XCTAssertEqual(cloudEngine.playedSegments, ["第一段内容需要足够长一点才行。"])
+        XCTAssertFalse(coordinator.isSpeaking)
+    }
+
+    func testPrefetchFailureFallsBackSeamlesslyToAppleEngine() async {
+        let settings = makeSettings(autoSpeak: false)
+        settings.ttsEngineKind = .cloudOpenAI
+        let appleEngine = MockTTSEngine()
+        let cloudEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 15)
+        cloudEngine.failSynthesizeAtCallIndex = 2
+        let coordinator = StreamingSpeechCoordinator(
+            engine: appleEngine,
+            cloudEngine: cloudEngine,
+            settings: settings
+        )
+
+        coordinator.speakMessage(
+            text: "第一段云端内容正常播放完毕。第二段云端预取网络突然失败。第三段苹果系统语音无缝继续。",
+            messageID: UUID()
+        )
+        for _ in 0..<25 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(cloudEngine.playedSegments, ["第一段云端内容正常播放完毕。"])
+        XCTAssertEqual(appleEngine.spokenSegments, ["第二段云端预取网络突然失败。", "第三段苹果系统语音无缝继续。"])
+        XCTAssertFalse(coordinator.isSpeaking)
     }
 }

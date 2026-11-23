@@ -60,6 +60,9 @@ public protocol TTSEngine: AnyObject {
     var preservesExternalAudioSession: Bool { get set }
     /// Optional external audio engine sink for hardware-AEC-aligned playback during voice calls.
     var externalOutputSink: (any VoiceAudioOutputSink)? { get set }
+    /// Maximum character budget for coalescing consecutive queued sentences into one utterance.
+    /// `0` keeps strict one-sentence-per-call delivery.
+    var preferredBatchCharacterLimit: Int { get }
 
     /// Lists voices supported by this engine.
     func availableVoices() -> [TTSVoiceInfo]
@@ -88,6 +91,15 @@ public extension TTSEngine {
         get { nil }
         set {}
     }
+    var preferredBatchCharacterLimit: Int { 0 }
     func endPlaybackSession() {}
     func prewarm() {}
+}
+
+/// Optional capability for remote/neural TTS engines that can synthesize audio data ahead of
+/// playback so the next chunk is ready before the current utterance ends.
+@MainActor
+public protocol PrefetchableTTSEngine: TTSEngine {
+    func synthesize(text: String, voiceID: String?, rate: Double) async throws -> Data
+    func play(synthesizedData data: Data) async throws
 }

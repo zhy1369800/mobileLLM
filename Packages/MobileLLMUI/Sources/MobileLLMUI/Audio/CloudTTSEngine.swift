@@ -21,7 +21,7 @@ public struct CloudTTSConfiguration: Sendable, Equatable {
 /// Remote TTS engine backed by OpenAI-compatible `/v1/audio/speech` endpoints.
 /// Uses `URLSession` + `AVAudioPlayer`, adding zero binary size or local RAM overhead.
 @MainActor
-public final class CloudTTSEngine: TTSEngine {
+public final class CloudTTSEngine: PrefetchableTTSEngine {
     public enum CloudTTSError: LocalizedError {
         case notConfigured
         case invalidURL
@@ -54,6 +54,7 @@ public final class CloudTTSEngine: TTSEngine {
     public var onExternalInterruption: (@MainActor @Sendable () -> Void)?
     public var preservesExternalAudioSession: Bool = false
     public var externalOutputSink: (any VoiceAudioOutputSink)?
+    public var preferredBatchCharacterLimit: Int { 280 }
 
     public var isReady: Bool {
         guard let config = configurationProvider() else { return false }
@@ -87,8 +88,8 @@ public final class CloudTTSEngine: TTSEngine {
             self.session = session
         } else {
             let config = URLSessionConfiguration.default
-            config.timeoutIntervalForRequest = 8
-            config.timeoutIntervalForResource = 20
+            config.timeoutIntervalForRequest = 15
+            config.timeoutIntervalForResource = 45
             self.session = URLSession(configuration: config)
         }
         self.configurationProvider = configurationProvider
@@ -136,8 +137,14 @@ public final class CloudTTSEngine: TTSEngine {
     }
 
     public func speak(text: String, voiceID: String?, rate: Double) async throws {
+        let data = try await synthesize(text: text, voiceID: voiceID, rate: rate)
+        guard !data.isEmpty else { return }
+        try await play(synthesizedData: data)
+    }
+
+    public func synthesize(text: String, voiceID: String?, rate: Double) async throws -> Data {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty else { return Data() }
         try Task.checkCancellation()
 
         guard let config = configurationProvider(),
@@ -147,14 +154,6 @@ public final class CloudTTSEngine: TTSEngine {
         guard let endpoint = Self.speechEndpoint(from: config.baseURL) else {
             throw CloudTTSError.invalidURL
         }
-
-        if isSpeaking || activeContinuation != nil {
-            stop()
-        }
-
-        nextPlaybackToken &+= 1
-        let token = nextPlaybackToken
-        activePlaybackToken = token
 
         let effectiveVoice: String
         if let voiceID, !voiceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -182,24 +181,39 @@ public final class CloudTTSEngine: TTSEngine {
 
         let (data, response) = try await session.data(for: request)
         try Task.checkCancellation()
-        guard activePlaybackToken == token else {
-            throw CancellationError()
-        }
 
         if let httpResponse = response as? HTTPURLResponse, !(200..<300).contains(httpResponse.statusCode) {
             let snippet = String(data: data.prefix(200), encoding: .utf8)
-            activePlaybackToken = nil
             throw CloudTTSError.httpError(statusCode: httpResponse.statusCode, message: snippet)
         }
 
         guard !data.isEmpty else {
-            activePlaybackToken = nil
             throw CloudTTSError.emptyAudio
         }
 
+        return data
+    }
+
+    public func play(synthesizedData data: Data) async throws {
+        guard !data.isEmpty else { return }
+        try Task.checkCancellation()
+
+        if isSpeaking || activeContinuation != nil {
+            stop()
+        }
+
+        nextPlaybackToken &+= 1
+        let token = nextPlaybackToken
+        activePlaybackToken = token
+
         if let sink = externalOutputSink {
             isSpeaking = true
-            defer { isSpeaking = false }
+            defer {
+                isSpeaking = false
+                if activePlaybackToken == token {
+                    activePlaybackToken = nil
+                }
+            }
             try await withTaskCancellationHandler {
                 try await sink.playEncodedAudio(data)
             } onCancel: {
