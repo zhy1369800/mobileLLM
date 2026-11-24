@@ -131,6 +131,11 @@ public struct RootView: View {
         )
     }
 
+    private enum ChatRoute: Hashable {
+        case thread
+        case voice
+    }
+
     private var tabShell: some View {
         // `selection` intercepts `.voice` taps to push natively onto the Chat NavigationStack,
         // matching `ChatDetailView`'s native swipe-back and tab-bar hiding behavior.
@@ -142,15 +147,17 @@ public struct RootView: View {
                     agentRuns: container.agentRuns
                 )
                     .navigationTitle("Chat")
-                    .navigationDestination(isPresented: hasActive) {
-                        ChatDetailView(container: container, onOpenModels: { section = .models })
-                    }
-                    .navigationDestination(isPresented: $showVoiceChat) {
-                        VoiceChatView(container: container, onOpenModels: {
-                            showVoiceChat = false
-                            container.chat.activeID = nil
-                            section = .models
-                        })
+                    .navigationDestination(item: chatRoute) { route in
+                        switch route {
+                        case .thread:
+                            ChatDetailView(container: container, onOpenModels: { section = .models })
+                        case .voice:
+                            VoiceChatView(container: container, onOpenModels: {
+                                showVoiceChat = false
+                                container.chat.activeID = nil
+                                section = .models
+                            })
+                        }
                     }
                     .toolbar {
                         ToolbarItem(placement: .primaryAction) {
@@ -191,10 +198,28 @@ public struct RootView: View {
         }
     }
 
-    /// Drives the push to the thread when a conversation is active (suppressed while Voice Chat is pushed).
-    private var hasActive: Binding<Bool> {
-        Binding(get: { !showVoiceChat && container.chat.activeID != nil },
-                set: { if !$0 { container.chat.activeID = nil } })
+    /// Single push destination for the compact Chat `NavigationStack` (thread vs. voice chat).
+    private var chatRoute: Binding<ChatRoute?> {
+        Binding(
+            get: {
+                if showVoiceChat { return .voice }
+                if container.chat.activeID != nil { return .thread }
+                return nil
+            },
+            set: { route in
+                switch route {
+                case .voice:
+                    showVoiceChat = true
+                case .thread:
+                    showVoiceChat = false
+                case nil:
+                    if showVoiceChat {
+                        showVoiceChat = false
+                    }
+                    container.chat.activeID = nil
+                }
+            }
+        )
     }
     #endif
 

@@ -22,8 +22,17 @@ struct SettingsView: View {
     @State private var showShortcuts = false
     @State private var showLocalLogs = false
     @State private var isAdvancedExpanded = false
+    private enum FocusField: Hashable {
+        case bargeInKeywords
+        case cloudTTSBaseURL
+        case cloudTTSAPIKey
+        case cloudTTSModel
+        case cloudTTSVoice
+    }
+
     @State private var availableVoices: [TTSVoiceInfo] = []
     @State private var cloudTTSAPIKey: String = ""
+    @FocusState private var focusedField: FocusField?
 
     init(container: AppContainer) {
         self.container = container
@@ -46,7 +55,19 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity)
             .padding(Theme.Space.xl)
         }
+        .scrollDismissesKeyboard(.interactively)
         .background(Theme.bg)
+        #if os(iOS)
+        .toolbar {
+            if focusedField != nil {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        focusedField = nil
+                    }
+                }
+            }
+        }
+        #endif
         .task {
             if container.speech.engine is AppleSystemTTSEngine {
                 availableVoices = await Task.detached(priority: .utility) {
@@ -373,6 +394,9 @@ struct SettingsView: View {
                         .textInputAutocapitalization(.never)
                         #endif
                         .autocorrectionDisabled()
+                        .focused($focusedField, equals: .bargeInKeywords)
+                        .submitLabel(.done)
+                        .onSubmit { focusedField = nil }
                         .onChange(of: settings.voiceBargeInKeywords) { _, _ in
                             container.voiceChat.refreshBargeInSettings()
                         }
@@ -424,6 +448,9 @@ struct SettingsView: View {
                     .keyboardType(.URL)
                     #endif
                     .autocorrectionDisabled()
+                    .focused($focusedField, equals: .cloudTTSBaseURL)
+                    .submitLabel(.done)
+                    .onSubmit { focusedField = nil }
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -435,6 +462,9 @@ struct SettingsView: View {
                     .textInputAutocapitalization(.never)
                     #endif
                     .autocorrectionDisabled()
+                    .focused($focusedField, equals: .cloudTTSAPIKey)
+                    .submitLabel(.done)
+                    .onSubmit { focusedField = nil }
                     .onChange(of: cloudTTSAPIKey) { _, newValue in
                         if newValue != container.cloudTTSAPIKey() {
                             container.saveCloudTTSAPIKey(newValue)
@@ -463,6 +493,9 @@ struct SettingsView: View {
                     .textInputAutocapitalization(.never)
                     #endif
                     .autocorrectionDisabled()
+                    .focused($focusedField, equals: .cloudTTSModel)
+                    .submitLabel(.done)
+                    .onSubmit { focusedField = nil }
             }
 
             VStack(alignment: .leading, spacing: 4) {
@@ -496,6 +529,9 @@ struct SettingsView: View {
                     .textInputAutocapitalization(.never)
                     #endif
                     .autocorrectionDisabled()
+                    .focused($focusedField, equals: .cloudTTSVoice)
+                    .submitLabel(.done)
+                    .onSubmit { focusedField = nil }
             }
         }
     }
