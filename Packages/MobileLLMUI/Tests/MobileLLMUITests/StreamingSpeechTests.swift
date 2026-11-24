@@ -11,6 +11,7 @@ private final class MockTTSEngine: TTSEngine {
     var isReady = true
     var preservesExternalAudioSession = false
     var onExternalInterruption: (@MainActor @Sendable () -> Void)?
+    var preferredBatchCharacterLimit: Int = 0
     private(set) var spokenSegments: [String] = []
     private(set) var lastVoiceID: String?
     private(set) var stopCount = 0
@@ -542,6 +543,80 @@ final class StreamingSpeechTests: XCTestCase {
 
         XCTAssertEqual(cloudEngine.playedSegments, ["第一段云端内容正常播放完毕。"])
         XCTAssertEqual(appleEngine.spokenSegments, ["第二段云端预取网络突然失败。", "第三段苹果系统语音无缝继续。"])
+        XCTAssertFalse(coordinator.isSpeaking)
+    }
+
+    func testAppleAutoVoicePreservesScriptBoundariesWhileCoalescingSameScript() async {
+        let settings = makeSettings(autoSpeak: false)
+        settings.ttsVoiceIdentifier = nil
+
+        let appleEngine = MockTTSEngine()
+        appleEngine.preferredBatchCharacterLimit = 180
+        let coordinator = StreamingSpeechCoordinator(engine: appleEngine, settings: settings)
+
+        // 1. Auto-voice: bilingual text must not coalesce across Chinese/English script boundaries.
+        coordinator.speakMessage(
+            text: "这句话翻译成英文是：\nThe quick brown fox.\n谢谢！",
+            messageID: UUID()
+        )
+        for _ in 0..<20 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(
+            appleEngine.spokenSegments,
+            ["这句话翻译成英文是：", "The quick brown fox.", "谢谢！"]
+        )
+
+        // 2. Auto-voice: monolingual Chinese sentences still coalesce into one utterance.
+        let monoEngine = MockTTSEngine()
+        monoEngine.preferredBatchCharacterLimit = 180
+        let monoCoordinator = StreamingSpeechCoordinator(engine: monoEngine, settings: settings)
+        monoCoordinator.speakMessage(text: "## 核心能力\n第一句。\n第二句！", messageID: UUID())
+        for _ in 0..<15 where monoCoordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(monoEngine.spokenSegments, ["核心能力。第一句。第二句！"])
+
+        // 3. Explicit fixed voice: script splitting is skipped so short turns still batch together.
+        settings.ttsVoiceIdentifier = "voice-zh"
+        let fixedEngine = MockTTSEngine()
+        fixedEngine.preferredBatchCharacterLimit = 180
+        let fixedCoordinator = StreamingSpeechCoordinator(engine: fixedEngine, settings: settings)
+        fixedCoordinator.speakMessage(
+            text: "这句话翻译成英文是：\nThe quick brown fox.\n谢谢！",
+            messageID: UUID()
+        )
+        for _ in 0..<15 where fixedCoordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(fixedEngine.spokenSegments, ["这句话翻译成英文是：The quick brown fox.谢谢！"])
+    }
+
+    func testVoiceCallBatchLimitFitsLiveActivitySubtitleBudget() async {
+        let settings = makeSettings(autoSpeak: false)
+        settings.ttsEngineKind = .cloudOpenAI
+        let cloudEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 280)
+        let coordinator = StreamingSpeechCoordinator(
+            engine: MockTTSEngine(),
+            cloudEngine: cloudEngine,
+            settings: settings
+        )
+        coordinator.isVoiceCallActive = true
+
+        let sentence1 = String(repeating: "测", count: 59) + "。"
+        let sentence2 = String(repeating: "试", count: 59) + "。"
+        let msgID = UUID()
+
+        coordinator.resetForNewTurn(messageID: msgID)
+        coordinator.feed(delta: sentence1 + sentence2, messageID: msgID)
+        coordinator.finish(fullText: nil, messageID: msgID)
+
+        for _ in 0..<20 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(cloudEngine.synthesizedSegments.count, 2)
+        XCTAssertTrue(cloudEngine.synthesizedSegments.allSatisfy { $0.count <= 100 })
         XCTAssertFalse(coordinator.isSpeaking)
     }
 }

@@ -15,7 +15,7 @@ public final class AppleSystemTTSEngine: TTSEngine {
     public var onExternalInterruption: (@MainActor @Sendable () -> Void)?
     public var preservesExternalAudioSession: Bool = false
     public var externalOutputSink: (any VoiceAudioOutputSink)?
-    public var preferredBatchCharacterLimit: Int { 280 }
+    public var preferredBatchCharacterLimit: Int { 180 }
 
     private var synthesizer: AVSpeechSynthesizer?
     private let delegateProxy = DelegateProxy()

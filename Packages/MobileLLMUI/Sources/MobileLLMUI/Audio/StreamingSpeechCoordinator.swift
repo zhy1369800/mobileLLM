@@ -60,8 +60,15 @@ public final class StreamingSpeechCoordinator {
         let generation: UInt64
         var engine: any TTSEngine
         var usingCloud: Bool
-        var preferredVoiceID: String?
         var isPlayingCurrent: Bool
+    }
+
+    private enum SpeechScript {
+        case han
+        case japanese
+        case korean
+        case otherLetter
+        case neutral
     }
 
     @ObservationIgnored private var segmenter = SentenceSegmenter()
@@ -74,8 +81,9 @@ public final class StreamingSpeechCoordinator {
     @ObservationIgnored private var activeDrainContext: ActiveDrainContext?
     @ObservationIgnored private var isCurrentBatchComplete: Bool = false
 
-    private let voiceCallBatchCharacterLimit = 140
+    private let voiceCallBatchCharacterLimit = 100
     private let streamingPrefetchMinCharacters = 80
+    private let voiceCallStreamingPrefetchMinCharacters = 60
 
     public init(
         engine: (any TTSEngine)? = nil,
@@ -249,14 +257,10 @@ public final class StreamingSpeechCoordinator {
 
         let initialEngine = self.activeEngine()
         let initialUsingCloud = initialEngine === self.cloudEngine
-        let initialVoiceID: String? = initialUsingCloud
-            ? self.settings.cloudTTSVoice
-            : self.settings.ttsVoiceIdentifier
         self.activeDrainContext = ActiveDrainContext(
             generation: generation,
             engine: initialEngine,
             usingCloud: initialUsingCloud,
-            preferredVoiceID: initialVoiceID,
             isPlayingCurrent: false
         )
 
@@ -271,7 +275,8 @@ public final class StreamingSpeechCoordinator {
                 let ctx = self.activeDrainContext
                 var targetEngine = ctx?.engine ?? self.activeEngine()
                 var usingCloud = ctx?.usingCloud ?? (targetEngine === self.cloudEngine)
-                var preferredVoiceID = ctx?.preferredVoiceID ?? (usingCloud ? self.settings.cloudTTSVoice : self.settings.ttsVoiceIdentifier)
+                var preferredVoiceID = self.currentPreferredVoiceID(usingCloud: usingCloud)
+                let splitScripts = self.shouldSplitScripts(usingCloud: usingCloud, preferredVoiceID: preferredVoiceID)
                 var currentTextToSpeak: String?
 
                 do {
@@ -296,7 +301,10 @@ public final class StreamingSpeechCoordinator {
                                 )
                             }
                         } else {
-                            nextText = self.dequeueNextBatch(maxCharacters: self.effectiveBatchCharacterLimit(for: prefetchEngine))
+                            nextText = self.dequeueNextBatch(
+                                maxCharacters: self.effectiveBatchCharacterLimit(for: prefetchEngine),
+                                splitOnScriptChange: splitScripts
+                            )
                             currentTextToSpeak = nextText
                             self.currentSpokenSentence = nextText
                             audioData = try await prefetchEngine.synthesize(
@@ -313,7 +321,10 @@ public final class StreamingSpeechCoordinator {
                         defer { self.activeDrainContext?.isPlayingCurrent = false }
                         try await prefetchEngine.play(synthesizedData: audioData)
                     } else {
-                        let nextText = self.dequeueNextBatch(maxCharacters: self.effectiveBatchCharacterLimit(for: targetEngine))
+                        let nextText = self.dequeueNextBatch(
+                            maxCharacters: self.effectiveBatchCharacterLimit(for: targetEngine),
+                            splitOnScriptChange: splitScripts
+                        )
                         currentTextToSpeak = nextText
                         self.currentSpokenSentence = nextText
                         try await targetEngine.speak(
@@ -335,12 +346,11 @@ public final class StreamingSpeechCoordinator {
                     if usingCloud, let fallbackText = currentTextToSpeak {
                         usingCloud = false
                         targetEngine = self.engine
-                        preferredVoiceID = self.settings.ttsVoiceIdentifier
+                        preferredVoiceID = self.currentPreferredVoiceID(usingCloud: false)
                         self.activeDrainContext = ActiveDrainContext(
                             generation: generation,
                             engine: targetEngine,
                             usingCloud: false,
-                            preferredVoiceID: preferredVoiceID,
                             isPlayingCurrent: false
                         )
                         do {
@@ -386,17 +396,35 @@ public final class StreamingSpeechCoordinator {
         }
     }
 
+    private func currentPreferredVoiceID(usingCloud: Bool) -> String? {
+        usingCloud ? settings.cloudTTSVoice : settings.ttsVoiceIdentifier
+    }
+
+    private func shouldSplitScripts(usingCloud: Bool, preferredVoiceID: String?) -> Bool {
+        !usingCloud && (preferredVoiceID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    }
+
     private func effectiveBatchCharacterLimit(for engine: any TTSEngine) -> Int {
         let base = engine.preferredBatchCharacterLimit
         guard base > 0 else { return 0 }
         return isVoiceCallActive ? min(base, voiceCallBatchCharacterLimit) : base
     }
 
-    private func dequeueNextBatch(maxCharacters: Int) -> String {
+    private func dequeueNextBatch(maxCharacters: Int, splitOnScriptChange: Bool = false) -> String {
         var batch = queue.removeFirst()
         guard maxCharacters > 0 else { return batch }
 
+        var batchScript = splitOnScriptChange ? Self.dominantScript(of: batch) : .neutral
         while let next = queue.first {
+            if splitOnScriptChange {
+                let nextScript = Self.dominantScript(of: next)
+                if batchScript != .neutral && nextScript != .neutral && batchScript != nextScript {
+                    break
+                }
+                if batchScript == .neutral {
+                    batchScript = nextScript
+                }
+            }
             let separator = Self.joinSeparator(between: batch, and: next)
             if batch.count + separator.count + next.count <= maxCharacters {
                 queue.removeFirst()
@@ -421,12 +449,19 @@ public final class StreamingSpeechCoordinator {
               let prefetchEngine = ctx.engine as? any PrefetchableTTSEngine else {
             return
         }
-        guard isCurrentBatchComplete || queuedCharacterCount() >= streamingPrefetchMinCharacters else {
+        let minPrefetchChars = isVoiceCallActive
+            ? voiceCallStreamingPrefetchMinCharacters
+            : streamingPrefetchMinCharacters
+        guard isCurrentBatchComplete || queuedCharacterCount() >= minPrefetchChars else {
             return
         }
 
-        let nextText = dequeueNextBatch(maxCharacters: effectiveBatchCharacterLimit(for: prefetchEngine))
-        let voiceID = ctx.preferredVoiceID
+        let voiceID = currentPreferredVoiceID(usingCloud: ctx.usingCloud)
+        let splitScripts = shouldSplitScripts(usingCloud: ctx.usingCloud, preferredVoiceID: voiceID)
+        let nextText = dequeueNextBatch(
+            maxCharacters: effectiveBatchCharacterLimit(for: prefetchEngine),
+            splitOnScriptChange: splitScripts
+        )
         let rate = settings.ttsSpeechRate
         let task = Task<Data, Error> { @MainActor in
             try await prefetchEngine.synthesize(text: nextText, voiceID: voiceID, rate: rate)
@@ -469,5 +504,36 @@ public final class StreamingSpeechCoordinator {
                 || (0x3040...0x30FF).contains(scalar.value)
                 || (0xAC00...0xD7AF).contains(scalar.value)
         }
+    }
+
+    private static func dominantScript(of text: String) -> SpeechScript {
+        var hanCount = 0
+        var japaneseCount = 0
+        var koreanCount = 0
+        var otherCount = 0
+
+        for scalar in text.unicodeScalars {
+            let v = scalar.value
+            if (0x3040...0x30FF).contains(v) {
+                japaneseCount += 1
+            } else if (0xAC00...0xD7AF).contains(v) {
+                koreanCount += 1
+            } else if (0x4E00...0x9FFF).contains(v) || (0x3400...0x4DBF).contains(v) {
+                hanCount += 1
+            } else if scalar.properties.isAlphabetic {
+                otherCount += 1
+            }
+        }
+
+        if japaneseCount > 0 {
+            return .japanese
+        }
+        if koreanCount > 0 {
+            return .korean
+        }
+        if hanCount == 0 && otherCount == 0 {
+            return .neutral
+        }
+        return hanCount >= otherCount ? .han : .otherLetter
     }
 }
