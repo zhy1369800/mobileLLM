@@ -198,6 +198,15 @@ public final class AppSettings {
     public var cloudTTSModel: String { didSet { persist() } }
     /// Voice identifier for Cloud TTS (e.g. `alloy`, `nova`, or provider-specific voice ID).
     public var cloudTTSVoice: String { didSet { persist() } }
+    /// Voice call barge-in mode (free voice interruption vs. keyword verification / manual only).
+    public var voiceBargeInMode: VoiceBargeInMode { didSet { persist() } }
+    /// Comma-separated keywords required to interrupt TTS when `voiceBargeInMode == .keyword`.
+    /// Empty string disables automatic voice barge-in (manual tap-to-interrupt only).
+    public var voiceBargeInKeywords: String { didSet { persist() } }
+
+    public var parsedVoiceBargeInKeywords: [String] {
+        VoiceBargeInKeywordMatcher.parseKeywords(voiceBargeInKeywords)
+    }
 
     public nonisolated static let cloudTTSKeychainServiceID = "mobilellm.cloud-tts"
     /// Remote MCP servers whose tools join the agent's tool set when tools are on. Bearer tokens are kept
@@ -543,6 +552,8 @@ public final class AppSettings {
         cloudTTSBaseURL = snap?.cloudTTSBaseURL ?? "https://api.openai.com/v1"
         cloudTTSModel = snap?.cloudTTSModel ?? "tts-1"
         cloudTTSVoice = snap?.cloudTTSVoice ?? "alloy"
+        voiceBargeInMode = snap?.voiceBargeInMode ?? .free
+        voiceBargeInKeywords = snap?.voiceBargeInKeywords ?? ""
         let (servers, migrated) = Self.loadMCPServers(from: snap, keychain: keychain)
         mcpServers = servers
         // Absent in pre-D2 snapshots → the default disabled set (privacy tools off), matching
@@ -766,6 +777,8 @@ public final class AppSettings {
         var cloudTTSBaseURL: String? = nil
         var cloudTTSModel: String? = nil
         var cloudTTSVoice: String? = nil
+        var voiceBargeInMode: VoiceBargeInMode? = nil
+        var voiceBargeInKeywords: String? = nil
         var mcpServers: [MCPServer]? = []
         /// Ids of servers whose bearer token lives in the Keychain (A2.9). Absent in pre-migration
         /// snapshots — the loader then treats any inline `token` as legacy plaintext to migrate.
@@ -832,6 +845,8 @@ public final class AppSettings {
                             cloudTTSBaseURL: cloudTTSBaseURL,
                             cloudTTSModel: cloudTTSModel,
                             cloudTTSVoice: cloudTTSVoice,
+                            voiceBargeInMode: voiceBargeInMode,
+                            voiceBargeInKeywords: voiceBargeInKeywords,
                             mcpServers: scrubbed, mcpTokenMarkers: markers,
                             disabledBuiltInTools: disabledBuiltInTools, searchEngines: searchEngines,
                             webSearchOnlineServiceID: webSearchOnlineServiceID,
@@ -892,6 +907,8 @@ public final class AppSettings {
         autoCompactionEnabled = false
         compactionModelTarget = .followCurrent
         dictationLocale = nil
+        voiceBargeInMode = .free
+        voiceBargeInKeywords = ""
         mcpServers = []
         onlineServices = []
         shortcutsServices = [ShortcutsService(name: "豆包", shortcutName: "发消息问豆包", isEnabled: false)]

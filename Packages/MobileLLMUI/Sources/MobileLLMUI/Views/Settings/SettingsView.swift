@@ -268,6 +268,8 @@ struct SettingsView: View {
             hairline
             sliderRow("Speech rate", value: $settings.ttsSpeechRate, range: 0.5...2.0, step: 0.1, format: "%.1fx")
             hairline
+            voiceBargeInSettingsRows
+            hairline
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Preview voice")
@@ -304,6 +306,82 @@ struct SettingsView: View {
         }
         .onAppear {
             cloudTTSAPIKey = container.cloudTTSAPIKey()
+        }
+    }
+
+    private var voiceBargeInSettingsRows: some View {
+        let parsedKeywords = settings.parsedVoiceBargeInKeywords
+
+        return VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Voice call barge-in")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textSecondary)
+                Segmented(selection: $settings.voiceBargeInMode, options: VoiceBargeInMode.allCases) {
+                    $0.displayName
+                }
+                .onChange(of: settings.voiceBargeInMode) { _, _ in
+                    container.voiceChat.refreshBargeInSettings()
+                }
+            }
+
+            Group {
+                switch settings.voiceBargeInMode {
+                case .free:
+                    Text("Interrupt automatically when you speak during playback.")
+                case .keyword:
+                    if parsedKeywords.isEmpty {
+                        Text("No keywords configured — manual tap-to-interrupt only.")
+                    } else {
+                        Text("Interrupt only when a preset keyword is spoken, or tap the orb.")
+                    }
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(Theme.textTertiary)
+
+            if settings.voiceBargeInMode == .keyword {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Keywords (comma-separated)")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textTertiary)
+                        Spacer()
+                        Menu {
+                            Button("停一下,等等,打断") { settings.voiceBargeInKeywords = "停一下,等等,打断" }
+                            Button("停,别说了,换个话题") { settings.voiceBargeInKeywords = "停,别说了,换个话题" }
+                            Button("stop,wait,hold on") { settings.voiceBargeInKeywords = "stop,wait,hold on" }
+                            Divider()
+                            Button("Clear (manual tap only)") { settings.voiceBargeInKeywords = "" }
+                        } label: {
+                            Text("Presets")
+                                .font(.caption)
+                                .foregroundStyle(Theme.accent)
+                        }
+                    }
+
+                    TextField("e.g. 停一下,等等,stop", text: $settings.voiceBargeInKeywords)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.subheadline)
+                        #if os(iOS)
+                        .textInputAutocapitalization(.never)
+                        #endif
+                        .autocorrectionDisabled()
+                        .onChange(of: settings.voiceBargeInKeywords) { _, _ in
+                            container.voiceChat.refreshBargeInSettings()
+                        }
+
+                    if parsedKeywords.isEmpty {
+                        Text("Leave blank to allow manual tap-to-interrupt only.")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textTertiary)
+                    } else {
+                        Text("Active (\(parsedKeywords.count)): \(parsedKeywords.joined(separator: " · "))")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                }
+            }
         }
     }
 

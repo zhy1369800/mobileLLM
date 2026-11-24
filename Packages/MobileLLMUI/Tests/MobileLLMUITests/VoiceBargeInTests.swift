@@ -293,4 +293,152 @@ final class VoiceBargeInTests: XCTestCase {
         XCTAssertEqual(appleEngine.spokenSegments, ["Chat reply."])
         XCTAssertGreaterThan(appleEngine.endSessionCount, 0)
     }
+
+    func testKeywordModeEmitsBeginKeywordVerificationInsteadOfImmediateInterrupt() {
+        var detector = VoiceBargeInDetector(
+            config: VoiceBargeInConfig.speakerWithHardwareAEC.withKeywordVerification(true)
+        )
+        detector.setSpeaking(true)
+
+        _ = feedFrames(&detector, count: 65, micLevel: 0.20, farEndLevel: 0.65)
+
+        let stage1 = feedFrames(&detector, count: 6, micLevel: 0.62, farEndLevel: 0.65)
+        XCTAssertEqual(stage1.last, .duckPlayback)
+        XCTAssertTrue(detector.isVerifying)
+
+        let stage2 = feedFrames(&detector, count: 8, micLevel: 0.50, farEndLevel: 0.05)
+        XCTAssertEqual(stage2.dropLast().allSatisfy { $0 == .none }, true)
+        XCTAssertEqual(stage2.last, .beginKeywordVerification)
+        XCTAssertTrue(detector.isSpeaking)
+        XCTAssertFalse(detector.isVerifying)
+        XCTAssertTrue(detector.isKeywordVerifying)
+
+        let followUp = feedFrames(&detector, count: 10, micLevel: 0.80, farEndLevel: 0.05)
+        XCTAssertTrue(followUp.allSatisfy { $0 == .none })
+    }
+
+    func testKeywordVerificationRejectedCoolsDownWithoutEchoOffsetPenalty() {
+        var detector = VoiceBargeInDetector(
+            config: VoiceBargeInConfig.speakerWithHardwareAEC.withKeywordVerification(true)
+        )
+        detector.setSpeaking(true)
+
+        _ = feedFrames(&detector, count: 65, micLevel: 0.20, farEndLevel: 0.65)
+        _ = feedFrames(&detector, count: 6, micLevel: 0.62, farEndLevel: 0.65)
+        let stage2 = feedFrames(&detector, count: 8, micLevel: 0.50, farEndLevel: 0.05)
+        XCTAssertEqual(stage2.last, .beginKeywordVerification)
+
+        XCTAssertTrue(detector.completeKeywordVerification(matched: false))
+        XCTAssertFalse(detector.isKeywordVerifying)
+        XCTAssertTrue(detector.isSpeaking)
+        XCTAssertEqual(detector.adaptiveEchoOffset, 0, accuracy: 1e-6)
+        XCTAssertEqual(detector.cooldownRemaining, detector.config.keywordRejectCooldownDuration, accuracy: 1e-6)
+
+        // During cooldown (1.0s), loud speech does not re-trigger ducking (51 * 0.02s avoids FP residual).
+        let cooldown = feedFrames(&detector, count: 51, micLevel: 0.65, farEndLevel: 0.65)
+        XCTAssertTrue(cooldown.allSatisfy { $0 == .none })
+        XCTAssertEqual(detector.cooldownRemaining, 0, accuracy: 1e-6)
+
+        // Post-cooldown: user saying a keyword can trigger Stage 1 again cleanly.
+        let retrigger = feedFrames(&detector, count: 6, micLevel: 0.65, farEndLevel: 0.65)
+        XCTAssertEqual(retrigger.last, .duckPlayback)
+    }
+
+    func testKeywordVerificationMatchedStopsSpeaking() {
+        var detector = VoiceBargeInDetector(
+            config: VoiceBargeInConfig.speakerWithHardwareAEC.withKeywordVerification(true)
+        )
+        detector.setSpeaking(true)
+
+        _ = feedFrames(&detector, count: 65, micLevel: 0.20, farEndLevel: 0.65)
+        _ = feedFrames(&detector, count: 6, micLevel: 0.62, farEndLevel: 0.65)
+        _ = feedFrames(&detector, count: 8, micLevel: 0.50, farEndLevel: 0.05)
+        XCTAssertTrue(detector.isKeywordVerifying)
+
+        XCTAssertTrue(detector.completeKeywordVerification(matched: true))
+        XCTAssertFalse(detector.isKeywordVerifying)
+        XCTAssertFalse(detector.isSpeaking)
+        XCTAssertFalse(detector.completeKeywordVerification(matched: false))
+    }
+
+    func testKeywordParserHandlesCommaSeparationTrimmingDedupAndBlank() {
+        XCTAssertEqual(VoiceBargeInKeywordMatcher.parseKeywords(""), [])
+        XCTAssertEqual(VoiceBargeInKeywordMatcher.parseKeywords("   , ,  "), [])
+        XCTAssertEqual(
+            VoiceBargeInKeywordMatcher.parseKeywords("停一下, 等等, stop "),
+            ["停一下", "等等", "stop"]
+        )
+        XCTAssertEqual(
+            VoiceBargeInKeywordMatcher.parseKeywords("停一下,停一下,STOP,stop"),
+            ["停一下", "STOP"]
+        )
+        XCTAssertEqual(
+            VoiceBargeInKeywordMatcher.parseKeywords("停一下，等等"),
+            ["停一下", "等等"]
+        )
+    }
+
+    func testKeywordMatcherHandlesChineseEnglishWordBoundariesAndPunctuation() {
+        XCTAssertFalse(VoiceBargeInKeywordMatcher.matches(transcript: "停一下", keywords: []))
+        XCTAssertTrue(VoiceBargeInKeywordMatcher.matches(transcript: "嗯，停，一下！", keywords: ["停一下"]))
+        XCTAssertTrue(VoiceBargeInKeywordMatcher.matches(transcript: "Please STOP!", keywords: ["stop"]))
+        XCTAssertFalse(VoiceBargeInKeywordMatcher.matches(transcript: "nonstop", keywords: ["stop"]))
+        XCTAssertFalse(VoiceBargeInKeywordMatcher.matches(transcript: "I know that", keywords: ["no"]))
+        XCTAssertTrue(VoiceBargeInKeywordMatcher.matches(transcript: "hey, hold on a second", keywords: ["hold on"]))
+        XCTAssertTrue(VoiceBargeInKeywordMatcher.matches(transcript: "停一下stop", keywords: ["stop"]))
+        XCTAssertTrue(VoiceBargeInKeywordMatcher.matches(transcript: "嘿 小 a", keywords: ["小A"]))
+    }
+
+    func testResolveBargeInConfigRespectsModeAndEmptyKeywords() {
+        let freeHeadphones = VoiceChatSession.resolveBargeInConfig(
+            mode: .free,
+            keywords: [],
+            isUsingHeadphones: true,
+            isHardwareAECEnabled: false
+        )
+        XCTAssertTrue(freeHeadphones.enabled)
+        XCTAssertFalse(freeHeadphones.requiresKeywordVerification)
+
+        let freeSpeaker = VoiceChatSession.resolveBargeInConfig(
+            mode: .free,
+            keywords: [],
+            isUsingHeadphones: false,
+            isHardwareAECEnabled: true
+        )
+        XCTAssertTrue(freeSpeaker.enabled)
+        XCTAssertFalse(freeSpeaker.requiresKeywordVerification)
+
+        let freeNoAEC = VoiceChatSession.resolveBargeInConfig(
+            mode: .free,
+            keywords: [],
+            isUsingHeadphones: false,
+            isHardwareAECEnabled: false
+        )
+        XCTAssertFalse(freeNoAEC.enabled)
+
+        let keywordWithList = VoiceChatSession.resolveBargeInConfig(
+            mode: .keyword,
+            keywords: ["停一下"],
+            isUsingHeadphones: false,
+            isHardwareAECEnabled: true
+        )
+        XCTAssertTrue(keywordWithList.enabled)
+        XCTAssertTrue(keywordWithList.requiresKeywordVerification)
+
+        let keywordEmptyHeadphones = VoiceChatSession.resolveBargeInConfig(
+            mode: .keyword,
+            keywords: [],
+            isUsingHeadphones: true,
+            isHardwareAECEnabled: true
+        )
+        XCTAssertFalse(keywordEmptyHeadphones.enabled)
+
+        let keywordEmptySpeaker = VoiceChatSession.resolveBargeInConfig(
+            mode: .keyword,
+            keywords: [],
+            isUsingHeadphones: false,
+            isHardwareAECEnabled: true
+        )
+        XCTAssertFalse(keywordEmptySpeaker.enabled)
+    }
 }

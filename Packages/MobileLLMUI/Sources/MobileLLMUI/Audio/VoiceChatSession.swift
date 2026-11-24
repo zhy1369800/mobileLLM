@@ -27,6 +27,7 @@ public final class VoiceChatSession {
     public private(set) var liveUserTranscript: String = ""
     public private(set) var liveAssistantText: String = ""
     public private(set) var activeToolRuns: [ToolRun] = []
+    public private(set) var isVerifyingBargeInKeyword: Bool = false
 
     public var isActive: Bool {
         switch state {
@@ -50,6 +51,8 @@ public final class VoiceChatSession {
     @ObservationIgnored private var recognizer: SFSpeechRecognizer?
     @ObservationIgnored private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     @ObservationIgnored private var recognitionTask: SFSpeechRecognitionTask?
+    @ObservationIgnored private var keywordRecognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    @ObservationIgnored private var keywordRecognitionTask: SFSpeechRecognitionTask?
 
     @ObservationIgnored private var silenceSubmitTask: Task<Void, Never>?
     @ObservationIgnored private var observationTask: Task<Void, Never>?
@@ -57,8 +60,10 @@ public final class VoiceChatSession {
     @ObservationIgnored private var sendTask: Task<Void, Never>?
     @ObservationIgnored private var configRecoveryTask: Task<Void, Never>?
     @ObservationIgnored private var routeRestartTask: Task<Void, Never>?
+    @ObservationIgnored private var keywordWatchdogTask: Task<Void, Never>?
     @ObservationIgnored private var sessionToken: UInt64 = 0
     @ObservationIgnored private var recognitionGeneration: UInt64 = 0
+    @ObservationIgnored private var keywordVerificationGeneration: UInt64 = 0
     @ObservationIgnored private var consecutiveRenewalFailures: Int = 0
     @ObservationIgnored private var consecutiveConfigRecoveries: Int = 0
     @ObservationIgnored private var isRestartingEngine = false
@@ -92,6 +97,10 @@ public final class VoiceChatSession {
 
     /// Silence duration after user stops speaking before auto-submitting the transcript.
     private let silenceSubmitDelay: Duration = .milliseconds(1350)
+    private let keywordMinListenDuration: Double = 0.70
+    private let keywordSilenceEndDuration: Double = 0.55
+    private let keywordFinalGraceDuration: Double = 0.25
+    private let keywordMaxDuration: Double = 2.20
 
     public init(chat: ChatStore, speech: StreamingSpeechCoordinator, settings: AppSettings) {
         self.chat = chat
@@ -172,6 +181,7 @@ public final class VoiceChatSession {
         guard isActive else { return }
         guard state == .thinking || state == .speaking else { return }
 
+        teardownKeywordVerification(completeWithMatch: true, restorePlayback: false)
         observationTask?.cancel()
         observationTask = nil
         sendTask?.cancel()
@@ -357,6 +367,11 @@ public final class VoiceChatSession {
                         guard let self, self.sessionToken == token else { return }
                         self.interruptAndListen()
                     }
+                case .beginKeywordVerification:
+                    Task { @MainActor [weak self] in
+                        guard let self, self.sessionToken == token else { return }
+                        self.beginKeywordVerification()
+                    }
                 }
             } else {
                 let rawLevel = Self.computeNormalizedRMS(from: buffer)
@@ -422,6 +437,8 @@ public final class VoiceChatSession {
         configRecoveryTask = nil
         routeRestartTask?.cancel()
         routeRestartTask = nil
+        keywordWatchdogTask?.cancel()
+        keywordWatchdogTask = nil
     }
 
     // MARK: - Audio Session & Route Observers
@@ -510,6 +527,10 @@ public final class VoiceChatSession {
             }
             self.consecutiveConfigRecoveries += 1
 
+            if self.isVerifyingBargeInKeyword {
+                self.teardownKeywordVerification(completeWithMatch: false, restorePlayback: true)
+            }
+
             if let player = self.activePlayerNode, let playbackFormat = self.resolvePlaybackFormat(for: engine) {
                 engine.connect(player, to: engine.mainMixerNode, format: playbackFormat)
                 self.playbackController.reattachForRecovery(player: player, format: playbackFormat)
@@ -572,21 +593,51 @@ public final class VoiceChatSession {
         }
     }
 
+    public func refreshBargeInSettings() {
+        refreshBargeInThresholds()
+    }
+
+    internal nonisolated static func resolveBargeInConfig(
+        mode: VoiceBargeInMode,
+        keywords: [String],
+        isUsingHeadphones: Bool,
+        isHardwareAECEnabled: Bool
+    ) -> VoiceBargeInConfig {
+        if mode == .keyword && keywords.isEmpty {
+            return .disabled
+        }
+        let base: VoiceBargeInConfig
+        if isUsingHeadphones {
+            base = .headphones
+        } else if isHardwareAECEnabled {
+            base = .speakerWithHardwareAEC
+        } else {
+            base = .disabled
+        }
+        guard base.enabled else { return .disabled }
+        return base.withKeywordVerification(mode == .keyword)
+    }
+
     private func refreshBargeInThresholds() {
         let config: VoiceBargeInConfig
         #if os(iOS)
-        if Self.isUsingHeadphones() {
-            config = .headphones
-        } else if isHardwareAECEnabled {
-            config = .speakerWithHardwareAEC
-        } else {
-            config = .disabled
-        }
+        config = Self.resolveBargeInConfig(
+            mode: settings.voiceBargeInMode,
+            keywords: settings.parsedVoiceBargeInKeywords,
+            isUsingHeadphones: Self.isUsingHeadphones(),
+            isHardwareAECEnabled: isHardwareAECEnabled
+        )
         #else
         // macOS does not enable hardware VPIO AEC; disable voice barge-in to avoid speaker duck/restore pumping.
         config = .disabled
         #endif
-        tapBridge.configureBargeIn(config)
+        if !config.requiresKeywordVerification && isVerifyingBargeInKeyword {
+            teardownKeywordVerification(completeWithMatch: nil, restorePlayback: true)
+        }
+        let wasDucked = tapBridge.configureBargeIn(config)
+        if wasDucked {
+            playbackController.setDucked(false)
+        }
     }
 
     // MARK: - Listening & VAD Endpointing
@@ -687,6 +738,7 @@ public final class VoiceChatSession {
 
     private func teardownRecognition() {
         recognitionGeneration &+= 1
+        teardownKeywordVerification(completeWithMatch: nil, restorePlayback: false)
         tapBridge.setActiveRequest(nil)
         recognitionRequest?.endAudio()
         recognitionTask?.cancel()
@@ -802,8 +854,158 @@ public final class VoiceChatSession {
     private func enterSpeakingState() {
         state = .speaking
         tapBridge.setSamplingAmbient(false)
+        refreshBargeInThresholds()
         tapBridge.setSpeaking(true)
         publishLiveActivity()
+    }
+
+    // MARK: - Keyword Barge-In Verification
+
+    private func beginKeywordVerification() {
+        guard isActive,
+              state == .speaking,
+              settings.voiceBargeInMode == .keyword else {
+            abortKeywordVerificationAndRestore()
+            return
+        }
+
+        let keywords = settings.parsedVoiceBargeInKeywords
+        guard !keywords.isEmpty else {
+            abortKeywordVerificationAndRestore()
+            return
+        }
+
+        guard keywordRecognitionTask == nil else { return }
+
+        let locale = settings.dictationLocale.flatMap { Locale(identifier: $0) }
+        let rec = locale.flatMap { SFSpeechRecognizer(locale: $0) } ?? SFSpeechRecognizer()
+        guard let rec, rec.isAvailable else {
+            abortKeywordVerificationAndRestore()
+            return
+        }
+
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        request.contextualStrings = keywords
+        if rec.supportsOnDeviceRecognition {
+            request.requiresOnDeviceRecognition = true
+        }
+
+        keywordVerificationGeneration &+= 1
+        let kwGen = keywordVerificationGeneration
+        let token = sessionToken
+
+        keywordRecognitionRequest = request
+        isVerifyingBargeInKeyword = true
+
+        guard tapBridge.attachKeywordRequest(request) else {
+            teardownKeywordVerification(completeWithMatch: nil, restorePlayback: false)
+            return
+        }
+
+        keywordRecognitionTask = rec.recognitionTask(with: request) { [weak self] result, error in
+            let text = result?.bestTranscription.formattedString
+            let isFinal = result?.isFinal ?? false
+            let hasError = error != nil
+
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.sessionToken == token,
+                      self.keywordVerificationGeneration == kwGen,
+                      self.state == .speaking
+                else { return }
+
+                if let text,
+                   !text.isEmpty,
+                   VoiceBargeInKeywordMatcher.matches(transcript: text, keywords: keywords)
+                {
+                    self.playbackController.muteForInterrupt()
+                    self.teardownKeywordVerification(completeWithMatch: true, restorePlayback: false)
+                    self.interruptAndListen()
+                    return
+                }
+
+                if isFinal || hasError {
+                    self.finishKeywordVerificationWithoutMatch(generation: kwGen)
+                }
+            }
+        }
+
+        startKeywordWatchdog(token: token, generation: kwGen)
+    }
+
+    private func startKeywordWatchdog(token: UInt64, generation: UInt64) {
+        keywordWatchdogTask?.cancel()
+        let startUptime = ProcessInfo.processInfo.systemUptime
+        keywordWatchdogTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard !Task.isCancelled,
+                      let self,
+                      self.sessionToken == token,
+                      self.keywordVerificationGeneration == generation,
+                      self.state == .speaking,
+                      self.isVerifyingBargeInKeyword
+                else { return }
+
+                let now = ProcessInfo.processInfo.systemUptime
+                let elapsed = now - startUptime
+                let silentFor = max(0, now - self.tapBridge.lastKeywordVoiceActivityUptime())
+
+                if elapsed >= self.keywordMaxDuration
+                    || (elapsed >= self.keywordMinListenDuration && silentFor >= self.keywordSilenceEndDuration)
+                {
+                    let req = self.keywordRecognitionRequest
+                    self.tapBridge.detachKeywordRequest(req)
+                    req?.endAudio()
+
+                    let graceMs = Int((self.keywordFinalGraceDuration * 1000).rounded())
+                    try? await Task.sleep(for: .milliseconds(graceMs))
+                    guard !Task.isCancelled,
+                          self.sessionToken == token,
+                          self.keywordVerificationGeneration == generation,
+                          self.state == .speaking,
+                          self.isVerifyingBargeInKeyword
+                    else { return }
+
+                    self.finishKeywordVerificationWithoutMatch(generation: generation)
+                    return
+                }
+            }
+        }
+    }
+
+    private func finishKeywordVerificationWithoutMatch(generation: UInt64) {
+        guard keywordVerificationGeneration == generation else { return }
+        teardownKeywordVerification(completeWithMatch: false, restorePlayback: true)
+    }
+
+    private func abortKeywordVerificationAndRestore() {
+        teardownKeywordVerification(completeWithMatch: false, restorePlayback: true)
+    }
+
+    private func teardownKeywordVerification(completeWithMatch matched: Bool?, restorePlayback: Bool) {
+        keywordVerificationGeneration &+= 1
+        keywordWatchdogTask?.cancel()
+        keywordWatchdogTask = nil
+
+        let req = keywordRecognitionRequest
+        keywordRecognitionRequest = nil
+        tapBridge.detachKeywordRequest(req)
+        req?.endAudio()
+
+        keywordRecognitionTask?.cancel()
+        keywordRecognitionTask = nil
+        if isVerifyingBargeInKeyword {
+            isVerifyingBargeInKeyword = false
+        }
+
+        if let matched {
+            _ = tapBridge.completeKeywordVerification(matched: matched)
+        }
+        if restorePlayback {
+            playbackController.setDucked(false)
+        }
     }
 
     private func makeLiveActivitySnapshot() -> VoiceLiveActivitySnapshot? {
@@ -929,9 +1131,16 @@ private final class AudioTapBridge: @unchecked Sendable {
     private var hpfPrevInput: Float = 0
     private var hpfPrevOutput: Float = 0
     private var hpfSampleRate: Double = 0
+    private var preRollBuffers: [(buffer: AVAudioPCMBuffer, duration: Double)] = []
+    private var preRollDuration: Double = 0
+    private var preRollSampleRate: Double = 0
+    private var pendingPreRollBuffers: [AVAudioPCMBuffer] = []
+    private var lastKeywordVoiceUptime: TimeInterval = 0
+    private let maxPreRollDuration: Double = 0.70
 
     func setActiveRequest(_ request: SFSpeechAudioBufferRecognitionRequest?) {
         lock.lock()
+        pendingPreRollBuffers.removeAll(keepingCapacity: false)
         activeRequest = request
         lock.unlock()
     }
@@ -942,6 +1151,11 @@ private final class AudioTapBridge: @unchecked Sendable {
         hpfPrevInput = 0
         hpfPrevOutput = 0
         hpfSampleRate = 0
+        preRollBuffers.removeAll(keepingCapacity: false)
+        preRollDuration = 0
+        preRollSampleRate = 0
+        pendingPreRollBuffers.removeAll(keepingCapacity: false)
+        lastKeywordVoiceUptime = 0
         lock.unlock()
     }
 
@@ -956,6 +1170,13 @@ private final class AudioTapBridge: @unchecked Sendable {
         _ = detector.setSpeaking(speaking)
         hpfPrevInput = 0
         hpfPrevOutput = 0
+        if !speaking {
+            preRollBuffers.removeAll(keepingCapacity: false)
+            preRollDuration = 0
+            preRollSampleRate = 0
+            pendingPreRollBuffers.removeAll(keepingCapacity: false)
+            lastKeywordVoiceUptime = 0
+        }
         lock.unlock()
     }
 
@@ -966,17 +1187,79 @@ private final class AudioTapBridge: @unchecked Sendable {
         return v
     }
 
-    func configureBargeIn(_ config: VoiceBargeInConfig) {
+    @discardableResult
+    func configureBargeIn(_ config: VoiceBargeInConfig) -> Bool {
         lock.lock()
-        detector.configure(config)
+        let wasDucked = detector.configure(config)
+        if !config.enabled || !config.requiresKeywordVerification {
+            preRollBuffers.removeAll(keepingCapacity: false)
+            preRollDuration = 0
+            preRollSampleRate = 0
+            pendingPreRollBuffers.removeAll(keepingCapacity: false)
+        }
         lock.unlock()
+        return wasDucked
+    }
+
+    func attachKeywordRequest(_ request: SFSpeechAudioBufferRecognitionRequest) -> Bool {
+        lock.lock()
+        guard detector.isSpeaking && detector.isKeywordVerifying else {
+            lock.unlock()
+            return false
+        }
+        pendingPreRollBuffers = preRollBuffers.map(\.buffer)
+        preRollBuffers.removeAll(keepingCapacity: true)
+        preRollDuration = 0
+        activeRequest = request
+        lastKeywordVoiceUptime = ProcessInfo.processInfo.systemUptime
+        lock.unlock()
+        return true
+    }
+
+    func detachKeywordRequest(_ request: SFSpeechAudioBufferRecognitionRequest?) {
+        guard let request else { return }
+        lock.lock()
+        if activeRequest === request {
+            activeRequest = nil
+            pendingPreRollBuffers.removeAll(keepingCapacity: false)
+        }
+        lock.unlock()
+    }
+
+    @discardableResult
+    func completeKeywordVerification(matched: Bool) -> Bool {
+        lock.lock()
+        let changed = detector.completeKeywordVerification(matched: matched)
+        pendingPreRollBuffers.removeAll(keepingCapacity: false)
+        if matched {
+            preRollBuffers.removeAll(keepingCapacity: false)
+            preRollDuration = 0
+        }
+        lock.unlock()
+        return changed
+    }
+
+    func lastKeywordVoiceActivityUptime() -> TimeInterval {
+        lock.lock()
+        let uptime = lastKeywordVoiceUptime
+        lock.unlock()
+        return uptime
     }
 
     func appendIfActive(_ buffer: AVAudioPCMBuffer) {
         lock.lock()
         let request = activeRequest
+        let shouldRecordPreRoll = (request == nil)
+            && detector.isSpeaking
+            && detector.config.enabled
+            && detector.config.requiresKeywordVerification
+        var preRollToFlush: [AVAudioPCMBuffer] = []
+        if request != nil && !pendingPreRollBuffers.isEmpty {
+            preRollToFlush = pendingPreRollBuffers
+            pendingPreRollBuffers.removeAll(keepingCapacity: false)
+        }
         var monoFormat = cachedMonoFormat
-        if request != nil, buffer.format.channelCount > 1 {
+        if buffer.format.sampleRate > 0 && (buffer.format.channelCount > 1 || shouldRecordPreRoll) {
             if monoFormat == nil || monoFormat?.sampleRate != buffer.format.sampleRate {
                 monoFormat = AVAudioFormat(standardFormatWithSampleRate: buffer.format.sampleRate, channels: 1)
                 cachedMonoFormat = monoFormat
@@ -984,24 +1267,76 @@ private final class AudioTapBridge: @unchecked Sendable {
         }
         lock.unlock()
 
-        guard let request, buffer.frameLength > 0 else { return }
-        if buffer.format.channelCount == 1 {
-            request.append(buffer)
+        if let request, buffer.frameLength > 0 {
+            for buffered in preRollToFlush {
+                request.append(buffered)
+            }
+            if buffer.format.channelCount == 1 {
+                request.append(buffer)
+                return
+            }
+
+            // VPIO can deliver multi-channel buffers; extract channel 0 as mono for SFSpeechRecognizer.
+            if let monoFormat,
+               let monoBuffer = Self.makeMonoCopy(of: buffer, monoFormat: monoFormat)
+            {
+                request.append(monoBuffer)
+            } else {
+                request.append(buffer)
+            }
             return
         }
 
-        // VPIO can deliver multi-channel buffers; extract channel 0 as mono for SFSpeechRecognizer.
-        if let monoFormat,
-           let src = buffer.floatChannelData?[0],
-           let monoBuffer = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: buffer.frameLength),
-           let dst = monoBuffer.floatChannelData?[0]
+        guard shouldRecordPreRoll,
+              buffer.frameLength > 0,
+              let monoFormat,
+              let copy = Self.makeMonoCopy(of: buffer, monoFormat: monoFormat)
+        else { return }
+
+        let duration = Double(copy.frameLength) / max(monoFormat.sampleRate, 1)
+        lock.lock()
+        if activeRequest == nil,
+           detector.isSpeaking,
+           detector.config.enabled,
+           detector.config.requiresKeywordVerification
         {
-            monoBuffer.frameLength = buffer.frameLength
-            memcpy(dst, src, Int(buffer.frameLength) * MemoryLayout<Float>.size)
-            request.append(monoBuffer)
-        } else {
-            request.append(buffer)
+            if preRollSampleRate != monoFormat.sampleRate {
+                preRollBuffers.removeAll(keepingCapacity: true)
+                preRollDuration = 0
+                preRollSampleRate = monoFormat.sampleRate
+            }
+            preRollBuffers.append((buffer: copy, duration: duration))
+            preRollDuration += duration
+            while preRollDuration > maxPreRollDuration && preRollBuffers.count > 1 {
+                let removed = preRollBuffers.removeFirst()
+                preRollDuration = max(0, preRollDuration - removed.duration)
+            }
         }
+        lock.unlock()
+    }
+
+    private static func makeMonoCopy(
+        of buffer: AVAudioPCMBuffer,
+        monoFormat: AVAudioFormat
+    ) -> AVAudioPCMBuffer? {
+        let frameLength = Int(buffer.frameLength)
+        guard frameLength > 0,
+              buffer.format.commonFormat == .pcmFormatFloat32,
+              let src = buffer.floatChannelData?[0],
+              let copy = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: buffer.frameLength),
+              let dst = copy.floatChannelData?[0]
+        else { return nil }
+
+        copy.frameLength = buffer.frameLength
+        let channelCount = Int(buffer.format.channelCount)
+        if buffer.format.isInterleaved && channelCount > 1 {
+            for i in 0..<frameLength {
+                dst[i] = src[i * channelCount]
+            }
+        } else {
+            memcpy(dst, src, frameLength * MemoryLayout<Float>.size)
+        }
+        return copy
     }
 
     /// Updates ambient noise floor while in `.thinking` state using the same 100 Hz high-pass
@@ -1057,6 +1392,13 @@ private final class AudioTapBridge: @unchecked Sendable {
         hpfSampleRate = sampleRate
         hpfPrevInput = xPrev
         hpfPrevOutput = yPrev
+        if detector.isKeywordVerifying {
+            if level >= detector.currentStage2Threshold {
+                lastKeywordVoiceUptime = ProcessInfo.processInfo.systemUptime
+            }
+            lock.unlock()
+            return .none
+        }
         let action = detector.process(
             micLevel: level,
             farEndLevel: farEndLevel,

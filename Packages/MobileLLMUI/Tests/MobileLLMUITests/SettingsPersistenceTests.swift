@@ -544,4 +544,33 @@ final class SettingsPersistenceTests: XCTestCase {
         let service = reloaded.onlineServices.first { $0.id == "svc-native-search" }
         XCTAssertEqual(service?.supportsNativeWebSearch, true)
     }
+
+    func testVoiceBargeInSettingsDefaultRoundTripAndReset() throws {
+        let fresh = AppSettings(defaults: defaults, keychain: nil)
+        XCTAssertEqual(fresh.voiceBargeInMode, .free)
+        XCTAssertEqual(fresh.voiceBargeInKeywords, "")
+        XCTAssertEqual(fresh.parsedVoiceBargeInKeywords, [])
+
+        write(#"""
+        {"defaultModelID":"bonsai-8b","systemPrompt":"keep me","systemPromptSeeded":true,
+         "thinkingDefault":true,"thinkingDisplay":"autoCollapse","toolsEnabled":false,
+         "temperature":0.7,"topP":0.95,"topK":20,"repetitionPenalty":1.05,"maxTokens":1024,
+         "contextLength":8192,"kvBits":4,"appearance":"system"}
+        """#)
+        let legacy = AppSettings(defaults: defaults, keychain: nil)
+        XCTAssertEqual(legacy.voiceBargeInMode, .free)
+        XCTAssertEqual(legacy.voiceBargeInKeywords, "")
+
+        legacy.voiceBargeInMode = .keyword
+        legacy.voiceBargeInKeywords = "停一下,等等,stop"
+
+        let reloaded = AppSettings(defaults: defaults, keychain: nil)
+        XCTAssertEqual(reloaded.voiceBargeInMode, .keyword)
+        XCTAssertEqual(reloaded.voiceBargeInKeywords, "停一下,等等,stop")
+        XCTAssertEqual(reloaded.parsedVoiceBargeInKeywords, ["停一下", "等等", "stop"])
+
+        try reloaded.resetForDataErase()
+        XCTAssertEqual(reloaded.voiceBargeInMode, .free)
+        XCTAssertEqual(reloaded.voiceBargeInKeywords, "")
+    }
 }

@@ -2,12 +2,174 @@
 
 import Foundation
 
+/// Selects how the user can interrupt assistant speech during an active voice call.
+public enum VoiceBargeInMode: String, CaseIterable, Codable, Sendable, Identifiable {
+    case free
+    case keyword
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .free:
+            return "Free"
+        case .keyword:
+            return "Keyword"
+        }
+    }
+
+    public var voiceCallLabel: String {
+        switch self {
+        case .free:
+            return "自由打断"
+        case .keyword:
+            return "关键词打断"
+        }
+    }
+}
+
+/// Parses comma-separated barge-in keywords and matches partial/final ASR transcripts.
+public enum VoiceBargeInKeywordMatcher: Sendable {
+    /// Splits on English (`,`) and full-width (`，`) commas, trims whitespace, drops blanks,
+    /// and deduplicates case/width-insensitively while preserving original order.
+    public static func parseKeywords(_ raw: String) -> [String] {
+        var result: [String] = []
+        var seenFolded = Set<String>()
+
+        for part in raw.split(whereSeparator: { $0 == "," || $0 == "，" }) {
+            let trimmed = part.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let foldedKey = trimmed.folding(
+                options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+                locale: .current
+            )
+            if seenFolded.insert(foldedKey).inserted {
+                result.append(trimmed)
+            }
+        }
+        return result
+    }
+
+    /// Returns `true` when `transcript` matches any configured keyword.
+    /// ASCII/Latin keywords require token boundaries (preventing `"no"` from matching `"know"`),
+    /// while CJK/mixed keywords ignore punctuation and spaces between characters.
+    public static func matches(transcript: String, keywords: [String]) -> Bool {
+        guard !keywords.isEmpty else { return false }
+        let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTranscript.isEmpty else { return false }
+
+        var cachedWordBoundedTranscript: String?
+        var cachedCompactTranscript: String?
+
+        for keyword in keywords {
+            let trimmedKeyword = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedKeyword.isEmpty else { continue }
+
+            if isASCIIWordKeyword(trimmedKeyword) {
+                let normalizedKeyword = wordBoundedTokens(trimmedKeyword)
+                guard !normalizedKeyword.isEmpty else { continue }
+                let transcriptBounded: String
+                if let cached = cachedWordBoundedTranscript {
+                    transcriptBounded = cached
+                } else {
+                    let tokens = wordBoundedTokens(trimmedTranscript)
+                    let wrapped = tokens.isEmpty ? "" : " \(tokens) "
+                    cachedWordBoundedTranscript = wrapped
+                    transcriptBounded = wrapped
+                }
+                if transcriptBounded.contains(" \(normalizedKeyword) ") {
+                    return true
+                }
+            } else {
+                let compactKeyword = compactAlphanumerics(trimmedKeyword)
+                guard !compactKeyword.isEmpty else { continue }
+                let transcriptCompact: String
+                if let cached = cachedCompactTranscript {
+                    transcriptCompact = cached
+                } else {
+                    let compact = compactAlphanumerics(trimmedTranscript)
+                    cachedCompactTranscript = compact
+                    transcriptCompact = compact
+                }
+                if transcriptCompact.contains(compactKeyword) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private static func isASCIIWordKeyword(_ keyword: String) -> Bool {
+        let folded = keyword.folding(
+            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: .current
+        )
+        var hasAlphanumeric = false
+        for scalar in folded.unicodeScalars where CharacterSet.alphanumerics.contains(scalar) {
+            hasAlphanumeric = true
+            if !scalar.isASCII {
+                return false
+            }
+        }
+        return hasAlphanumeric
+    }
+
+    private static func wordBoundedTokens(_ text: String) -> String {
+        let folded = text.folding(
+            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: .current
+        )
+        var output = ""
+        output.reserveCapacity(folded.count + 4)
+        var prevWasAlnum = false
+        var prevWasASCIIAlnum = false
+        var lastWasSpace = true
+
+        for scalar in folded.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) {
+                if prevWasAlnum && prevWasASCIIAlnum != scalar.isASCII && !lastWasSpace {
+                    output.append(" ")
+                }
+                output.unicodeScalars.append(scalar)
+                prevWasAlnum = true
+                prevWasASCIIAlnum = scalar.isASCII
+                lastWasSpace = false
+            } else {
+                if !lastWasSpace && !output.isEmpty {
+                    output.append(" ")
+                    lastWasSpace = true
+                }
+                prevWasAlnum = false
+            }
+        }
+
+        while output.last == " " {
+            output.removeLast()
+        }
+        return output
+    }
+
+    private static func compactAlphanumerics(_ text: String) -> String {
+        let folded = text.folding(
+            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: .current
+        )
+        var output = ""
+        output.reserveCapacity(folded.count)
+        for scalar in folded.unicodeScalars where CharacterSet.alphanumerics.contains(scalar) {
+            output.unicodeScalars.append(scalar)
+        }
+        return output
+    }
+}
+
 /// Action emitted by `VoiceBargeInDetector` for each captured microphone frame during TTS playback.
 internal enum VoiceBargeInAction: Equatable, Sendable {
     case none
     case duckPlayback
     case restorePlayback
     case confirmInterrupt
+    case beginKeywordVerification
 }
 
 /// Tunable parameters governing full-duplex echo rejection and two-stage barge-in verification.
@@ -34,6 +196,14 @@ internal struct VoiceBargeInConfig: Equatable, Sendable {
     var adaptiveEchoStep: Float
     var maxAdaptiveEchoOffset: Float
     var adaptiveEchoDecayPerSecond: Float
+    var requiresKeywordVerification: Bool = false
+    var keywordRejectCooldownDuration: Double = 1.0
+
+    func withKeywordVerification(_ required: Bool) -> VoiceBargeInConfig {
+        var copy = self
+        copy.requiresKeywordVerification = required
+        return copy
+    }
 
     /// Default configuration for iOS speakerphone playback with hardware VPIO AEC active.
     static let speakerWithHardwareAEC = VoiceBargeInConfig(
@@ -122,6 +292,7 @@ internal struct VoiceBargeInDetector: Sendable {
     private enum Phase: Sendable {
         case monitoring
         case verifying(elapsed: Double, confirmAccum: Double, quietAccum: Double)
+        case keywordVerifying
     }
 
     internal private(set) var config: VoiceBargeInConfig
@@ -155,6 +326,11 @@ internal struct VoiceBargeInDetector: Sendable {
         return false
     }
 
+    var isKeywordVerifying: Bool {
+        if case .keywordVerifying = phase { return true }
+        return false
+    }
+
     var isAECConverged: Bool {
         aecConvergedPlaybackDuration >= config.initialAECConvergenceDuration
     }
@@ -181,7 +357,9 @@ internal struct VoiceBargeInDetector: Sendable {
         )
     }
 
-    mutating func configure(_ newConfig: VoiceBargeInConfig) {
+    @discardableResult
+    mutating func configure(_ newConfig: VoiceBargeInConfig) -> Bool {
+        let wasDucked = isVerifying || isKeywordVerifying
         let routeChanged = newConfig.isUsingHeadphones != config.isUsingHeadphones
         config = newConfig
         stage1Accumulated = 0
@@ -190,6 +368,7 @@ internal struct VoiceBargeInDetector: Sendable {
         if routeChanged {
             adaptiveEchoOffset = 0
         }
+        return wasDucked
     }
 
     mutating func resetCalibration() {
@@ -204,10 +383,10 @@ internal struct VoiceBargeInDetector: Sendable {
     }
 
     /// Updates speaking state for a new TTS turn or stop/interrupt transition.
-    /// Returns `true` if a Stage 2 duck verification was active and should be restored by the caller.
+    /// Returns `true` if a Stage 2/keyword duck verification was active and should be restored by the caller.
     @discardableResult
     mutating func setSpeaking(_ speaking: Bool) -> Bool {
-        let wasVerifying = isVerifying
+        let wasVerifying = isVerifying || isKeywordVerifying
         isSpeaking = speaking
         hasHeardPlaybackInTurn = false
         steadyGraceElapsed = 0
@@ -220,6 +399,20 @@ internal struct VoiceBargeInDetector: Sendable {
             adaptiveEchoOffset = max(0, adaptiveEchoOffset * 0.6)
         }
         return wasVerifying
+    }
+
+    @discardableResult
+    mutating func completeKeywordVerification(matched: Bool) -> Bool {
+        guard case .keywordVerifying = phase else { return false }
+        phase = .monitoring
+        stage1Accumulated = 0
+        if matched {
+            isSpeaking = false
+        } else {
+            // Non-keyword human speech is not speaker echo: cool down without raising adaptiveEchoOffset.
+            cooldownRemaining = config.keywordRejectCooldownDuration
+        }
+        return true
     }
 
     /// Updates the ambient noise baseline while idle/thinking (never during active TTS playback).
@@ -255,8 +448,12 @@ internal struct VoiceBargeInDetector: Sendable {
                 confirmAccum += duration
                 quietAccum = max(0, quietAccum - duration)
                 if confirmAccum >= config.stage2RequiredDuration {
-                    phase = .monitoring
                     stage1Accumulated = 0
+                    if config.requiresKeywordVerification {
+                        phase = .keywordVerifying
+                        return .beginKeywordVerification
+                    }
+                    phase = .monitoring
                     isSpeaking = false
                     return .confirmInterrupt
                 }
@@ -285,6 +482,9 @@ internal struct VoiceBargeInDetector: Sendable {
                 confirmAccum: confirmAccum,
                 quietAccum: quietAccum
             )
+            return .none
+
+        case .keywordVerifying:
             return .none
 
         case .monitoring:

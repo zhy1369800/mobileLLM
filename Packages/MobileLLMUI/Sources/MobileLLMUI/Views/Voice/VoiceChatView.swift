@@ -17,6 +17,7 @@ public struct VoiceChatView: View {
     @State private var showToolsSheet = false
     @State private var showSkillPicker = false
     @State private var showSkillsManage = false
+    @State private var showBargeInSettings = false
 
     public init(container: AppContainer, onOpenModels: @escaping () -> Void) {
         self.container = container
@@ -166,6 +167,19 @@ public struct VoiceChatView: View {
                 #endif
             }
         }
+        .sheet(isPresented: $showBargeInSettings) {
+            NavigationStack {
+                VoiceBargeInSettingsSheet(
+                    settings: container.settings,
+                    onChanged: { session.refreshBargeInSettings() }
+                )
+            }
+            #if os(iOS)
+            .presentationDetents([.medium])
+            #else
+            .frame(minWidth: 380, minHeight: 320)
+            #endif
+        }
     }
 
     // MARK: - Toolbar Controls
@@ -217,6 +231,12 @@ public struct VoiceChatView: View {
 
             Divider()
 
+            Button {
+                showBargeInSettings = true
+            } label: {
+                Label(bargeInMenuLabel, systemImage: "hand.raised")
+            }
+
             Menu("Dictation Language") {
                 ForEach(Composer.dictationLanguages, id: \.label) { lang in
                     Button {
@@ -235,6 +255,19 @@ public struct VoiceChatView: View {
                 .foregroundStyle(capabilitiesActive ? Theme.accent : Theme.textSecondary)
         }
         .accessibilityLabel("Voice call options")
+    }
+
+    private var bargeInMenuLabel: String {
+        switch container.settings.voiceBargeInMode {
+        case .free:
+            return "Barge-in: Free"
+        case .keyword:
+            let keywords = container.settings.parsedVoiceBargeInKeywords
+            if keywords.isEmpty {
+                return "Barge-in: Manual"
+            }
+            return "Barge-in: Keyword (\(keywords.count))"
+        }
     }
 
     // MARK: - Active Skill Chips
@@ -388,7 +421,22 @@ public struct VoiceChatView: View {
         case .thinking:
             return "让我想想…（点击球体可打断）"
         case .speaking:
-            return "随时打断（开口说话或点击球体）"
+            if session.isVerifyingBargeInKeyword {
+                return "正在识别打断词…"
+            }
+            switch container.settings.voiceBargeInMode {
+            case .free:
+                return "随时打断（开口说话或点击球体）"
+            case .keyword:
+                let keywords = container.settings.parsedVoiceBargeInKeywords
+                if keywords.isEmpty {
+                    return "仅手动打断（点击球体）"
+                } else if keywords.count <= 2 {
+                    return "说「\(keywords.joined(separator: "」「"))」或点击球体打断"
+                } else {
+                    return "说「\(keywords.prefix(2).joined(separator: "」「"))」等关键词或点击球体打断"
+                }
+            }
         case .denied:
             return "请在系统设置中允许麦克风与语音识别权限"
         case .unavailable:
@@ -480,6 +528,91 @@ private struct VoiceSubtitleLineRow: View, Equatable {
             Text(attributed)
         } else {
             Text(text)
+        }
+    }
+}
+
+private struct VoiceBargeInSettingsSheet: View {
+    @Bindable var settings: AppSettings
+    var onChanged: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        let parsedKeywords = settings.parsedVoiceBargeInKeywords
+
+        ScrollView {
+            VStack(alignment: .leading, spacing: Theme.Space.md) {
+                Segmented(selection: $settings.voiceBargeInMode, options: VoiceBargeInMode.allCases) {
+                    $0.voiceCallLabel
+                }
+
+                switch settings.voiceBargeInMode {
+                case .free:
+                    Text("AI 播报时直接开口说话或点击水墨球即可打断。")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.textSecondary)
+
+                case .keyword:
+                    VStack(alignment: .leading, spacing: Theme.Space.sm) {
+                        HStack {
+                            Text("打断关键词（英文逗号分隔）")
+                                .font(.caption)
+                                .foregroundStyle(Theme.textTertiary)
+                            Spacer()
+                            Menu {
+                                Button("停一下,等等,打断") { settings.voiceBargeInKeywords = "停一下,等等,打断" }
+                                Button("停,别说了,换个话题") { settings.voiceBargeInKeywords = "停,别说了,换个话题" }
+                                Button("stop,wait,hold on") { settings.voiceBargeInKeywords = "stop,wait,hold on" }
+                                if !settings.voiceBargeInKeywords.isEmpty {
+                                    Divider()
+                                    Button("清空（仅手动打断）", role: .destructive) {
+                                        settings.voiceBargeInKeywords = ""
+                                    }
+                                }
+                            } label: {
+                                Text("常用词")
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(Theme.accent)
+                            }
+                        }
+
+                        TextField("多个关键词用英文逗号分隔，如：停一下,等等,stop", text: $settings.voiceBargeInKeywords)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.subheadline)
+                            #if os(iOS)
+                            .textInputAutocapitalization(.never)
+                            #endif
+                            .autocorrectionDisabled()
+
+                        if parsedKeywords.isEmpty {
+                            Text("未填写关键词：当前仅支持点击水墨球手动打断")
+                                .font(.caption)
+                                .foregroundStyle(Theme.textTertiary)
+                        } else {
+                            Text("已生效关键词（\(parsedKeywords.count) 个）：\(parsedKeywords.joined(separator: " · "))")
+                                .font(.caption)
+                                .foregroundStyle(Theme.textSecondary)
+                        }
+                    }
+                }
+            }
+            .padding(Theme.Space.lg)
+        }
+        .background(Theme.bg)
+        .navigationTitle("语音打断方式")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("完成") { dismiss() }
+            }
+        }
+        .onChange(of: settings.voiceBargeInMode) { _, _ in
+            onChanged()
+        }
+        .onChange(of: settings.voiceBargeInKeywords) { _, _ in
+            onChanged()
         }
     }
 }
