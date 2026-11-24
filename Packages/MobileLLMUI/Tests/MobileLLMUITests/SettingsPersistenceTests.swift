@@ -573,4 +573,25 @@ final class SettingsPersistenceTests: XCTestCase {
         XCTAssertEqual(reloaded.voiceBargeInMode, .free)
         XCTAssertEqual(reloaded.voiceBargeInKeywords, "")
     }
+
+    func testVoiceSubtitlesEnabledDefaultsTrueRoundTripsAndResets() throws {
+        let fresh = AppSettings(defaults: defaults, keychain: nil)
+        XCTAssertTrue(fresh.voiceSubtitlesEnabled)
+
+        write(#"""
+        {"defaultModelID":"bonsai-8b","systemPrompt":"keep me","systemPromptSeeded":true,
+         "thinkingDefault":true,"thinkingDisplay":"autoCollapse","toolsEnabled":false,
+         "temperature":0.7,"topP":0.95,"topK":20,"repetitionPenalty":1.05,"maxTokens":1024,
+         "contextLength":8192,"kvBits":4,"appearance":"system"}
+        """#)
+        let legacy = AppSettings(defaults: defaults, keychain: nil)
+        XCTAssertTrue(legacy.voiceSubtitlesEnabled)
+
+        legacy.voiceSubtitlesEnabled = false
+        let reloaded = AppSettings(defaults: defaults, keychain: nil)
+        XCTAssertFalse(reloaded.voiceSubtitlesEnabled)
+
+        try reloaded.resetForDataErase()
+        XCTAssertTrue(reloaded.voiceSubtitlesEnabled)
+    }
 }

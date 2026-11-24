@@ -268,6 +268,12 @@ struct SettingsView: View {
             hairline
             sliderRow("Speech rate", value: $settings.ttsSpeechRate, range: 0.5...2.0, step: 0.1, format: "%.1fx")
             hairline
+            toggleRow(
+                "Voice call subtitles",
+                subtitle: "Show interactive live captions during voice calls.",
+                isOn: $settings.voiceSubtitlesEnabled
+            )
+            hairline
             voiceBargeInSettingsRows
             hairline
             HStack {

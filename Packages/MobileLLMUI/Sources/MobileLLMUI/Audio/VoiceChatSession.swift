@@ -29,6 +29,11 @@ public final class VoiceChatSession {
     public private(set) var activeToolRuns: [ToolRun] = []
     public private(set) var isVerifyingBargeInKeyword: Bool = false
 
+    /// The sentence batch currently being spoken by TTS (empty outside active playback).
+    public var currentSpokenSentence: String {
+        speech.currentSpokenSentence
+    }
+
     public var isActive: Bool {
         switch state {
         case .listening, .thinking, .speaking:
@@ -194,6 +199,20 @@ public final class VoiceChatSession {
             chat.stop()
         }
 
+        beginListening()
+    }
+
+    /// Immediately submits the current live user transcript while listening, bypassing the silence timer.
+    public func submitCurrentTranscriptNow() {
+        guard isActive, state == .listening else { return }
+        let text = liveUserTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        submitTranscript(text)
+    }
+
+    /// Discards the current partial user transcript and restarts speech recognition cleanly.
+    public func restartListening() {
+        guard isActive, state == .listening else { return }
         beginListening()
     }
 

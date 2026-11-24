@@ -18,6 +18,16 @@ public struct VoiceChatView: View {
     @State private var showSkillPicker = false
     @State private var showSkillsManage = false
     @State private var showBargeInSettings = false
+    @State private var isSubtitleExpanded = false
+    @State private var subtitleUserScrolledUp = false
+    @State private var subtitleAtBottom = true
+    @State private var isSubtitleDragging = false
+    @State private var subtitleMatchCursor = 0
+    @State private var lastAutoScrolledLine: Int? = nil
+    @State private var subtitleContentHeight: CGFloat = 0
+    @State private var subtitleViewportHeight: CGFloat = 0
+    @State private var didCopySubtitle = false
+    @State private var copyResetTask: Task<Void, Never>? = nil
 
     public init(container: AppContainer, onOpenModels: @escaping () -> Void) {
         self.container = container
@@ -32,7 +42,11 @@ public struct VoiceChatView: View {
     }
 
     public var body: some View {
-        ZStack {
+        let showingExpandedSubtitle = isSubtitleExpanded
+            && container.settings.voiceSubtitlesEnabled
+            && subtitleSource != .none
+
+        return ZStack {
             // Adaptive ink-wash background: warm rice-paper (light) / wet ink night (dark).
             Theme.bg
                 .ignoresSafeArea()
@@ -52,7 +66,8 @@ public struct VoiceChatView: View {
                         .padding(.top, Theme.Space.xs)
                 }
 
-                Spacer(minLength: 12)
+                Spacer(minLength: showingExpandedSubtitle ? 6 : 12)
+                    .frame(maxHeight: showingExpandedSubtitle ? 12 : nil)
 
                 VoiceOrbView(
                     state: session.state,
@@ -60,13 +75,18 @@ public struct VoiceChatView: View {
                     levelProvider: { session.currentAudioLevel() },
                     onTap: handleOrbTap
                 )
-                .frame(maxWidth: 300, maxHeight: 300)
+                .frame(
+                    maxWidth: showingExpandedSubtitle ? 112 : 300,
+                    maxHeight: showingExpandedSubtitle ? 112 : 300
+                )
                 .aspectRatio(1, contentMode: .fit)
 
-                Spacer(minLength: 16)
+                Spacer(minLength: showingExpandedSubtitle ? 8 : 16)
+                    .frame(maxHeight: showingExpandedSubtitle ? 14 : nil)
 
-                statusAndSubtitleSection
+                statusAndSubtitleSection(expanded: showingExpandedSubtitle)
                     .padding(.horizontal, 24)
+                    .frame(maxHeight: showingExpandedSubtitle ? .infinity : nil)
 
                 if let agentRuns = container.agentRuns, let activeID = chat.activeID {
                     AgentDockedBar(store: agentRuns, conversationID: activeID)
@@ -74,10 +94,22 @@ public struct VoiceChatView: View {
                         .padding(.top, Theme.Space.xs)
                 }
 
-                Spacer(minLength: 20)
+                Spacer(minLength: showingExpandedSubtitle ? 10 : 20)
+                    .frame(maxHeight: showingExpandedSubtitle ? 16 : nil)
 
                 bottomActionSection
                     .padding(.bottom, 24)
+            }
+        }
+        .onChange(of: subtitleSource) { _, newSource in
+            if newSource == .none {
+                isSubtitleExpanded = false
+                subtitleUserScrolledUp = false
+                subtitleAtBottom = true
+                subtitleMatchCursor = 0
+                lastAutoScrolledLine = nil
+                subtitleContentHeight = 0
+                subtitleViewportHeight = 0
             }
         }
         #if os(iOS)
@@ -106,6 +138,8 @@ public struct VoiceChatView: View {
         .onDisappear {
             isVisible = false
             session.isScreenVisible = false
+            copyResetTask?.cancel()
+            copyResetTask = nil
         }
         .sheet(isPresented: $showModelSwitcher) {
             ModelSwitcherSheet(container: container, onOpenModels: onOpenModels)
@@ -237,6 +271,20 @@ public struct VoiceChatView: View {
                 Label(bargeInMenuLabel, systemImage: "hand.raised")
             }
 
+            Toggle(isOn: Binding(
+                get: { container.settings.voiceSubtitlesEnabled },
+                set: { newValue in
+                    withAnimation(Motion.spring) {
+                        container.settings.voiceSubtitlesEnabled = newValue
+                        if !newValue {
+                            isSubtitleExpanded = false
+                        }
+                    }
+                }
+            )) {
+                Label("Subtitles", systemImage: "captions.bubble")
+            }
+
             Menu("Dictation Language") {
                 ForEach(Composer.dictationLanguages, id: \.label) { lang in
                     Button {
@@ -304,14 +352,41 @@ public struct VoiceChatView: View {
 
     // MARK: - Status, Tool Capsules & Live Subtitles
 
-    private var statusAndSubtitleSection: some View {
+    private enum SubtitleSource: Equatable {
+        case none
+        case userListening
+        case assistantThinking
+        case assistantSpeaking
+        case assistantPreviousTurn
+    }
+
+    private func statusAndSubtitleSection(expanded: Bool) -> some View {
         VStack(spacing: Theme.Space.md) {
             if let latestTool = session.activeToolRuns.last {
                 toolActivityPill(latestTool)
             }
 
-            if !subtitleText.isEmpty {
-                streamingSubtitleCard
+            if subtitleSource != .none {
+                if container.settings.voiceSubtitlesEnabled {
+                    streamingSubtitleCard(expanded: expanded)
+                        .frame(maxHeight: expanded ? .infinity : nil)
+                } else {
+                    Button {
+                        withAnimation(Motion.spring) {
+                            container.settings.voiceSubtitlesEnabled = true
+                        }
+                    } label: {
+                        Label("显示字幕", systemImage: "captions.bubble")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(Theme.textSecondary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Theme.surface, in: Capsule())
+                            .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Show subtitles")
+                }
             }
 
             Text(statusHintText)
@@ -344,46 +419,349 @@ public struct VoiceChatView: View {
         .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 1))
     }
 
-    private var streamingSubtitleCard: some View {
+    private func streamingSubtitleCard(expanded: Bool) -> some View {
         let lines = subtitleText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        let parseMarkdown = (session.state != .listening)
-
-        return ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 3) {
-                    ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                        VoiceSubtitleLineRow(
-                            text: line.isEmpty ? " " : line,
-                            parseMarkdown: parseMarkdown
-                        )
-                        .equatable()
-                    }
-                    Color.clear
-                        .frame(height: 1)
-                        .id("voice-subtitle-bottom")
-                }
-                .padding(.top, 8)
-            }
-            .frame(maxHeight: 116)
-            .scrollIndicators(.hidden)
-            .mask(
-                VStack(spacing: 0) {
-                    LinearGradient(
-                        colors: [.clear, .black],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    .frame(height: 10)
-                    Rectangle().fill(.black)
-                }
+        let parseMarkdown = (subtitleSource != .userListening)
+        let spokenSentence = activeSpokenSentence
+        let progress: VoiceSubtitleProgressResult =
+            (subtitleSource == .assistantSpeaking && !spokenSentence.isEmpty)
+            ? VoiceSubtitleProgress.match(lines: lines, spokenSentence: spokenSentence, searchFrom: subtitleMatchCursor)
+            : VoiceSubtitleProgressResult(
+                emphases: Array(repeating: .normal, count: lines.count),
+                activeLineRange: nil,
+                matchedStartOffset: nil
             )
-            .onAppear {
-                proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
-            }
-            .onChange(of: subtitleText) { _, _ in
-                withAnimation(.easeOut(duration: 0.10)) {
-                    proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
+
+        return VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: Theme.Space.xs) {
+                Circle()
+                    .fill(subtitleBadgeColor)
+                    .frame(width: 6, height: 6)
+                Text(subtitleBadgeTitle)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Theme.textTertiary)
+
+                Spacer()
+
+                Button {
+                    copySubtitleText()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: didCopySubtitle ? "checkmark" : "doc.on.doc")
+                        if didCopySubtitle {
+                            Text("已复制")
+                        }
+                    }
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(didCopySubtitle ? Theme.fitGreen : Theme.textTertiary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("复制字幕")
+
+                Button {
+                    withAnimation(Motion.spring) {
+                        isSubtitleExpanded.toggle()
+                    }
+                } label: {
+                    Image(
+                        systemName: expanded
+                            ? "arrow.down.right.and.arrow.up.left"
+                            : "arrow.up.left.and.arrow.down.right"
+                    )
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(Theme.textTertiary)
+                    .padding(4)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(expanded ? "收起字幕" : "展开字幕")
+            }
+            .padding(.bottom, 6)
+
+            let isSubtitleOverflowing = subtitleViewportHeight > 0
+                && subtitleContentHeight > subtitleViewportHeight + 2
+
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 3) {
+                        ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                            VoiceSubtitleLineRow(
+                                text: line.isEmpty ? " " : line,
+                                parseMarkdown: parseMarkdown,
+                                emphasis: progress.emphases.indices.contains(index) ? progress.emphases[index] : .normal
+                            )
+                            .equatable()
+                            .id("voice-subtitle-line-\(index)")
+                        }
+                        Color.clear
+                            .frame(height: 1)
+                            .id("voice-subtitle-bottom")
+                            .onAppear { subtitleAtBottom = true }
+                            .onDisappear { subtitleAtBottom = false }
+                    }
+                    .padding(.top, 8)
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear
+                                .onAppear {
+                                    let h = geo.size.height
+                                    if abs(subtitleContentHeight - h) > 0.5 {
+                                        subtitleContentHeight = h
+                                    }
+                                }
+                                .onChange(of: geo.size.height) { _, newHeight in
+                                    if abs(subtitleContentHeight - newHeight) > 0.5 {
+                                        subtitleContentHeight = newHeight
+                                    }
+                                }
+                        }
+                    )
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .frame(
+                    minHeight: expanded ? 180 : nil,
+                    maxHeight: expanded ? .infinity : 116
+                )
+                .frame(
+                    height: expanded
+                        ? nil
+                        : (subtitleContentHeight > 0 ? min(max(subtitleContentHeight, 28), 116) : nil)
+                )
+                .background(
+                    GeometryReader { geo in
+                        Color.clear
+                            .onAppear {
+                                let h = geo.size.height
+                                if abs(subtitleViewportHeight - h) > 0.5 {
+                                    subtitleViewportHeight = h
+                                }
+                            }
+                            .onChange(of: geo.size.height) { _, newHeight in
+                                if abs(subtitleViewportHeight - newHeight) > 0.5 {
+                                    subtitleViewportHeight = newHeight
+                                }
+                            }
+                    }
+                )
+                .scrollIndicators(.hidden)
+                .mask(
+                    VStack(spacing: 0) {
+                        LinearGradient(
+                            colors: [.clear, .black],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                        .frame(height: 8)
+                        Rectangle().fill(.black)
+                    }
+                )
+                .simultaneousGesture(
+                    DragGesture(minimumDistance: 6)
+                        .onChanged { value in
+                            if !isSubtitleDragging { isSubtitleDragging = true }
+                            guard isSubtitleOverflowing else { return }
+                            if subtitleSource == .assistantSpeaking {
+                                if abs(value.translation.height) > 10 && !subtitleUserScrolledUp {
+                                    subtitleUserScrolledUp = true
+                                }
+                            } else if value.translation.height > 6 && !subtitleUserScrolledUp {
+                                subtitleUserScrolledUp = true
+                            } else if value.translation.height < -16 && subtitleAtBottom && subtitleUserScrolledUp {
+                                subtitleUserScrolledUp = false
+                            }
+                        }
+                        .onEnded { value in
+                            isSubtitleDragging = false
+                            if subtitleSource != .assistantSpeaking && value.translation.height < 0 && subtitleAtBottom && subtitleUserScrolledUp {
+                                subtitleUserScrolledUp = false
+                            }
+                        }
+                )
+                .onChange(of: isSubtitleOverflowing) { _, overflowing in
+                    if !overflowing && subtitleUserScrolledUp {
+                        subtitleUserScrolledUp = false
+                    }
+                }
+                .onAppear {
+                    if subtitleSource == .assistantSpeaking,
+                       let activeRange = progress.activeLineRange
+                    {
+                        lastAutoScrolledLine = activeRange.upperBound
+                        proxy.scrollTo("voice-subtitle-line-\(activeRange.upperBound)", anchor: .center)
+                    } else {
+                        proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
+                    }
+                }
+                .onChange(of: subtitleText) { _, _ in
+                    guard !subtitleUserScrolledUp && !isSubtitleDragging else { return }
+                    if subtitleSource == .assistantSpeaking,
+                       let activeRange = progress.activeLineRange
+                    {
+                        if lastAutoScrolledLine != activeRange.upperBound {
+                            lastAutoScrolledLine = activeRange.upperBound
+                            withAnimation(.easeOut(duration: 0.14)) {
+                                proxy.scrollTo("voice-subtitle-line-\(activeRange.upperBound)", anchor: .center)
+                            }
+                        }
+                    } else {
+                        withAnimation(.easeOut(duration: 0.10)) {
+                            proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
+                        }
+                    }
+                }
+                .onChange(of: spokenSentence) { _, _ in
+                    if let start = progress.matchedStartOffset, start != subtitleMatchCursor {
+                        subtitleMatchCursor = start
+                    }
+                    guard !subtitleUserScrolledUp && !isSubtitleDragging,
+                          subtitleSource == .assistantSpeaking,
+                          let activeRange = progress.activeLineRange
+                    else { return }
+                    lastAutoScrolledLine = activeRange.upperBound
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        proxy.scrollTo("voice-subtitle-line-\(activeRange.upperBound)", anchor: .center)
+                    }
+                }
+                .onChange(of: subtitleSource) { oldSource, newSource in
+                    if newSource == .none {
+                        return
+                    } else if oldSource == .assistantSpeaking && newSource == .assistantPreviousTurn {
+                        subtitleMatchCursor = 0
+                        lastAutoScrolledLine = nil
+                    } else if newSource == .assistantSpeaking,
+                              let activeRange = progress.activeLineRange
+                    {
+                        subtitleUserScrolledUp = false
+                        subtitleMatchCursor = progress.matchedStartOffset ?? 0
+                        lastAutoScrolledLine = activeRange.upperBound
+                        proxy.scrollTo("voice-subtitle-line-\(activeRange.upperBound)", anchor: .center)
+                    } else {
+                        subtitleUserScrolledUp = false
+                        subtitleAtBottom = true
+                        subtitleMatchCursor = 0
+                        lastAutoScrolledLine = nil
+                        proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
+                    }
+                }
+                .overlay(alignment: .bottomTrailing) {
+                    if subtitleUserScrolledUp && isSubtitleOverflowing {
+                        Button {
+                            subtitleUserScrolledUp = false
+                            withAnimation(Motion.canvas) {
+                                if subtitleSource == .assistantSpeaking,
+                                   let activeRange = progress.activeLineRange
+                                {
+                                    lastAutoScrolledLine = activeRange.upperBound
+                                    proxy.scrollTo("voice-subtitle-line-\(activeRange.upperBound)", anchor: .center)
+                                } else {
+                                    subtitleAtBottom = true
+                                    proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
+                                }
+                            }
+                        } label: {
+                            Label(
+                                (subtitleSource == .assistantSpeaking && progress.activeLineRange != nil) ? "跟随朗读" : "最新",
+                                systemImage: "chevron.down"
+                            )
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Theme.textPrimary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Theme.surface.opacity(0.95), in: Capsule())
+                            .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 1))
+                            .shadow(color: .black.opacity(0.10), radius: 4, y: 1)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.bottom, 6)
+                        .padding(.trailing, 2)
+                        .transition(.opacity.combined(with: .scale(scale: 0.92)))
+                        .accessibilityLabel("回到当前字幕位置")
+                    }
+                }
+                .contextMenu {
+                    Button {
+                        copySubtitleText()
+                    } label: {
+                        Label("复制全文", systemImage: "doc.on.doc")
+                    }
+
+                    Button {
+                        withAnimation(Motion.spring) {
+                            isSubtitleExpanded.toggle()
+                        }
+                    } label: {
+                        Label(
+                            expanded ? "收起字幕" : "展开字幕",
+                            systemImage: expanded
+                                ? "arrow.down.right.and.arrow.up.left"
+                                : "arrow.up.left.and.arrow.down.right"
+                        )
+                    }
+
+                    Button {
+                        withAnimation(Motion.spring) {
+                            container.settings.voiceSubtitlesEnabled = false
+                            isSubtitleExpanded = false
+                        }
+                    } label: {
+                        Label("隐藏字幕", systemImage: "eye.slash")
+                    }
+
+                    if subtitleSource == .userListening {
+                        Divider()
+                        Button {
+                            session.submitCurrentTranscriptNow()
+                        } label: {
+                            Label("立即发送", systemImage: "arrow.up.circle")
+                        }
+                        Button {
+                            session.restartListening()
+                        } label: {
+                            Label("重说", systemImage: "arrow.counterclockwise")
+                        }
+                    }
+                }
+            }
+
+            if subtitleSource == .userListening {
+                Divider()
+                    .background(Theme.hairline)
+                    .padding(.top, 6)
+
+                HStack {
+                    Button {
+                        session.restartListening()
+                    } label: {
+                        Label("重说", systemImage: "arrow.counterclockwise")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(Theme.textSecondary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Theme.surface, in: Capsule())
+                            .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("清空当前语音重说")
+
+                    Spacer()
+
+                    Button {
+                        session.submitCurrentTranscriptNow()
+                    } label: {
+                        Label("立即发送", systemImage: "arrow.up.circle.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Theme.accent)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .background(Theme.accentSoft, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("立即发送语音内容")
+                }
+                .padding(.top, 6)
             }
         }
         .padding(.leading, Theme.Space.md)
@@ -397,14 +775,73 @@ public struct VoiceChatView: View {
         )
     }
 
-    private var subtitleText: String {
+    private var subtitleSource: SubtitleSource {
         switch session.state {
         case .listening:
-            return session.liveUserTranscript
-        case .thinking, .speaking:
-            return session.liveAssistantText
+            if !session.liveUserTranscript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return .userListening
+            }
+            if !session.liveAssistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return .assistantPreviousTurn
+            }
+            return .none
+        case .thinking:
+            return session.liveAssistantText.isEmpty ? .none : .assistantThinking
+        case .speaking:
+            return session.liveAssistantText.isEmpty ? .none : .assistantSpeaking
         case .idle, .denied, .unavailable:
+            return .none
+        }
+    }
+
+    private var subtitleText: String {
+        switch subtitleSource {
+        case .userListening:
+            return session.liveUserTranscript
+        case .assistantThinking, .assistantSpeaking, .assistantPreviousTurn:
+            return session.liveAssistantText
+        case .none:
             return ""
+        }
+    }
+
+    private var subtitleBadgeTitle: String {
+        switch subtitleSource {
+        case .userListening:
+            return "我 · 正在说"
+        case .assistantThinking:
+            return "AI · 生成中"
+        case .assistantSpeaking:
+            return "AI · 朗读中"
+        case .assistantPreviousTurn:
+            return "AI · 上一句"
+        case .none:
+            return ""
+        }
+    }
+
+    private var subtitleBadgeColor: Color {
+        switch subtitleSource {
+        case .userListening, .assistantSpeaking:
+            return Theme.accent
+        case .assistantThinking, .assistantPreviousTurn, .none:
+            return Theme.textTertiary
+        }
+    }
+
+    private var activeSpokenSentence: String {
+        subtitleSource == .assistantSpeaking ? session.currentSpokenSentence : ""
+    }
+
+    private func copySubtitleText() {
+        guard !subtitleText.isEmpty else { return }
+        Clipboard.copy(subtitleText)
+        didCopySubtitle = true
+        copyResetTask?.cancel()
+        copyResetTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1500))
+            guard !Task.isCancelled else { return }
+            didCopySubtitle = false
         }
     }
 
@@ -507,14 +944,30 @@ public struct VoiceChatView: View {
 private struct VoiceSubtitleLineRow: View, Equatable {
     let text: String
     let parseMarkdown: Bool
+    let emphasis: VoiceSubtitleLineEmphasis
 
     var body: some View {
         renderedText
-            .font(.callout)
-            .foregroundStyle(Theme.textSecondary)
+            .font(rowFont)
+            .foregroundStyle(rowColor)
             .multilineTextAlignment(.leading)
             .lineSpacing(3)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var rowFont: Font {
+        emphasis == .active ? .callout.weight(.medium) : .callout
+    }
+
+    private var rowColor: Color {
+        switch emphasis {
+        case .active:
+            return Theme.textPrimary
+        case .spoken:
+            return Theme.textTertiary.opacity(0.75)
+        case .upcoming, .normal:
+            return Theme.textSecondary
+        }
     }
 
     @ViewBuilder
