@@ -446,7 +446,7 @@ public struct VoiceChatView: View {
                 matchedStartOffset: nil
             )
         }
-        let totalContentHeight = subtitleContentHeight + 6
+        let totalContentHeight = subtitleContentHeight + 10
         let collapsedSubtitleHeight: CGFloat? = subtitleContentHeight > 0
             ? min(max(totalContentHeight, 28), 116)
             : nil
@@ -504,7 +504,7 @@ public struct VoiceChatView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(expanded ? "收起字幕" : "展开字幕")
                 }
-                .padding(.bottom, 6)
+                .padding(.bottom, 2)
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 3) {
@@ -551,7 +551,7 @@ public struct VoiceChatView: View {
                     )
                 }
                 .id(subtitleScrollScope(focusedSpoken: isFocusedSpokenMode))
-                .contentMargins(.top, 6, for: .scrollContent)
+                .contentMargins(.top, 10, for: .scrollContent)
                 .scrollBounceBehavior(.basedOnSize)
                 .frame(
                     minHeight: expanded ? 180 : collapsedSubtitleHeight,
@@ -580,11 +580,15 @@ public struct VoiceChatView: View {
                 .mask(
                     VStack(spacing: 0) {
                         LinearGradient(
-                            colors: [.clear, .black],
+                            stops: [
+                                .init(color: .clear, location: 0),
+                                .init(color: .black.opacity(0.45), location: 0.45),
+                                .init(color: .black, location: 1),
+                            ],
                             startPoint: .top,
                             endPoint: .bottom
                         )
-                        .frame(height: 6)
+                        .frame(height: 18)
                         Rectangle().fill(.black)
                     }
                 )
