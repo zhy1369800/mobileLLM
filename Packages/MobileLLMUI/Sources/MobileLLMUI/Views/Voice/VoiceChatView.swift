@@ -298,7 +298,7 @@ public struct VoiceChatView: View {
                 }
             }
 
-            Menu("Language") {
+            Menu {
                 ForEach(Composer.dictationLanguages, id: \.label) { lang in
                     Button {
                         chat.dictationLocale = lang.id
@@ -310,6 +310,8 @@ public struct VoiceChatView: View {
                         }
                     }
                 }
+            } label: {
+                Label("Language", systemImage: "globe")
             }
         } label: {
             Image(systemName: capabilitiesActive ? "slider.horizontal.3" : "ellipsis.circle")
