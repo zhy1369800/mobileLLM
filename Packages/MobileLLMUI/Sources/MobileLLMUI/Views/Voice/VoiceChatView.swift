@@ -11,6 +11,7 @@ public struct VoiceChatView: View {
     var onOpenModels: () -> Void
 
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isVisible = false
     @State private var showModelSwitcher = false
     @State private var showToolPicker = false
@@ -447,6 +448,8 @@ public struct VoiceChatView: View {
         let collapsedSubtitleHeight: CGFloat? = subtitleContentHeight > 0
             ? min(max(totalContentHeight, 28), 116)
             : nil
+        let focusedSpokenTransitionID = isFocusedSpokenMode ? "focused-\(spokenSentence)" : "stream"
+        let subtitleSwapAnimation: Animation? = reduceMotion ? nil : .easeOut(duration: 0.22)
         let isSubtitleOverflowing = subtitleViewportHeight > 0
             && totalContentHeight > subtitleViewportHeight + 2
         let shouldAutoScrollCurrent = !subtitleUserScrolledUp && !isSubtitleDragging
@@ -507,7 +510,8 @@ public struct VoiceChatView: View {
                             VoiceSubtitleLineRow(
                                 text: line.isEmpty ? " " : line,
                                 parseMarkdown: parseMarkdown,
-                                emphasis: progress.emphases.indices.contains(index) ? progress.emphases[index] : .normal
+                                emphasis: progress.emphases.indices.contains(index) ? progress.emphases[index] : .normal,
+                                reduceMotion: reduceMotion
                             )
                             .equatable()
                             .id("voice-subtitle-line-\(index)")
@@ -518,6 +522,15 @@ public struct VoiceChatView: View {
                             .onAppear { subtitleAtBottom = true }
                             .onDisappear { subtitleAtBottom = false }
                     }
+                    .id(focusedSpokenTransitionID)
+                    .transition(
+                        reduceMotion
+                            ? .opacity
+                            : .asymmetric(
+                                insertion: .opacity.combined(with: .offset(y: 6)),
+                                removal: .opacity.combined(with: .offset(y: -4))
+                            )
+                    )
                     .background(
                         GeometryReader { geo in
                             Color.clear
@@ -543,6 +556,8 @@ public struct VoiceChatView: View {
                     maxHeight: expanded ? .infinity : (collapsedSubtitleHeight ?? 116)
                 )
                 .clipped()
+                .animation(subtitleSwapAnimation, value: focusedSpokenTransitionID)
+                .animation(subtitleSwapAnimation, value: collapsedSubtitleHeight)
                 .background(
                     GeometryReader { geo in
                         Color.clear
@@ -943,6 +958,7 @@ private struct VoiceSubtitleLineRow: View, Equatable {
     let text: String
     let parseMarkdown: Bool
     let emphasis: VoiceSubtitleLineEmphasis
+    let reduceMotion: Bool
 
     var body: some View {
         renderedText
@@ -951,6 +967,7 @@ private struct VoiceSubtitleLineRow: View, Equatable {
             .multilineTextAlignment(.leading)
             .lineSpacing(3)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: emphasis)
     }
 
     private var rowFont: Font {
