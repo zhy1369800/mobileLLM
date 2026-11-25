@@ -559,7 +559,7 @@ public struct VoiceChatView: View {
                 )
                 .clipped()
                 .animation(subtitleSwapAnimation, value: focusedSpokenTransitionID)
-                .animation(subtitleSwapAnimation, value: collapsedSubtitleHeight)
+                .animation(isFocusedSpokenMode ? subtitleSwapAnimation : nil, value: collapsedSubtitleHeight)
                 .background(
                     GeometryReader { geo in
                         Color.clear
@@ -642,11 +642,19 @@ public struct VoiceChatView: View {
                                 proxy.scrollTo("voice-subtitle-line-\(activeRange.lowerBound)", anchor: .top)
                             }
                         }
-                    } else {
+                    } else if isSubtitleOverflowing {
                         withAnimation(.easeOut(duration: 0.10)) {
                             proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
                         }
                     }
+                }
+                .onChange(of: subtitleContentHeight) { _, _ in
+                    guard shouldAutoScrollCurrent,
+                          !isFocusedSpokenMode,
+                          !isFollowingSpokenAudio,
+                          isSubtitleOverflowing
+                    else { return }
+                    proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
                 }
                 .onChange(of: spokenSentence) { _, _ in
                     guard isFollowingSpokenAudio else { return }
