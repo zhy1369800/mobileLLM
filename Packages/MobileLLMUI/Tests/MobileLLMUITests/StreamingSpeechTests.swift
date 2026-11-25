@@ -138,6 +138,12 @@ private final class MockPrefetchableTTSEngine: PrefetchableTTSEngine {
         cont?.resume(returning: ())
     }
 
+    func resumePendingSynthesize(with text: String) {
+        let cont = synthesizeContinuation
+        synthesizeContinuation = nil
+        cont?.resume(returning: Data(text.utf8))
+    }
+
     func speak(text: String, voiceID: String?, rate: Double) async throws {
         let data = try await synthesize(text: text, voiceID: voiceID, rate: rate)
         try await play(synthesizedData: data)
@@ -617,6 +623,44 @@ final class StreamingSpeechTests: XCTestCase {
 
         XCTAssertEqual(cloudEngine.synthesizedSegments.count, 2)
         XCTAssertTrue(cloudEngine.synthesizedSegments.allSatisfy { $0.count <= 100 })
+        XCTAssertFalse(coordinator.isSpeaking)
+    }
+
+    func testCurrentSpokenSentenceUpdatesWhenPlaybackStartsNotDuringSynthesize() async {
+        let settings = makeSettings(autoSpeak: false)
+        settings.ttsEngineKind = .cloudOpenAI
+        let cloudEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 280)
+        cloudEngine.hangSynthesizeOnCallIndex = 1
+        cloudEngine.hangPlayOnCallIndex = 1
+        let coordinator = StreamingSpeechCoordinator(
+            engine: MockTTSEngine(),
+            cloudEngine: cloudEngine,
+            settings: settings
+        )
+
+        coordinator.speakMessage(text: "第一句内容。", messageID: UUID())
+        for _ in 0..<10 where cloudEngine.synthesizedSegments.count < 1 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(cloudEngine.synthesizedSegments, ["第一句内容。"])
+        XCTAssertTrue(cloudEngine.playedSegments.isEmpty)
+        XCTAssertEqual(coordinator.currentSpokenSentence, "")
+
+        cloudEngine.resumePendingSynthesize(with: "第一句内容。")
+        for _ in 0..<10 where cloudEngine.playedSegments.count < 1 {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(cloudEngine.playedSegments, ["第一句内容。"])
+        XCTAssertEqual(coordinator.currentSpokenSentence, "第一句内容。")
+
+        cloudEngine.resumePendingPlay()
+        for _ in 0..<10 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(coordinator.currentSpokenSentence, "")
         XCTAssertFalse(coordinator.isSpeaking)
     }
 }

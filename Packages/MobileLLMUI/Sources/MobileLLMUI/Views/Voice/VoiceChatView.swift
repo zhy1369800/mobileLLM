@@ -414,22 +414,39 @@ public struct VoiceChatView: View {
     }
 
     private func streamingSubtitleCard(expanded: Bool) -> some View {
-        let lines = subtitleText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        let parseMarkdown = (subtitleSource != .userListening)
-        let spokenSentence = activeSpokenSentence
-        let progress: VoiceSubtitleProgressResult =
-            (subtitleSource == .assistantSpeaking && !spokenSentence.isEmpty)
-            ? VoiceSubtitleProgress.match(lines: lines, spokenSentence: spokenSentence, searchFrom: subtitleMatchCursor)
-            : VoiceSubtitleProgressResult(
+        let spokenSentence = activeSpokenSentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isFollowingSpokenAudio = (subtitleSource == .assistantSpeaking)
+            && container.settings.autoFollowVoiceSubtitles
+        let isFocusedSpokenMode = !expanded
+            && isFollowingSpokenAudio
+            && !spokenSentence.isEmpty
+        let displayedText = isFocusedSpokenMode ? spokenSentence : subtitleText
+        let lines = displayedText.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let parseMarkdown = (subtitleSource != .userListening && !isFocusedSpokenMode)
+        let progress: VoiceSubtitleProgressResult
+        if isFocusedSpokenMode {
+            progress = VoiceSubtitleProgressResult(
+                emphases: Array(repeating: .active, count: lines.count),
+                activeLineRange: lines.isEmpty ? nil : 0...(lines.count - 1),
+                matchedStartOffset: nil
+            )
+        } else if isFollowingSpokenAudio && !spokenSentence.isEmpty {
+            progress = VoiceSubtitleProgress.match(
+                lines: lines,
+                spokenSentence: spokenSentence,
+                searchFrom: subtitleMatchCursor
+            )
+        } else {
+            progress = VoiceSubtitleProgressResult(
                 emphases: Array(repeating: .normal, count: lines.count),
                 activeLineRange: nil,
                 matchedStartOffset: nil
             )
+        }
+        let totalContentHeight = subtitleContentHeight + 6
         let isSubtitleOverflowing = subtitleViewportHeight > 0
-            && subtitleContentHeight > subtitleViewportHeight + 2
-        let shouldAutoFollowCurrent = (subtitleSource == .userListening)
-            ? (!subtitleUserScrolledUp && !isSubtitleDragging)
-            : (container.settings.autoFollowVoiceSubtitles && !subtitleUserScrolledUp && !isSubtitleDragging)
+            && totalContentHeight > subtitleViewportHeight + 2
+        let shouldAutoScrollCurrent = !subtitleUserScrolledUp && !isSubtitleDragging
 
         return ScrollViewReader { proxy in
             VStack(alignment: .leading, spacing: 0) {
@@ -498,7 +515,6 @@ public struct VoiceChatView: View {
                             .onAppear { subtitleAtBottom = true }
                             .onDisappear { subtitleAtBottom = false }
                     }
-                    .padding(.top, 8)
                     .background(
                         GeometryReader { geo in
                             Color.clear
@@ -516,7 +532,8 @@ public struct VoiceChatView: View {
                         }
                     )
                 }
-                .id(subtitleScrollScope)
+                .id(subtitleScrollScope(focusedSpoken: isFocusedSpokenMode))
+                .contentMargins(.top, 6, for: .scrollContent)
                 .scrollBounceBehavior(.basedOnSize)
                 .frame(
                     minHeight: expanded ? 180 : nil,
@@ -525,7 +542,7 @@ public struct VoiceChatView: View {
                 .frame(
                     height: expanded
                         ? nil
-                        : (subtitleContentHeight > 0 ? min(max(subtitleContentHeight, 28), 116) : nil)
+                        : (subtitleContentHeight > 0 ? min(max(totalContentHeight, 28), 116) : nil)
                 )
                 .background(
                     GeometryReader { geo in
@@ -551,7 +568,7 @@ public struct VoiceChatView: View {
                             startPoint: .top,
                             endPoint: .bottom
                         )
-                        .frame(height: 8)
+                        .frame(height: 6)
                         Rectangle().fill(.black)
                     }
                 )
@@ -559,10 +576,8 @@ public struct VoiceChatView: View {
                     DragGesture(minimumDistance: 6)
                         .onChanged { value in
                             if !isSubtitleDragging { isSubtitleDragging = true }
-                            guard isSubtitleOverflowing,
-                                  subtitleSource == .userListening || container.settings.autoFollowVoiceSubtitles
-                            else { return }
-                            if subtitleSource == .assistantSpeaking {
+                            guard !isFocusedSpokenMode, isSubtitleOverflowing else { return }
+                            if isFollowingSpokenAudio {
                                 if abs(value.translation.height) > 10 && !subtitleUserScrolledUp {
                                     subtitleUserScrolledUp = true
                                 }
@@ -574,7 +589,7 @@ public struct VoiceChatView: View {
                         }
                         .onEnded { value in
                             isSubtitleDragging = false
-                            if subtitleSource != .assistantSpeaking && value.translation.height < 0 && subtitleAtBottom && subtitleUserScrolledUp {
+                            if !isFollowingSpokenAudio && value.translation.height < 0 && subtitleAtBottom && subtitleUserScrolledUp {
                                 subtitleUserScrolledUp = false
                             }
                         }
@@ -585,25 +600,26 @@ public struct VoiceChatView: View {
                     }
                 }
                 .onAppear {
-                    guard subtitleSource == .userListening || container.settings.autoFollowVoiceSubtitles else { return }
-                    if subtitleSource == .assistantSpeaking,
-                       let activeRange = progress.activeLineRange
-                    {
-                        lastAutoScrolledLine = activeRange.upperBound
-                        proxy.scrollTo("voice-subtitle-line-\(activeRange.upperBound)", anchor: .center)
+                    if isFocusedSpokenMode {
+                        lastAutoScrolledLine = 0
+                        proxy.scrollTo("voice-subtitle-line-0", anchor: .top)
+                    } else if isFollowingSpokenAudio {
+                        if let activeRange = progress.activeLineRange {
+                            lastAutoScrolledLine = activeRange.lowerBound
+                            proxy.scrollTo("voice-subtitle-line-\(activeRange.lowerBound)", anchor: .top)
+                        }
                     } else {
                         proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
                     }
                 }
                 .onChange(of: subtitleText) { _, _ in
-                    guard shouldAutoFollowCurrent else { return }
-                    if subtitleSource == .assistantSpeaking,
-                       let activeRange = progress.activeLineRange
-                    {
-                        if lastAutoScrolledLine != activeRange.upperBound {
-                            lastAutoScrolledLine = activeRange.upperBound
+                    guard shouldAutoScrollCurrent, !isFocusedSpokenMode else { return }
+                    if isFollowingSpokenAudio {
+                        guard let activeRange = progress.activeLineRange else { return }
+                        if lastAutoScrolledLine != activeRange.lowerBound {
+                            lastAutoScrolledLine = activeRange.lowerBound
                             withAnimation(.easeOut(duration: 0.14)) {
-                                proxy.scrollTo("voice-subtitle-line-\(activeRange.upperBound)", anchor: .center)
+                                proxy.scrollTo("voice-subtitle-line-\(activeRange.lowerBound)", anchor: .top)
                             }
                         }
                     } else {
@@ -613,16 +629,24 @@ public struct VoiceChatView: View {
                     }
                 }
                 .onChange(of: spokenSentence) { _, _ in
+                    guard isFollowingSpokenAudio else { return }
+                    if isFocusedSpokenMode {
+                        subtitleUserScrolledUp = false
+                        lastAutoScrolledLine = 0
+                        withAnimation(.easeOut(duration: 0.14)) {
+                            proxy.scrollTo("voice-subtitle-line-0", anchor: .top)
+                        }
+                        return
+                    }
                     if let start = progress.matchedStartOffset, start != subtitleMatchCursor {
                         subtitleMatchCursor = start
                     }
-                    guard shouldAutoFollowCurrent,
-                          subtitleSource == .assistantSpeaking,
+                    guard shouldAutoScrollCurrent,
                           let activeRange = progress.activeLineRange
                     else { return }
-                    lastAutoScrolledLine = activeRange.upperBound
+                    lastAutoScrolledLine = activeRange.lowerBound
                     withAnimation(.easeOut(duration: 0.18)) {
-                        proxy.scrollTo("voice-subtitle-line-\(activeRange.upperBound)", anchor: .center)
+                        proxy.scrollTo("voice-subtitle-line-\(activeRange.lowerBound)", anchor: .top)
                     }
                 }
                 .onChange(of: subtitleSource) { oldSource, newSource in
@@ -633,57 +657,79 @@ public struct VoiceChatView: View {
                     if newSource == .none {
                         return
                     }
-                    let shouldAutoScroll = (newSource == .userListening) || container.settings.autoFollowVoiceSubtitles
                     if oldSource == .assistantSpeaking && newSource == .assistantPreviousTurn {
+                        if container.settings.autoFollowVoiceSubtitles {
+                            subtitleUserScrolledUp = false
+                        }
                         subtitleMatchCursor = 0
                         lastAutoScrolledLine = nil
-                    } else if newSource == .assistantSpeaking,
-                              let activeRange = progress.activeLineRange
-                    {
+                    } else if newSource == .assistantSpeaking && container.settings.autoFollowVoiceSubtitles {
                         subtitleUserScrolledUp = false
-                        subtitleMatchCursor = progress.matchedStartOffset ?? 0
-                        lastAutoScrolledLine = activeRange.upperBound
-                        if shouldAutoScroll {
-                            proxy.scrollTo("voice-subtitle-line-\(activeRange.upperBound)", anchor: .center)
+                        if isFocusedSpokenMode {
+                            subtitleMatchCursor = 0
+                            lastAutoScrolledLine = 0
+                            proxy.scrollTo("voice-subtitle-line-0", anchor: .top)
+                        } else if let activeRange = progress.activeLineRange {
+                            subtitleMatchCursor = progress.matchedStartOffset ?? 0
+                            lastAutoScrolledLine = activeRange.lowerBound
+                            proxy.scrollTo("voice-subtitle-line-\(activeRange.lowerBound)", anchor: .top)
+                        } else {
+                            subtitleMatchCursor = 0
+                            lastAutoScrolledLine = nil
                         }
                     } else {
                         subtitleUserScrolledUp = false
                         subtitleAtBottom = true
                         subtitleMatchCursor = 0
                         lastAutoScrolledLine = nil
-                        if shouldAutoScroll {
-                            proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
-                        }
+                        proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
                     }
                 }
                 .onChange(of: container.settings.autoFollowVoiceSubtitles) { _, enabled in
-                    guard enabled, subtitleSource != .userListening else { return }
+                    guard subtitleSource != .userListening else { return }
                     subtitleUserScrolledUp = false
                     withAnimation(Motion.canvas) {
-                        if subtitleSource == .assistantSpeaking,
-                           let activeRange = progress.activeLineRange
-                        {
-                            lastAutoScrolledLine = activeRange.upperBound
-                            proxy.scrollTo("voice-subtitle-line-\(activeRange.upperBound)", anchor: .center)
+                        if enabled {
+                            if isFocusedSpokenMode {
+                                lastAutoScrolledLine = 0
+                                proxy.scrollTo("voice-subtitle-line-0", anchor: .top)
+                            } else if isFollowingSpokenAudio {
+                                if let activeRange = progress.activeLineRange {
+                                    lastAutoScrolledLine = activeRange.lowerBound
+                                    proxy.scrollTo("voice-subtitle-line-\(activeRange.lowerBound)", anchor: .top)
+                                }
+                            } else {
+                                subtitleAtBottom = true
+                                proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
+                            }
                         } else {
+                            subtitleMatchCursor = 0
+                            lastAutoScrolledLine = nil
                             subtitleAtBottom = true
                             proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
                         }
                     }
                 }
+                .onChange(of: isSubtitleExpanded) { _, isNowExpanded in
+                    guard isNowExpanded,
+                          subtitleSource == .assistantSpeaking,
+                          container.settings.autoFollowVoiceSubtitles
+                    else { return }
+                    subtitleUserScrolledUp = false
+                }
                 .overlay(alignment: .bottomTrailing) {
-                    if subtitleUserScrolledUp
+                    if !isFocusedSpokenMode
+                        && subtitleUserScrolledUp
                         && isSubtitleOverflowing
-                        && (subtitleSource == .userListening || container.settings.autoFollowVoiceSubtitles)
                     {
                         Button {
                             subtitleUserScrolledUp = false
                             withAnimation(Motion.canvas) {
-                                if subtitleSource == .assistantSpeaking,
+                                if isFollowingSpokenAudio,
                                    let activeRange = progress.activeLineRange
                                 {
-                                    lastAutoScrolledLine = activeRange.upperBound
-                                    proxy.scrollTo("voice-subtitle-line-\(activeRange.upperBound)", anchor: .center)
+                                    lastAutoScrolledLine = activeRange.lowerBound
+                                    proxy.scrollTo("voice-subtitle-line-\(activeRange.lowerBound)", anchor: .top)
                                 } else {
                                     subtitleAtBottom = true
                                     proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
@@ -691,7 +737,7 @@ public struct VoiceChatView: View {
                             }
                         } label: {
                             Label(
-                                (subtitleSource == .assistantSpeaking && progress.activeLineRange != nil) ? "跟随朗读" : "最新",
+                                (isFollowingSpokenAudio && progress.activeLineRange != nil) ? "跟随朗读" : "最新",
                                 systemImage: "chevron.down"
                             )
                             .font(.caption2.weight(.semibold))
@@ -742,8 +788,9 @@ public struct VoiceChatView: View {
         }
     }
 
-    private var subtitleScrollScope: Int {
-        subtitleSource == .userListening ? 1 : 2
+    private func subtitleScrollScope(focusedSpoken: Bool) -> Int {
+        if subtitleSource == .userListening { return 1 }
+        return focusedSpoken ? 3 : 2
     }
 
     private var subtitleSource: SubtitleSource {

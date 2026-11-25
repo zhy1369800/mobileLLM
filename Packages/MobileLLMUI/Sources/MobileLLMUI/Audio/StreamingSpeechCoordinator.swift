@@ -287,7 +287,6 @@ public final class StreamingSpeechCoordinator {
                             self.prefetchedChunk = nil
                             nextText = prefetched.text
                             currentTextToSpeak = nextText
-                            self.currentSpokenSentence = nextText
                             if prefetched.voiceID == preferredVoiceID,
                                abs(prefetched.rate - self.settings.ttsSpeechRate) < 0.001
                             {
@@ -306,7 +305,6 @@ public final class StreamingSpeechCoordinator {
                                 splitOnScriptChange: splitScripts
                             )
                             currentTextToSpeak = nextText
-                            self.currentSpokenSentence = nextText
                             audioData = try await prefetchEngine.synthesize(
                                 text: nextText,
                                 voiceID: preferredVoiceID,
@@ -316,6 +314,7 @@ public final class StreamingSpeechCoordinator {
 
                         guard self.sessionGeneration == generation, !Task.isCancelled else { break }
 
+                        self.currentSpokenSentence = nextText
                         self.activeDrainContext?.isPlayingCurrent = true
                         self.maybeSchedulePrefetch()
                         defer { self.activeDrainContext?.isPlayingCurrent = false }
@@ -354,6 +353,7 @@ public final class StreamingSpeechCoordinator {
                             isPlayingCurrent: false
                         )
                         do {
+                            self.currentSpokenSentence = fallbackText
                             try await self.engine.speak(
                                 text: fallbackText,
                                 voiceID: preferredVoiceID,
