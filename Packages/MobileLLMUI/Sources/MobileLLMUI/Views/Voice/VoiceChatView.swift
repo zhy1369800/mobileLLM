@@ -293,11 +293,11 @@ public struct VoiceChatView: View {
                         }
                     }
                 )) {
-                    Label("自动跟随朗读", systemImage: "arrow.down.to.line")
+                    Label("Auto-Follow", systemImage: "arrow.down.to.line")
                 }
             }
 
-            Menu("Dictation Language") {
+            Menu("Language") {
                 ForEach(Composer.dictationLanguages, id: \.label) { lang in
                     Button {
                         chat.dictationLocale = lang.id
@@ -444,6 +444,9 @@ public struct VoiceChatView: View {
             )
         }
         let totalContentHeight = subtitleContentHeight + 6
+        let collapsedSubtitleHeight: CGFloat? = subtitleContentHeight > 0
+            ? min(max(totalContentHeight, 28), 116)
+            : nil
         let isSubtitleOverflowing = subtitleViewportHeight > 0
             && totalContentHeight > subtitleViewportHeight + 2
         let shouldAutoScrollCurrent = !subtitleUserScrolledUp && !isSubtitleDragging
@@ -536,14 +539,10 @@ public struct VoiceChatView: View {
                 .contentMargins(.top, 6, for: .scrollContent)
                 .scrollBounceBehavior(.basedOnSize)
                 .frame(
-                    minHeight: expanded ? 180 : nil,
-                    maxHeight: expanded ? .infinity : 116
+                    minHeight: expanded ? 180 : collapsedSubtitleHeight,
+                    maxHeight: expanded ? .infinity : (collapsedSubtitleHeight ?? 116)
                 )
-                .frame(
-                    height: expanded
-                        ? nil
-                        : (subtitleContentHeight > 0 ? min(max(totalContentHeight, 28), 116) : nil)
-                )
+                .clipped()
                 .background(
                     GeometryReader { geo in
                         Color.clear
@@ -755,26 +754,6 @@ public struct VoiceChatView: View {
                         .accessibilityLabel("回到当前字幕位置")
                     }
                 }
-                .contextMenu {
-                    Button {
-                        copySubtitleText()
-                    } label: {
-                        Label("复制全文", systemImage: "doc.on.doc")
-                    }
-
-                    Button {
-                        withAnimation(Motion.spring) {
-                            isSubtitleExpanded.toggle()
-                        }
-                    } label: {
-                        Label(
-                            expanded ? "收起字幕" : "展开字幕",
-                            systemImage: expanded
-                                ? "arrow.down.right.and.arrow.up.left"
-                                : "arrow.up.left.and.arrow.down.right"
-                        )
-                    }
-                }
             }
             .padding(.leading, Theme.Space.md)
             .overlay(alignment: .leading) {
@@ -785,6 +764,7 @@ public struct VoiceChatView: View {
                 Theme.surface2.opacity(0.5),
                 in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous)
             )
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
         }
     }
 
