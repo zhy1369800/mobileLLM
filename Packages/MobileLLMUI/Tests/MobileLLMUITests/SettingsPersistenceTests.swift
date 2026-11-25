@@ -574,9 +574,10 @@ final class SettingsPersistenceTests: XCTestCase {
         XCTAssertEqual(reloaded.voiceBargeInKeywords, "")
     }
 
-    func testVoiceSubtitlesEnabledDefaultsTrueRoundTripsAndResets() throws {
+    func testVoiceSubtitleSettingsDefaultTrueRoundTripMigrateLegacyKeyAndReset() throws {
         let fresh = AppSettings(defaults: defaults, keychain: nil)
-        XCTAssertTrue(fresh.voiceSubtitlesEnabled)
+        XCTAssertTrue(fresh.showVoiceSubtitles)
+        XCTAssertTrue(fresh.autoFollowVoiceSubtitles)
 
         write(#"""
         {"defaultModelID":"bonsai-8b","systemPrompt":"keep me","systemPromptSeeded":true,
@@ -584,14 +585,29 @@ final class SettingsPersistenceTests: XCTestCase {
          "temperature":0.7,"topP":0.95,"topK":20,"repetitionPenalty":1.05,"maxTokens":1024,
          "contextLength":8192,"kvBits":4,"appearance":"system"}
         """#)
-        let legacy = AppSettings(defaults: defaults, keychain: nil)
-        XCTAssertTrue(legacy.voiceSubtitlesEnabled)
+        let legacyMissingKeys = AppSettings(defaults: defaults, keychain: nil)
+        XCTAssertTrue(legacyMissingKeys.showVoiceSubtitles)
+        XCTAssertTrue(legacyMissingKeys.autoFollowVoiceSubtitles)
 
-        legacy.voiceSubtitlesEnabled = false
+        write(#"""
+        {"defaultModelID":"bonsai-8b","systemPrompt":"keep me","systemPromptSeeded":true,
+         "thinkingDefault":true,"thinkingDisplay":"autoCollapse","toolsEnabled":false,
+         "voiceSubtitlesEnabled":false,
+         "temperature":0.7,"topP":0.95,"topK":20,"repetitionPenalty":1.05,"maxTokens":1024,
+         "contextLength":8192,"kvBits":4,"appearance":"system"}
+        """#)
+        let legacyKey = AppSettings(defaults: defaults, keychain: nil)
+        XCTAssertFalse(legacyKey.showVoiceSubtitles)
+        XCTAssertTrue(legacyKey.autoFollowVoiceSubtitles)
+
+        legacyKey.showVoiceSubtitles = false
+        legacyKey.autoFollowVoiceSubtitles = false
         let reloaded = AppSettings(defaults: defaults, keychain: nil)
-        XCTAssertFalse(reloaded.voiceSubtitlesEnabled)
+        XCTAssertFalse(reloaded.showVoiceSubtitles)
+        XCTAssertFalse(reloaded.autoFollowVoiceSubtitles)
 
         try reloaded.resetForDataErase()
-        XCTAssertTrue(reloaded.voiceSubtitlesEnabled)
+        XCTAssertTrue(reloaded.showVoiceSubtitles)
+        XCTAssertTrue(reloaded.autoFollowVoiceSubtitles)
     }
 }

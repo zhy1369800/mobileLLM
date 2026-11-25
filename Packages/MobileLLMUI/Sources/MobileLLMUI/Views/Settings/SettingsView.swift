@@ -292,7 +292,7 @@ struct SettingsView: View {
             toggleRow(
                 "Voice call subtitles",
                 subtitle: "Show interactive live captions during voice calls.",
-                isOn: $settings.voiceSubtitlesEnabled
+                isOn: $settings.showVoiceSubtitles
             )
             hairline
             voiceBargeInSettingsRows

@@ -202,20 +202,6 @@ public final class VoiceChatSession {
         beginListening()
     }
 
-    /// Immediately submits the current live user transcript while listening, bypassing the silence timer.
-    public func submitCurrentTranscriptNow() {
-        guard isActive, state == .listening else { return }
-        let text = liveUserTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        submitTranscript(text)
-    }
-
-    /// Discards the current partial user transcript and restarts speech recognition cleanly.
-    public func restartListening() {
-        guard isActive, state == .listening else { return }
-        beginListening()
-    }
-
     // MARK: - Permissions & Audio Setup
 
     private func requestMicrophoneThenStart(token: UInt64) {

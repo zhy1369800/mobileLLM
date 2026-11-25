@@ -208,7 +208,9 @@ public final class AppSettings {
         VoiceBargeInKeywordMatcher.parseKeywords(voiceBargeInKeywords)
     }
     /// Whether interactive live subtitles are shown during voice calls.
-    public var voiceSubtitlesEnabled: Bool { didSet { persist() } }
+    public var showVoiceSubtitles: Bool { didSet { persist() } }
+    /// Whether voice call subtitles automatically scroll to follow live speech/generation.
+    public var autoFollowVoiceSubtitles: Bool { didSet { persist() } }
 
     public nonisolated static let cloudTTSKeychainServiceID = "mobilellm.cloud-tts"
     /// Remote MCP servers whose tools join the agent's tool set when tools are on. Bearer tokens are kept
@@ -556,7 +558,8 @@ public final class AppSettings {
         cloudTTSVoice = snap?.cloudTTSVoice ?? "alloy"
         voiceBargeInMode = snap?.voiceBargeInMode ?? .free
         voiceBargeInKeywords = snap?.voiceBargeInKeywords ?? ""
-        voiceSubtitlesEnabled = snap?.voiceSubtitlesEnabled ?? true
+        showVoiceSubtitles = snap?.showVoiceSubtitles ?? snap?.voiceSubtitlesEnabled ?? true
+        autoFollowVoiceSubtitles = snap?.autoFollowVoiceSubtitles ?? true
         let (servers, migrated) = Self.loadMCPServers(from: snap, keychain: keychain)
         mcpServers = servers
         // Absent in pre-D2 snapshots → the default disabled set (privacy tools off), matching
@@ -782,7 +785,10 @@ public final class AppSettings {
         var cloudTTSVoice: String? = nil
         var voiceBargeInMode: VoiceBargeInMode? = nil
         var voiceBargeInKeywords: String? = nil
+        /// Legacy decode-only fallback for `showVoiceSubtitles`.
         var voiceSubtitlesEnabled: Bool? = nil
+        var showVoiceSubtitles: Bool? = nil
+        var autoFollowVoiceSubtitles: Bool? = nil
         var mcpServers: [MCPServer]? = []
         /// Ids of servers whose bearer token lives in the Keychain (A2.9). Absent in pre-migration
         /// snapshots — the loader then treats any inline `token` as legacy plaintext to migrate.
@@ -851,7 +857,8 @@ public final class AppSettings {
                             cloudTTSVoice: cloudTTSVoice,
                             voiceBargeInMode: voiceBargeInMode,
                             voiceBargeInKeywords: voiceBargeInKeywords,
-                            voiceSubtitlesEnabled: voiceSubtitlesEnabled,
+                            showVoiceSubtitles: showVoiceSubtitles,
+                            autoFollowVoiceSubtitles: autoFollowVoiceSubtitles,
                             mcpServers: scrubbed, mcpTokenMarkers: markers,
                             disabledBuiltInTools: disabledBuiltInTools, searchEngines: searchEngines,
                             webSearchOnlineServiceID: webSearchOnlineServiceID,
@@ -914,7 +921,8 @@ public final class AppSettings {
         dictationLocale = nil
         voiceBargeInMode = .free
         voiceBargeInKeywords = ""
-        voiceSubtitlesEnabled = true
+        showVoiceSubtitles = true
+        autoFollowVoiceSubtitles = true
         mcpServers = []
         onlineServices = []
         shortcutsServices = [ShortcutsService(name: "豆包", shortcutName: "发消息问豆包", isEnabled: false)]
