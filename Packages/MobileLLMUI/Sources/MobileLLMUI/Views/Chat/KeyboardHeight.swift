@@ -5,20 +5,14 @@ import SwiftUI
 import UIKit
 #endif
 
-// Dual-source keyboard tracking for `ChatDetailView`:
-// Primary: UIKit's `keyboardLayoutGuide` via a transparent (non-hidden) `TrackerView` constrained strictly
-// inside `AnchorView` (no cross-hierarchy window constraints that collide with modal sheet transforms).
-// Fallback: `UIResponder` keyboard frame/hide notifications converted into `window` coordinates and gated
-// against modal presentations (`isTopPresentedContext()`), so modal sheets, menus, or iOS 26 layout-guide
-// stalls can never trap the composer beneath the keyboard.
+// Pure `keyboardLayoutGuide` tracking for `ChatDetailView`:
+// UIKit keeps a transparent (non-hidden) `TrackerView` pinned inside `AnchorView` between
+// `keyboardLayoutGuide.topAnchor` and `AnchorView.bottomAnchor` (no cross-hierarchy window
+// constraints that collide with modal sheet transforms). Its measured height in window coordinates
+// minus `window.safeAreaInsets.bottom` gives the exact live overlap frame-by-frame across keyboard
+// presentation, interactive dismissal, and height changes without fighting notification animations.
 
 internal enum KeyboardOverlapMath: Sendable {
-    enum KeyboardNotificationState: Equatable, Sendable {
-        case unknown
-        case visible(CGFloat)
-        case hidden
-    }
-
     static func netLift(
         windowBounds: CGRect,
         keyboardFrameInWindow: CGRect,
@@ -30,27 +24,6 @@ internal enum KeyboardOverlapMath: Sendable {
         guard !intersection.isNull, intersection.height >= 1 else { return 0 }
         let rawOverlap = max(0, windowBounds.maxY - intersection.minY)
         return max(0, rawOverlap - max(0, restingBottomInset))
-    }
-
-    static func resolvedLift(
-        guideLift: CGFloat,
-        guideActiveForCurrentKeyboard: Bool,
-        notificationState: KeyboardNotificationState
-    ) -> CGFloat {
-        switch notificationState {
-        case .unknown:
-            return max(0, guideLift)
-        case .hidden:
-            return 0
-        case .visible(let notifLift):
-            // Once keyboardLayoutGuide has responded for the current keyboard presentation, trust its
-            // live measurement all the way down to 0 (interactive drag-to-dismiss / height shrink).
-            // Only fall back to the notification height when the guide stalled without responding.
-            if guideActiveForCurrentKeyboard || guideLift > 0.5 {
-                return max(0, guideLift)
-            }
-            return max(0, notifLift)
-        }
     }
 }
 
@@ -69,25 +42,13 @@ struct KeyboardGuideReader: UIViewRepresentable {
             self.overlap = overlap
         }
 
-        func apply(lift: CGFloat, animationDuration: Double) {
+        func apply(lift: CGFloat) {
             let target = max(0, lift)
             guard abs(overlap.wrappedValue - target) > 0.5 else { return }
-            if animationDuration > 0.01 {
-                Task { @MainActor [weak self] in
-                    withAnimation(.easeOut(duration: animationDuration)) {
-                        self?.commit(target: target)
-                    }
-                }
-            } else {
-                Task { @MainActor [weak self] in
-                    self?.commit(target: target)
-                }
+            Task { @MainActor [weak self] in
+                guard let self, abs(self.overlap.wrappedValue - target) > 0.5 else { return }
+                self.overlap.wrappedValue = target
             }
-        }
-
-        private func commit(target: CGFloat) {
-            guard abs(overlap.wrappedValue - target) > 0.5 else { return }
-            overlap.wrappedValue = target
         }
     }
 
@@ -97,8 +58,8 @@ struct KeyboardGuideReader: UIViewRepresentable {
 
     func makeUIView(context: Context) -> AnchorView {
         let coordinator = context.coordinator
-        return AnchorView { lift, duration in
-            coordinator.apply(lift: lift, animationDuration: duration)
+        return AnchorView { lift in
+            coordinator.apply(lift: lift)
         }
     }
 
@@ -110,50 +71,22 @@ struct KeyboardGuideReader: UIViewRepresentable {
     /// Transparent host view attached to `ChatDetailView`'s background.
     @MainActor
     final class AnchorView: UIView {
-        private let onLiftChange: (CGFloat, Double) -> Void
+        private let onHeight: (CGFloat) -> Void
         private var tracker: TrackerView?
-        private var guideLift: CGFloat = 0
-        private var guideActiveForCurrentKeyboard = false
-        private var notificationState: KeyboardOverlapMath.KeyboardNotificationState = .unknown
 
-        init(onLiftChange: @escaping (CGFloat, Double) -> Void) {
-            self.onLiftChange = onLiftChange
+        init(onHeight: @escaping (CGFloat) -> Void) {
+            self.onHeight = onHeight
             super.init(frame: .zero)
             isUserInteractionEnabled = false
             isHidden = false
             backgroundColor = .clear
             isOpaque = false
 
-            let nc = NotificationCenter.default
             // Re-install tracker when foregrounded (UIWindow survives Home round-trips while UIKit may rebind its guide).
-            nc.addObserver(
+            NotificationCenter.default.addObserver(
                 self,
                 selector: #selector(sceneDidBecomeActive),
                 name: UIApplication.didBecomeActiveNotification,
-                object: nil
-            )
-            nc.addObserver(
-                self,
-                selector: #selector(handleKeyboardNotification(_:)),
-                name: UIResponder.keyboardWillChangeFrameNotification,
-                object: nil
-            )
-            nc.addObserver(
-                self,
-                selector: #selector(handleKeyboardNotification(_:)),
-                name: UIResponder.keyboardDidChangeFrameNotification,
-                object: nil
-            )
-            nc.addObserver(
-                self,
-                selector: #selector(handleKeyboardNotification(_:)),
-                name: UIResponder.keyboardWillHideNotification,
-                object: nil
-            )
-            nc.addObserver(
-                self,
-                selector: #selector(handleKeyboardNotification(_:)),
-                name: UIResponder.keyboardDidHideNotification,
                 object: nil
             )
         }
@@ -166,10 +99,7 @@ struct KeyboardGuideReader: UIViewRepresentable {
         override func didMoveToWindow() {
             super.didMoveToWindow()
             if window == nil {
-                notificationState = .unknown
-                guideLift = 0
-                guideActiveForCurrentKeyboard = false
-                onLiftChange(0, 0)
+                onHeight(0)
             }
             installTracker()
         }
@@ -186,70 +116,11 @@ struct KeyboardGuideReader: UIViewRepresentable {
             layoutIfNeeded()
         }
 
-        @objc private func handleKeyboardNotification(_ note: Notification) {
-            guard let window else { return }
-            let isLocal = (note.userInfo?[UIResponder.keyboardIsLocalUserInfoKey] as? Bool) ?? true
-            guard isLocal else { return }
-
-            let isHideNote = note.name == UIResponder.keyboardWillHideNotification
-                || note.name == UIResponder.keyboardDidHideNotification
-            let duration = (note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
-
-            let lift: CGFloat
-            if isHideNote {
-                lift = 0
-            } else if let endScreenFrame = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue {
-                let endInWindow = window.convert(endScreenFrame, from: nil)
-                lift = KeyboardOverlapMath.netLift(
-                    windowBounds: window.bounds,
-                    keyboardFrameInWindow: endInWindow,
-                    restingBottomInset: window.safeAreaInsets.bottom,
-                    isHiding: false
-                )
-            } else {
-                lift = 0
-            }
-
-            if lift <= 0.5 {
-                notificationState = .hidden
-                guideLift = 0
-                guideActiveForCurrentKeyboard = false
-                onLiftChange(0, duration)
-                return
-            }
-
-            guard isTopPresentedContext() else { return }
-            let wasVisibleWithSameHeight: Bool
-            if case .visible(let previousLift) = notificationState, abs(previousLift - lift) <= 0.5 {
-                wasVisibleWithSameHeight = true
-            } else {
-                wasVisibleWithSameHeight = false
-            }
-            if !wasVisibleWithSameHeight {
-                guideLift = 0
-                guideActiveForCurrentKeyboard = false
-            }
-            notificationState = .visible(lift)
-            let resolved = KeyboardOverlapMath.resolvedLift(
-                guideLift: guideLift,
-                guideActiveForCurrentKeyboard: guideActiveForCurrentKeyboard,
-                notificationState: notificationState
-            )
-            onLiftChange(resolved, duration)
-        }
-
         private func handleGuideLift(_ lift: CGFloat) {
             if lift > 0.5 {
                 guard isTopPresentedContext() else { return }
-                guideActiveForCurrentKeyboard = true
             }
-            guideLift = lift
-            let resolved = KeyboardOverlapMath.resolvedLift(
-                guideLift: guideLift,
-                guideActiveForCurrentKeyboard: guideActiveForCurrentKeyboard,
-                notificationState: notificationState
-            )
-            onLiftChange(resolved, 0)
+            onHeight(lift)
         }
 
         private func installTracker() {
