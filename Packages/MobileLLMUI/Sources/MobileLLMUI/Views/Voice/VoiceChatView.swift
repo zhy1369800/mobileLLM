@@ -991,7 +991,7 @@ private struct VoiceSubtitleLineRow: View, Equatable {
     private var rowColor: Color {
         switch emphasis {
         case .active:
-            return Theme.textPrimary
+            return Theme.fitGreen
         case .spoken:
             return Theme.textTertiary.opacity(0.75)
         case .upcoming, .normal:
