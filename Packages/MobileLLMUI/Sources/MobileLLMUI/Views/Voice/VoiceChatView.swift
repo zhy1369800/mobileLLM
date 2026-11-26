@@ -11,6 +11,7 @@ public struct VoiceChatView: View {
     var onOpenModels: () -> Void
 
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isVisible = false
     @State private var showModelSwitcher = false
     @State private var showToolPicker = false
@@ -293,11 +294,11 @@ public struct VoiceChatView: View {
                         }
                     }
                 )) {
-                    Label("自动跟随朗读", systemImage: "arrow.down.to.line")
+                    Label("Auto-Follow", systemImage: "arrow.down.to.line")
                 }
             }
 
-            Menu("Dictation Language") {
+            Menu {
                 ForEach(Composer.dictationLanguages, id: \.label) { lang in
                     Button {
                         chat.dictationLocale = lang.id
@@ -309,6 +310,8 @@ public struct VoiceChatView: View {
                         }
                     }
                 }
+            } label: {
+                Label("Language", systemImage: "globe")
             }
         } label: {
             Image(systemName: capabilitiesActive ? "slider.horizontal.3" : "ellipsis.circle")
@@ -443,7 +446,12 @@ public struct VoiceChatView: View {
                 matchedStartOffset: nil
             )
         }
-        let totalContentHeight = subtitleContentHeight + 6
+        let totalContentHeight = subtitleContentHeight + 10
+        let collapsedSubtitleHeight: CGFloat? = subtitleContentHeight > 0
+            ? min(max(totalContentHeight, 28), 116)
+            : nil
+        let focusedSpokenTransitionID = isFocusedSpokenMode ? "focused-\(spokenSentence)" : "stream"
+        let subtitleSwapAnimation: Animation? = reduceMotion ? nil : .easeOut(duration: 0.22)
         let isSubtitleOverflowing = subtitleViewportHeight > 0
             && totalContentHeight > subtitleViewportHeight + 2
         let shouldAutoScrollCurrent = !subtitleUserScrolledUp && !isSubtitleDragging
@@ -496,7 +504,7 @@ public struct VoiceChatView: View {
                     .buttonStyle(.plain)
                     .accessibilityLabel(expanded ? "收起字幕" : "展开字幕")
                 }
-                .padding(.bottom, 6)
+                .padding(.bottom, 2)
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 3) {
@@ -504,7 +512,8 @@ public struct VoiceChatView: View {
                             VoiceSubtitleLineRow(
                                 text: line.isEmpty ? " " : line,
                                 parseMarkdown: parseMarkdown,
-                                emphasis: progress.emphases.indices.contains(index) ? progress.emphases[index] : .normal
+                                emphasis: progress.emphases.indices.contains(index) ? progress.emphases[index] : .normal,
+                                reduceMotion: reduceMotion
                             )
                             .equatable()
                             .id("voice-subtitle-line-\(index)")
@@ -515,6 +524,15 @@ public struct VoiceChatView: View {
                             .onAppear { subtitleAtBottom = true }
                             .onDisappear { subtitleAtBottom = false }
                     }
+                    .id(focusedSpokenTransitionID)
+                    .transition(
+                        reduceMotion
+                            ? .opacity
+                            : .asymmetric(
+                                insertion: .opacity.combined(with: .offset(y: 6)),
+                                removal: .opacity.combined(with: .offset(y: -4))
+                            )
+                    )
                     .background(
                         GeometryReader { geo in
                             Color.clear
@@ -533,17 +551,15 @@ public struct VoiceChatView: View {
                     )
                 }
                 .id(subtitleScrollScope(focusedSpoken: isFocusedSpokenMode))
-                .contentMargins(.top, 6, for: .scrollContent)
+                .contentMargins(.top, 10, for: .scrollContent)
                 .scrollBounceBehavior(.basedOnSize)
                 .frame(
-                    minHeight: expanded ? 180 : nil,
-                    maxHeight: expanded ? .infinity : 116
+                    minHeight: expanded ? 180 : collapsedSubtitleHeight,
+                    maxHeight: expanded ? .infinity : (collapsedSubtitleHeight ?? 116)
                 )
-                .frame(
-                    height: expanded
-                        ? nil
-                        : (subtitleContentHeight > 0 ? min(max(totalContentHeight, 28), 116) : nil)
-                )
+                .clipped()
+                .animation(subtitleSwapAnimation, value: focusedSpokenTransitionID)
+                .animation(isFocusedSpokenMode ? subtitleSwapAnimation : nil, value: collapsedSubtitleHeight)
                 .background(
                     GeometryReader { geo in
                         Color.clear
@@ -564,11 +580,15 @@ public struct VoiceChatView: View {
                 .mask(
                     VStack(spacing: 0) {
                         LinearGradient(
-                            colors: [.clear, .black],
+                            stops: [
+                                .init(color: .clear, location: 0),
+                                .init(color: .black.opacity(0.45), location: 0.45),
+                                .init(color: .black, location: 1),
+                            ],
                             startPoint: .top,
                             endPoint: .bottom
                         )
-                        .frame(height: 6)
+                        .frame(height: 18)
                         Rectangle().fill(.black)
                     }
                 )
@@ -622,11 +642,19 @@ public struct VoiceChatView: View {
                                 proxy.scrollTo("voice-subtitle-line-\(activeRange.lowerBound)", anchor: .top)
                             }
                         }
-                    } else {
+                    } else if isSubtitleOverflowing {
                         withAnimation(.easeOut(duration: 0.10)) {
                             proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
                         }
                     }
+                }
+                .onChange(of: subtitleContentHeight) { _, _ in
+                    guard shouldAutoScrollCurrent,
+                          !isFocusedSpokenMode,
+                          !isFollowingSpokenAudio,
+                          isSubtitleOverflowing
+                    else { return }
+                    proxy.scrollTo("voice-subtitle-bottom", anchor: .bottom)
                 }
                 .onChange(of: spokenSentence) { _, _ in
                     guard isFollowingSpokenAudio else { return }
@@ -755,26 +783,6 @@ public struct VoiceChatView: View {
                         .accessibilityLabel("回到当前字幕位置")
                     }
                 }
-                .contextMenu {
-                    Button {
-                        copySubtitleText()
-                    } label: {
-                        Label("复制全文", systemImage: "doc.on.doc")
-                    }
-
-                    Button {
-                        withAnimation(Motion.spring) {
-                            isSubtitleExpanded.toggle()
-                        }
-                    } label: {
-                        Label(
-                            expanded ? "收起字幕" : "展开字幕",
-                            systemImage: expanded
-                                ? "arrow.down.right.and.arrow.up.left"
-                                : "arrow.up.left.and.arrow.down.right"
-                        )
-                    }
-                }
             }
             .padding(.leading, Theme.Space.md)
             .overlay(alignment: .leading) {
@@ -785,6 +793,7 @@ public struct VoiceChatView: View {
                 Theme.surface2.opacity(0.5),
                 in: RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous)
             )
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.field, style: .continuous))
         }
     }
 
@@ -963,6 +972,7 @@ private struct VoiceSubtitleLineRow: View, Equatable {
     let text: String
     let parseMarkdown: Bool
     let emphasis: VoiceSubtitleLineEmphasis
+    let reduceMotion: Bool
 
     var body: some View {
         renderedText
@@ -971,6 +981,7 @@ private struct VoiceSubtitleLineRow: View, Equatable {
             .multilineTextAlignment(.leading)
             .lineSpacing(3)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: emphasis)
     }
 
     private var rowFont: Font {
@@ -980,7 +991,7 @@ private struct VoiceSubtitleLineRow: View, Equatable {
     private var rowColor: Color {
         switch emphasis {
         case .active:
-            return Theme.textPrimary
+            return Theme.fitGreen
         case .spoken:
             return Theme.textTertiary.opacity(0.75)
         case .upcoming, .normal:

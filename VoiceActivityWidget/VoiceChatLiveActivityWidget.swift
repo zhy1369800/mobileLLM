@@ -44,6 +44,7 @@ struct VoiceChatLiveActivityWidget: Widget {
                 }
 
                 DynamicIslandExpandedRegion(.bottom) {
+                    let hasToolBadge = (state.toolName?.isEmpty == false)
                     VStack(alignment: .leading, spacing: 7) {
                         if let toolName = state.toolName, !toolName.isEmpty {
                             IslandToolBadge(toolName: toolName, isRunning: state.toolRunning)
@@ -53,7 +54,7 @@ struct VoiceChatLiveActivityWidget: Widget {
                             .font(.footnote)
                             .lineSpacing(2)
                             .foregroundStyle(state.subtitle.isEmpty ? .white.opacity(0.62) : .white.opacity(0.94))
-                            .lineLimit(2)
+                            .lineLimit(hasToolBadge ? 3 : 4)
                             .frame(maxWidth: .infinity, alignment: .leading)
 
                         HStack(spacing: 8) {
@@ -235,7 +236,7 @@ private struct LockScreenVoiceCardView: View {
                 .font(.footnote)
                 .lineSpacing(2)
                 .foregroundStyle(state.subtitle.isEmpty ? secondaryInk : primaryInk)
-                .lineLimit(2)
+                .lineLimit(4)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 16)
