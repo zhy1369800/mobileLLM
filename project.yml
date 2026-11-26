@@ -30,6 +30,7 @@ packages:
   LLMEngineLlama: { path: Packages/LLMEngineLlama }
   LLMEngineApple: { path: Packages/LLMEngineApple }
   MobileLLMUI: { path: Packages/MobileLLMUI }
+  TTSEngineMLX: { path: Packages/TTSEngineMLX }
 
 targets:
   mobileLLM:
@@ -98,6 +99,8 @@ targets:
       # model as unavailable there.
       - package: LLMEngineApple
         product: LLMEngineApple
+      - package: TTSEngineMLX
+        product: TTSEngineMLX
       - package: AppRuntime
       - package: AgentRuntime
         product: AgentRuntime
@@ -212,6 +215,7 @@ schemes:
         # LLMEngineApple's tests also run under plain `swift test` (they're pure + framework-free); they
         # ride along here so one scheme covers every engine.
         - package: LLMEngineApple/LLMEngineAppleTests
+        - package: TTSEngineMLX/TTSEngineMLXTests
   # The keyboard/composer geometry tests. Simulator-only (XCUITest drives real taps + the software
   # keyboard); needs a small GGUF pre-seeded in the app container — see UITests/KeyboardUITests.swift.
   UITests:

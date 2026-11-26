@@ -109,17 +109,17 @@ public enum LocalTTSModelCatalog {
             LocalTTSModelVariant(
                 id: "cosyvoice3-0.5b-4bit",
                 quant: .int4,
-                huggingFaceRepo: "mlx-community/Fun-CosyVoice3-0.5B-2512-4bit",
+                huggingFaceRepo: "aufklarer/CosyVoice3-0.5B-MLX-4bit",
                 revision: "main",
-                approximateBytes: 1_228_596_082,
+                approximateBytes: 1_255_690_103,
                 minimumRecommendedRAMBytes: 6 * 1024 * 1024 * 1024
             ),
             LocalTTSModelVariant(
                 id: "cosyvoice3-0.5b-8bit",
                 quant: .int8,
-                huggingFaceRepo: "mlx-community/Fun-CosyVoice3-0.5B-2512-8bit",
+                huggingFaceRepo: "aufklarer/CosyVoice3-0.5B-MLX-8bit-full",
                 revision: "main",
-                approximateBytes: 1_407_510_034,
+                approximateBytes: 1_605_642_451,
                 minimumRecommendedRAMBytes: 8 * 1024 * 1024 * 1024
             ),
         ],

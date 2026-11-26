@@ -93,6 +93,9 @@ public protocol TTSEngine: AnyObject {
 
     /// Optionally prepares synthesis infrastructure ahead of a voice call without activating audio sessions.
     func prewarm()
+
+    /// Releases any resident model weights and caches held by the engine.
+    func unloadWeights()
 }
 
 public extension TTSEngine {
@@ -108,6 +111,7 @@ public extension TTSEngine {
     var preferredBatchCharacterLimit: Int { 0 }
     func endPlaybackSession() {}
     func prewarm() {}
+    func unloadWeights() {}
 }
 
 /// Optional capability for remote/neural TTS engines that can synthesize audio data ahead of

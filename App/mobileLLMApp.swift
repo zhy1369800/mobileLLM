@@ -7,6 +7,7 @@ import LLMCore
 import LLMEngineMLX
 import LLMEngineLlama
 import LLMEngineApple
+import TTSEngineMLX
 import AgentContracts
 import AgentRuntime
 #if os(iOS)
@@ -501,7 +502,7 @@ struct MobileLLMApp: App {
             let lifecycle = LifecycleCoordinator()
             #endif
             let continuedProcessing = ContinuedProcessingCoordinator()
-            return AppContainer(
+            let container = AppContainer(
                 engine: engine,
                 downloadBase: base,
                 downloader: { repoId, revision, globs, progress in
@@ -517,6 +518,11 @@ struct MobileLLMApp: App {
                 lifecycle: lifecycle,
                 continuedProcessing: continuedProcessing
             )
+            container.speech.localMLXEngine = MLXTTSEngine(
+                voiceModels: container.voiceModels,
+                settings: container.settings
+            )
+            return container
         }
         container.mcpDiscovery.setCredentialResolver { server in
             try? KeychainBox(service: AppSettings.defaultKeychainService)

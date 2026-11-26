@@ -180,6 +180,7 @@ public final class AppContainer {
         self.speech = speechCoordinator
         voiceManager.onModelDeleted = { [weak settings, weak speechCoordinator, weak voiceManager] variantID in
             guard let settings, settings.localMLXModelVariantID == variantID else { return }
+            speechCoordinator?.localMLXEngine?.unloadWeights()
             var nextMatch: (model: LocalTTSModel, variant: LocalTTSModelVariant)?
             if let catalog = voiceManager?.catalog {
                 for model in catalog {
@@ -221,12 +222,17 @@ public final class AppContainer {
         voiceSession.onSessionStopped = { [weak self] in
             self?.lifecycle.completeDeferredBackgroundDrainIfNeeded()
         }
-        self.lifecycle.onEnterBackground = { [weak speechCoordinator, weak voiceSession] in
+        self.lifecycle.onEnterBackground = { [weak speechCoordinator, weak voiceSession, weak self] in
+            let keepVoiceAlive = voiceSession?.isActive == true && self?.chat.isOnlineActive == true
             if voiceSession?.isActive == true {
                 voiceSession?.stop()
+                if !keepVoiceAlive {
+                    speechCoordinator?.localMLXEngine?.unloadWeights()
+                }
                 return
             }
             speechCoordinator?.stop(suppressCurrentTurn: true)
+            speechCoordinator?.localMLXEngine?.unloadWeights()
         }
         // Cold launch restores identity only, so the first turn is where the weights are actually loaded.
         // A false answer stops the turn instead of generating against an empty engine.
@@ -439,6 +445,7 @@ public final class AppContainer {
     /// a 5 GB model from being jetsam-killed in the background — and stops it hogging memory when unused.
     public func suspendModel() {
         guard !chat.isStreaming else { return }   // never unload mid-generation
+        speech.localMLXEngine?.unloadWeights()
         Task { await models.suspend(); syncActive() }
     }
 
