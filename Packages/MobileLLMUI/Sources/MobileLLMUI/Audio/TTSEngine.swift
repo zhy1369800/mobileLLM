@@ -31,6 +31,7 @@ public struct TTSVoiceInfo: Identifiable, Hashable, Sendable {
 /// Selectable speech synthesis backend.
 public enum TTSEngineKind: String, CaseIterable, Codable, Sendable, Identifiable {
     case appleSystem
+    case localMLX
     case cloudOpenAI
 
     public var id: String { rawValue }
@@ -39,8 +40,21 @@ public enum TTSEngineKind: String, CaseIterable, Codable, Sendable, Identifiable
         switch self {
         case .appleSystem:
             return "Apple System Voice"
+        case .localMLX:
+            return "Local MLX Voice"
         case .cloudOpenAI:
             return "Cloud TTS"
+        }
+    }
+
+    public var segmentedLabel: String {
+        switch self {
+        case .appleSystem:
+            return "Apple"
+        case .localMLX:
+            return "Local MLX"
+        case .cloudOpenAI:
+            return "Cloud"
         }
     }
 }

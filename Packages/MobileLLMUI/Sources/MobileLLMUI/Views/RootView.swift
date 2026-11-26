@@ -170,9 +170,24 @@ public struct RootView: View {
             .tabItem { Label("Chat", systemImage: AppSection.chat.icon) }
 
             NavigationStack {
-                ModelsView(models: container.models, settings: container.settings) { model, variant in
-                    container.activate(model, variant: variant)
-                }
+                ModelsView(
+                    models: container.models,
+                    voiceModels: container.voiceModels,
+                    settings: container.settings,
+                    requestedVoiceFilter: $container.requestedVoiceModelsFilter,
+                    isLocalMLXEngineAvailable: container.speech.localMLXEngine != nil,
+                    onUse: { model, variant in
+                        container.activate(model, variant: variant)
+                    },
+                    onUseVoiceModel: { model, variant in
+                        let message = container.speech.localMLXEngine != nil
+                            ? "\(model.displayName) (\(variant.quant.displayName)) selected for voice output"
+                            : "\(model.displayName) (\(variant.quant.displayName)) saved for voice — currently falls back to Apple System Voice until the MLX voice runtime is enabled"
+                        container.chat.showToast(
+                            Toast(message, kind: container.speech.localMLXEngine != nil ? .success : .info)
+                        )
+                    }
+                )
                 .navigationTitle("Models")
             }
             .tag(AppSection.models)
@@ -373,9 +388,24 @@ public struct RootView: View {
                 )
             }
         case .models:
-            ModelsView(models: container.models, settings: container.settings) { model, variant in
-                container.activate(model, variant: variant)
-            }
+            ModelsView(
+                models: container.models,
+                voiceModels: container.voiceModels,
+                settings: container.settings,
+                requestedVoiceFilter: $container.requestedVoiceModelsFilter,
+                isLocalMLXEngineAvailable: container.speech.localMLXEngine != nil,
+                onUse: { model, variant in
+                    container.activate(model, variant: variant)
+                },
+                onUseVoiceModel: { model, variant in
+                    let message = container.speech.localMLXEngine != nil
+                        ? "\(model.displayName) (\(variant.quant.displayName)) selected for voice output"
+                        : "\(model.displayName) (\(variant.quant.displayName)) saved for voice — currently falls back to Apple System Voice until the MLX voice runtime is enabled"
+                    container.chat.showToast(
+                        Toast(message, kind: container.speech.localMLXEngine != nil ? .success : .info)
+                    )
+                }
+            )
             .navigationTitle("Models")
         case .settings:
             SettingsView(container: container).navigationTitle("Settings")

@@ -274,17 +274,21 @@ struct SettingsView: View {
             hairline
             VStack(alignment: .leading, spacing: 6) {
                 Text("Voice engine").font(.subheadline).foregroundStyle(Theme.textSecondary)
-                Segmented(selection: $settings.ttsEngineKind, options: TTSEngineKind.allCases) { $0.displayName }
+                Segmented(selection: $settings.ttsEngineKind, options: TTSEngineKind.allCases) { $0.segmentedLabel }
                     .onChange(of: settings.ttsEngineKind) { _, _ in
                         container.speech.stop(suppressCurrentTurn: false)
                     }
             }
-            if settings.ttsEngineKind == .cloudOpenAI {
-                hairline
-                cloudTTSSettingsRows
-            } else {
+            switch settings.ttsEngineKind {
+            case .appleSystem:
                 hairline
                 speechVoicePickerRow
+            case .localMLX:
+                hairline
+                localMLXTTSSettingsRows
+            case .cloudOpenAI:
+                hairline
+                cloudTTSSettingsRows
             }
             hairline
             sliderRow("Speech rate", value: $settings.ttsSpeechRate, range: 0.5...2.0, step: 0.1, format: "%.1fx")
@@ -306,6 +310,13 @@ struct SettingsView: View {
                        cloudTTSAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         || CloudTTSEngine.speechEndpoint(from: settings.cloudTTSBaseURL) == nil {
                         Text("Configure Base URL & API Key above (falls back to Apple voice).")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textTertiary)
+                    } else if settings.ttsEngineKind == .localMLX,
+                              container.speech.localMLXEngine?.isReady != true {
+                        Text(resolvedInstalledLocalMLXVariant == nil
+                             ? "Download CosyVoice3 0.5B in Models → Voice (falls back to Apple voice)."
+                             : "Local MLX engine is not active yet (falls back to Apple voice).")
                             .font(.caption)
                             .foregroundStyle(Theme.textTertiary)
                     }
@@ -532,6 +543,72 @@ struct SettingsView: View {
                     .focused($focusedField, equals: .cloudTTSVoice)
                     .submitLabel(.done)
                     .onSubmit { focusedField = nil }
+            }
+        }
+    }
+
+    private var resolvedInstalledLocalMLXVariant: (model: LocalTTSModel, variant: LocalTTSModelVariant)? {
+        if let selectedID = settings.localMLXModelVariantID,
+           let found = LocalTTSModelCatalog.variant(id: selectedID),
+           container.voiceModels.isInstalled(found.variant) {
+            return found
+        }
+        for model in container.voiceModels.catalog {
+            if let installedVariant = model.variants.first(where: { container.voiceModels.isInstalled($0) }) {
+                return (model, installedVariant)
+            }
+        }
+        return nil
+    }
+
+    private var localMLXTTSSettingsRows: some View {
+        let installed = resolvedInstalledLocalMLXVariant
+        let presets = (installed?.model ?? LocalTTSModelCatalog.defaultModel).presetVoices
+        let selectedPreset = presets.first(where: { $0.id == settings.localMLXVoiceID })
+
+        return VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Local voice model").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                    Text(installed.map { "\($0.model.displayName) · \($0.variant.quant.displayName)" }
+                         ?? "Not downloaded")
+                        .font(.caption)
+                        .foregroundStyle(installed == nil ? Theme.fitAmber : Theme.textTertiary)
+                }
+                Spacer()
+                Button("Models → Voice") {
+                    container.requestedVoiceModelsFilter = true
+                    container.navigationRequest = .models
+                }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(Theme.accent)
+                .buttonStyle(.plain)
+            }
+
+            HStack {
+                Text("Speaker").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                Spacer()
+                Menu {
+                    ForEach(presets) { preset in
+                        Button {
+                            settings.localMLXVoiceID = preset.id
+                        } label: {
+                            let label = "\(preset.name) · \(preset.language)"
+                            if settings.localMLXVoiceID == preset.id {
+                                Label(label, systemImage: "checkmark")
+                            } else {
+                                Text(label)
+                            }
+                        }
+                    }
+                } label: {
+                    menuLabel(selectedPreset.map { "\($0.name) (\($0.language))" } ?? settings.localMLXVoiceID)
+                }
+            }
+
+            if installed == nil {
+                Text("Download CosyVoice3 0.5B in Models → Voice. Best paired with Cloud LLM.")
+                    .font(.caption).foregroundStyle(Theme.textTertiary)
             }
         }
     }

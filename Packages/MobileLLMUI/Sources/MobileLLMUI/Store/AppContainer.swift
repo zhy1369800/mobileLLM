@@ -18,6 +18,7 @@ public final class AppContainer {
     public let settings: AppSettings
     public let conversationStore: ConversationStore
     public let models: ModelManager
+    public let voiceModels: LocalTTSModelManager
     public let speech: StreamingSpeechCoordinator
     public let chat: ChatStore
     public let voiceChat: VoiceChatSession
@@ -61,6 +62,8 @@ public final class AppContainer {
     /// A one-shot navigation intent the shell (RootView) honors and clears — e.g. a "not installed" error
     /// banner jumping to Models. The container can't push tabs itself (RootView owns the section state).
     public var navigationRequest: AppSection?
+    /// Raised by Settings when jumping directly to `Models → Featured → Voice`.
+    public var requestedVoiceModelsFilter = false
     /// Raised by the macOS/iPad "Switch Model" menu command; the split shell shows the quick switcher.
     public var switcherRequested = false
     /// Guards `bootstrap()` so the App scene + RootView both awaiting it decode sessions / restore the
@@ -103,7 +106,9 @@ public final class AppContainer {
                 localModelLogs: LocalModelLogStore? = nil,
                 workflowStore: WorkflowStore? = nil,
                 mcpDiscovery: MCPDiscoveryCache = .shared,
-                ttsEngine: (any TTSEngine)? = nil) {
+                ttsEngine: (any TTSEngine)? = nil,
+                localMLXTTSEngine: (any TTSEngine)? = nil,
+                voiceInstallProbe: LocalTTSModelManager.InstallProbe? = nil) {
         let settings = settings ?? AppSettings(fallbackDefaultModelID: LLMCatalog.defaultModel(for: device).id)
         let store = conversationStore ?? ConversationStore()
         let logStore = localModelLogs ?? LocalModelLogStore()
@@ -129,6 +134,12 @@ public final class AppContainer {
                                    downloader: downloader, installProbe: installProbe,
                                    systemModelProbe: systemModelProbe,
                                    availableMemory: availableMemory)
+        let voiceManager = LocalTTSModelManager(
+            downloadBase: downloadBase,
+            downloader: downloader,
+            installProbe: voiceInstallProbe
+        )
+        self.voiceModels = voiceManager
         // Tool seams for the agent loop. The memory store lives beside the conversation records (durable +
         // atomic — losing saved facts is annoying). The privacy-gated calendar / location adapters are
         // injected by the app-assembly layer (the App scene), NOT constructed here, so previews and unit
@@ -162,10 +173,32 @@ public final class AppContainer {
         }
         let speechCoordinator = StreamingSpeechCoordinator(
             engine: ttsEngine ?? AppleSystemTTSEngine(),
+            localMLXEngine: localMLXTTSEngine,
             cloudEngine: cloudTTSEngine,
             settings: settings
         )
         self.speech = speechCoordinator
+        voiceManager.onModelDeleted = { [weak settings, weak speechCoordinator, weak voiceManager] variantID in
+            guard let settings, settings.localMLXModelVariantID == variantID else { return }
+            var nextMatch: (model: LocalTTSModel, variant: LocalTTSModelVariant)?
+            if let catalog = voiceManager?.catalog {
+                for model in catalog {
+                    if let variant = model.variants.first(where: { voiceManager?.isInstalled($0) == true }) {
+                        nextMatch = (model, variant)
+                        break
+                    }
+                }
+            }
+            settings.localMLXModelVariantID = nextMatch?.variant.id
+            if let nextModel = nextMatch?.model,
+               !nextModel.presetVoices.contains(where: { $0.id == settings.localMLXVoiceID }) {
+                settings.localMLXVoiceID = nextModel.presetVoices.first?.id
+                    ?? LocalTTSModelCatalog.defaultVoiceID
+            }
+            if settings.ttsEngineKind == .localMLX {
+                speechCoordinator?.stop(suppressCurrentTurn: false)
+            }
+        }
         self.chat = ChatStore(engine: loggingEngine, store: store, settings: settings,
                               memoryBook: memoryBook, eventStore: eventStore,
                               locationProvider: locationProvider,
@@ -201,7 +234,9 @@ public final class AppContainer {
             await self?.reloadIfSuspended() ?? false
         }
         self.models.idleTimerOverride = { [weak settings] in settings?.keepScreenAwake ?? false }
-        settings.isDownloadingProvider = { [weak self] in self?.models.hasActiveDownloads ?? false }
+        settings.isDownloadingProvider = { [weak self] in
+            (self?.models.hasActiveDownloads ?? false) || (self?.voiceModels.hasActiveDownloads ?? false)
+        }
         // Opening a conversation brings back ITS model (when installed) instead of whatever is resident —
         // a thread's identity includes the model it was talked to with.
         chat.restoreModel = { [weak self] modelID, variantID in

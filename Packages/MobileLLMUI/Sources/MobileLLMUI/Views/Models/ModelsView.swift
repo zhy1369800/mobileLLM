@@ -10,14 +10,20 @@ import LLMCore
 /// every installed model keeps the same enabled Use action.
 struct ModelsView: View {
     @Bindable var models: ModelManager
+    @Bindable var voiceModels: LocalTTSModelManager
     @Bindable var settings: AppSettings
+    @Binding var requestedVoiceFilter: Bool
+    var isLocalMLXEngineAvailable: Bool = false
     /// Activate a variant (the container attempts the real engine load + syncs the chat's active model).
     var onUse: (LLMModel, LLMVariant) -> Void
+    var onUseVoiceModel: ((LocalTTSModel, LocalTTSModelVariant) -> Void)? = nil
 
     /// Per-model selection overrides (nil = follow the engine preference / default quant).
     @State private var selectedEngine: [String: EngineKind] = [:]
     @State private var selectedQuant: [String: QuantSpec] = [:]
+    @State private var selectedVoiceQuant: [String: LocalTTSQuant] = [:]
     @State private var pendingDelete: (model: LLMModel, variant: LLMVariant)?
+    @State private var pendingVoiceDelete: (model: LocalTTSModel, variant: LocalTTSModelVariant)?
     @State private var filter: ModelFilter = .all
     @State private var query = ""
     @State private var tier: Tier = .featured
@@ -32,11 +38,11 @@ struct ModelsView: View {
     /// filter: every seed family except Gemma is Chinese-strong, so it barely narrows anything —
     /// "Multimodal" is the distinction that actually matters.
     private enum ModelFilter: String, CaseIterable {
-        case all, runs, installed, reasoning, multimodal
+        case all, runs, installed, reasoning, multimodal, voice
         var label: String {
             switch self {
             case .all: "All"; case .runs: "Runs here"; case .installed: "Installed"
-            case .reasoning: "Reasoning"; case .multimodal: "Multimodal"
+            case .reasoning: "Reasoning"; case .multimodal: "Multimodal"; case .voice: "Voice"
             }
         }
     }
@@ -54,7 +60,16 @@ struct ModelsView: View {
             }
         }
         .background(Theme.bg)
-        .onAppear { models.refreshInstalled() }
+        .onAppear {
+            models.refreshInstalled()
+            voiceModels.refreshInstalled()
+            applyRequestedVoiceFilterIfNeeded()
+        }
+        .onChange(of: requestedVoiceFilter) { _, requested in
+            if requested {
+                applyRequestedVoiceFilterIfNeeded()
+            }
+        }
         .alert(pendingDelete.map { "Delete \($0.model.displayName)?" } ?? "",
                isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }),
                presenting: pendingDelete) { target in
@@ -63,20 +78,40 @@ struct ModelsView: View {
         } message: { _ in
             Text("Frees the disk space. You can download it again anytime.")
         }
+        .alert(pendingVoiceDelete.map { "Delete \($0.model.displayName) (\($0.variant.quant.displayName))?" } ?? "",
+               isPresented: Binding(get: { pendingVoiceDelete != nil }, set: { if !$0 { pendingVoiceDelete = nil } }),
+               presenting: pendingVoiceDelete) { target in
+            Button("Delete", role: .destructive) { voiceModels.delete(target.variant) }
+            Button("Cancel", role: .cancel) {}
+        } message: { _ in
+            Text("Frees the disk space. You can download it again anytime.")
+        }
+    }
+
+    private func applyRequestedVoiceFilterIfNeeded() {
+        guard requestedVoiceFilter else { return }
+        tier = .featured
+        filter = .voice
+        requestedVoiceFilter = false
     }
 
     private var featuredScroll: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Space.md) {
-                if hasNoDownloadedModel { firstRunHeader }
-                activeSection
+                if filter != .voice && hasNoDownloadedModel { firstRunHeader }
+                if filter != .voice { activeSection }
                 storageHeader
                 searchField
                 filterChips
-                ForEach(visibleFamilies, id: \.self) { family in
-                    familySection(family)
+                if shouldShowVoiceSection {
+                    voiceModelsSection
                 }
-                if visibleFamilies.isEmpty { emptyState }
+                if filter != .voice {
+                    ForEach(visibleFamilies, id: \.self) { family in
+                        familySection(family)
+                    }
+                }
+                if isFeaturedListEmpty { emptyState }
             }
             .padding(Theme.Space.lg)
             .frame(maxWidth: 720)
@@ -154,11 +189,72 @@ struct ModelsView: View {
 
     /// Families with at least one model matching the current filter, in catalog order.
     private var visibleFamilies: [LLMFamily] {
+        guard filter != .voice else { return [] }
         var seen: [LLMFamily] = []
         for model in models.catalog where matches(model) && !seen.contains(model.family) {
             seen.append(model.family)
         }
         return seen
+    }
+
+    private var visibleVoiceModels: [LocalTTSModel] {
+        voiceModels.catalog.filter(matchesVoice)
+    }
+
+    private var shouldShowVoiceSection: Bool {
+        guard !visibleVoiceModels.isEmpty else { return false }
+        switch filter {
+        case .voice, .all, .runs, .installed:
+            return true
+        case .reasoning, .multimodal:
+            return false
+        }
+    }
+
+    private var isFeaturedListEmpty: Bool {
+        if filter == .voice {
+            return visibleVoiceModels.isEmpty
+        }
+        return visibleFamilies.isEmpty && !shouldShowVoiceSection
+    }
+
+    @ViewBuilder private var voiceModelsSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.md) {
+            HStack(spacing: Theme.Space.xs) {
+                Text("Voice (Local MLX)")
+                    .font(.headline).foregroundStyle(Theme.textPrimary)
+                Chip(text: "On-device TTS", filled: false)
+                Spacer()
+                Text(visibleVoiceModels.first?.publisher ?? "")
+                    .font(.caption).foregroundStyle(Theme.textTertiary)
+                    .lineLimit(1).minimumScaleFactor(0.8)
+            }
+            .padding(.horizontal, 2)
+
+            ForEach(visibleVoiceModels) { model in
+                LocalTTSModelCard(
+                    voiceModels: voiceModels,
+                    settings: settings,
+                    deviceMemoryBytes: Int64(models.device.physicalMemoryBytes),
+                    model: model,
+                    isRecommended: model.id == LocalTTSModelCatalog.defaultModel.id,
+                    isEngineAvailable: isLocalMLXEngineAvailable,
+                    quantSel: voiceQuantBinding(for: model),
+                    onUse: { chosenModel, variant in
+                        settings.localMLXModelVariantID = variant.id
+                        if !chosenModel.presetVoices.contains(where: { $0.id == settings.localMLXVoiceID }) {
+                            settings.localMLXVoiceID = chosenModel.presetVoices.first?.id
+                                ?? LocalTTSModelCatalog.defaultVoiceID
+                        }
+                        settings.ttsEngineKind = .localMLX
+                        onUseVoiceModel?(chosenModel, variant)
+                    },
+                    onDelete: { variant in
+                        pendingVoiceDelete = (model, variant)
+                    }
+                )
+            }
+        }
     }
 
     private func familyModels(_ family: LLMFamily) -> [LLMModel] {
@@ -262,6 +358,26 @@ struct ModelsView: View {
         case .installed: return model.variants.contains { models.isInstalled($0) }
         case .reasoning: return model.architecture.thinkingCapable
         case .multimodal: return !model.architecture.extraModalities.isEmpty
+        case .voice: return false
+        }
+    }
+
+    private func matchesVoice(_ model: LocalTTSModel) -> Bool {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        if !q.isEmpty,
+           !"\(model.displayName) \(model.publisher) \(model.summary)".lowercased().contains(q) {
+            return false
+        }
+        switch filter {
+        case .all, .voice:
+            return true
+        case .runs:
+            let mem = Int64(models.device.physicalMemoryBytes)
+            return model.variants.contains { mem >= $0.minimumRecommendedRAMBytes }
+        case .installed:
+            return model.variants.contains { voiceModels.isInstalled($0) }
+        case .reasoning, .multimodal:
+            return false
         }
     }
 
@@ -270,10 +386,14 @@ struct ModelsView: View {
             Label("On-device models", systemImage: "internaldrive")
                 .font(.caption.weight(.medium)).foregroundStyle(Theme.textSecondary)
             Spacer()
-            Text("\(Format.bytes(models.installedBytes)) used")
+            Text("\(Format.bytes(models.installedBytes + voiceModels.installedBytes)) used")
                 .font(.caption.monospacedDigit()).foregroundStyle(Theme.textTertiary)
         }
         .padding(.horizontal, 2)
+    }
+
+    private func voiceQuantBinding(for model: LocalTTSModel) -> Binding<LocalTTSQuant?> {
+        Binding(get: { selectedVoiceQuant[model.id] }, set: { selectedVoiceQuant[model.id] = $0 })
     }
 
     private func engineBinding(for model: LLMModel) -> Binding<EngineKind?> {
@@ -651,9 +771,189 @@ struct ModelCard: View {
     }
 }
 
+/// Card for a curated local neural voice model (`LocalTTSModel`), reusing studio styling while
+/// keeping voice output activation independent from the active chat LLM.
+private struct LocalTTSModelCard: View {
+    @Bindable var voiceModels: LocalTTSModelManager
+    @Bindable var settings: AppSettings
+    let deviceMemoryBytes: Int64
+    let model: LocalTTSModel
+    let isRecommended: Bool
+    let isEngineAvailable: Bool
+    @Binding var quantSel: LocalTTSQuant?
+    var onUse: (LocalTTSModel, LocalTTSModelVariant) -> Void
+    var onDelete: (LocalTTSModelVariant) -> Void
+
+    private var quant: LocalTTSQuant { quantSel ?? model.defaultQuant }
+    private var variant: LocalTTSModelVariant { model.variant(for: quant) ?? model.defaultVariant }
+    private var isInstalled: Bool { voiceModels.isInstalled(variant) }
+    private var download: VariantDownload? { voiceModels.downloadState(variant) }
+    private var isActiveForVoice: Bool {
+        settings.ttsEngineKind == .localMLX && settings.localMLXModelVariantID == variant.id
+    }
+    private var fitsDeviceRAM: Bool {
+        deviceMemoryBytes >= variant.minimumRecommendedRAMBytes
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.sm) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(model.displayName)
+                    .font(.headline).foregroundStyle(Theme.textPrimary)
+                    .lineLimit(1).minimumScaleFactor(0.7).layoutPriority(1)
+                if isRecommended {
+                    Chip(text: "Recommended", filled: true)
+                } else {
+                    Chip(text: "Voice", filled: false)
+                }
+                Spacer()
+                Text(fitsDeviceRAM ? "Runs great" : "Tight memory")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(fitsDeviceRAM ? Theme.fitGreen : Theme.fitAmber)
+                    .padding(.horizontal, Theme.Space.xs).padding(.vertical, 3)
+                    .background((fitsDeviceRAM ? Theme.fitGreen : Theme.fitAmber).opacity(0.14), in: Capsule())
+            }
+
+            Text("\(model.publisher) · \(model.summary)")
+                .font(.caption).foregroundStyle(Theme.textSecondary).lineLimit(3)
+
+            HStack(spacing: Theme.Space.xs) {
+                Text("Text-to-Speech")
+                Text("·").foregroundStyle(Theme.textTertiary)
+                Text(model.license)
+                Text("·").foregroundStyle(Theme.textTertiary)
+                Text("\(model.presetVoices.count) preset voices")
+            }
+            .font(.caption2).foregroundStyle(Theme.textTertiary)
+
+            VStack(alignment: .leading, spacing: Theme.Space.sm) {
+                HStack(alignment: .center, spacing: Theme.Space.sm) {
+                    Text("PRECISION")
+                        .font(.caption2.weight(.bold)).tracking(0.5).foregroundStyle(Theme.textTertiary)
+                        .frame(width: 74, alignment: .leading)
+                    HStack(spacing: Theme.Space.xs) {
+                        ForEach(model.variants, id: \.id) { v in
+                            let selected = v.quant == quant
+                            Button {
+                                withAnimation(Motion.select) { quantSel = v.quant }
+                            } label: {
+                                HStack(spacing: 5) {
+                                    Circle()
+                                        .fill(deviceMemoryBytes >= v.minimumRecommendedRAMBytes ? Theme.fitGreen : Theme.fitAmber)
+                                        .frame(width: 7, height: 7)
+                                    Text(v.quant.displayName).font(.caption.weight(.medium)).lineLimit(1)
+                                }
+                                .foregroundStyle(selected ? Theme.onAccent : Theme.textSecondary)
+                                .padding(.horizontal, Theme.Space.sm).padding(.vertical, 6)
+                                .background(selected ? Theme.accent : Theme.surface2, in: Capsule())
+                                .overlay(Capsule().strokeBorder(selected ? Color.clear : Theme.hairline))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                HStack(spacing: Theme.Space.xs) {
+                    Text(variant.quant.displayName).font(.caption.weight(.medium)).foregroundStyle(Theme.textSecondary)
+                    Text("·").foregroundStyle(Theme.textTertiary)
+                    Text("~\(Format.bytes(variant.approximateBytes))")
+                        .font(.caption.monospacedDigit()).foregroundStyle(Theme.textPrimary)
+                    Text("·").foregroundStyle(Theme.textTertiary)
+                    Text("Cloud LLM friendly")
+                        .font(.caption2).foregroundStyle(Theme.textTertiary)
+                    Spacer()
+                }
+            }
+
+            if let download, voiceModels.isDownloading(variant) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: Theme.Space.sm) {
+                        ProgressView(value: download.fraction).tint(Theme.accent)
+                        if download.isPausing {
+                            Text("Pausing…").font(.caption.weight(.semibold)).foregroundStyle(Theme.textSecondary)
+                        } else {
+                            Button { voiceModels.pause(variant) } label: {
+                                Image(systemName: "pause.circle.fill").foregroundStyle(Theme.textSecondary)
+                            }
+                            .buttonStyle(.plain).accessibilityLabel("Pause download")
+                        }
+                    }
+                    Text(download.isPausing
+                         ? "Finishing the current file write safely…"
+                         : (download.meter.compactDetail ?? "Downloading… \(Int(download.fraction * 100))%"))
+                        .font(.caption2.monospacedDigit()).foregroundStyle(Theme.textTertiary)
+                        .lineLimit(1).minimumScaleFactor(0.6)
+                }
+            } else if let download, download.isPaused {
+                HStack(spacing: Theme.Space.sm) {
+                    Button { voiceModels.download(variant) } label: {
+                        Label("Resume · \(Int(download.fraction * 100))%", systemImage: "arrow.down.circle")
+                    }
+                    .buttonStyle(StudioButtonStyle(.secondary))
+                    Spacer()
+                }
+            } else if let download, let error = download.error {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(error).font(.caption2).foregroundStyle(Theme.danger).lineLimit(2)
+                    Button { voiceModels.download(variant) } label: {
+                        Label("Retry download", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(StudioButtonStyle(.secondary))
+                }
+            } else if isInstalled {
+                VStack(alignment: .leading, spacing: Theme.Space.xs) {
+                    HStack(spacing: Theme.Space.sm) {
+                        if isActiveForVoice {
+                            if isEngineAvailable {
+                                Label("Active for Voice", systemImage: "checkmark.circle.fill")
+                                    .font(.subheadline.weight(.semibold)).foregroundStyle(Theme.accent)
+                            } else {
+                                Label("Selected · Engine pending", systemImage: "clock.badge.checkmark")
+                                    .font(.subheadline.weight(.semibold)).foregroundStyle(Theme.fitAmber)
+                            }
+                        } else {
+                            Button { onUse(model, variant) } label: {
+                                Label("Use for Voice", systemImage: "waveform")
+                            }
+                            .buttonStyle(StudioButtonStyle(.primary))
+                            .accessibilityLabel("Use \(model.displayName) for voice")
+                        }
+                        Spacer()
+                        Button(role: .destructive) { onDelete(variant) } label: {
+                            Image(systemName: "trash").foregroundStyle(Theme.textSecondary)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Delete \(model.displayName)")
+                    }
+                    if !isEngineAvailable {
+                        Text("Weights are ready on disk. Local MLX voice synthesis activates once the runtime is wired; voice currently falls back to Apple System Voice.")
+                            .font(.caption2).foregroundStyle(Theme.fitAmber)
+                    }
+                }
+            } else {
+                HStack {
+                    Button { voiceModels.download(variant) } label: {
+                        Label("Download · ~\(Format.bytes(variant.approximateBytes))", systemImage: "arrow.down.circle")
+                    }
+                    .buttonStyle(StudioButtonStyle(.secondary))
+                    Spacer()
+                }
+            }
+        }
+        .studioCard()
+        .overlay(RoundedRectangle(cornerRadius: Theme.corner, style: .continuous)
+            .strokeBorder(isActiveForVoice ? (isEngineAvailable ? Theme.accent : Theme.fitAmber) : .clear, lineWidth: 1.5))
+    }
+}
+
 #if DEBUG
 #Preview("Models") {
     let container = AppContainer.preview()
-    return ModelsView(models: container.models, settings: container.settings) { _, _ in }
+    return ModelsView(
+        models: container.models,
+        voiceModels: container.voiceModels,
+        settings: container.settings,
+        requestedVoiceFilter: .constant(false)
+    ) { _, _ in }
 }
 #endif

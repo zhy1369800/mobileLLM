@@ -663,4 +663,70 @@ final class StreamingSpeechTests: XCTestCase {
         XCTAssertEqual(coordinator.currentSpokenSentence, "")
         XCTAssertFalse(coordinator.isSpeaking)
     }
+
+    func testSettingsPersistLocalMLXTTSPreferencesAndReset() throws {
+        let suite = "local-mlx-speech-persist-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+
+        let first = AppSettings(defaults: defaults, keychain: nil)
+        XCTAssertEqual(first.localMLXVoiceID, LocalTTSModelCatalog.defaultVoiceID)
+        XCTAssertNil(first.localMLXModelVariantID)
+
+        first.ttsEngineKind = .localMLX
+        first.localMLXModelVariantID = "cosyvoice3-0.5b-4bit"
+        first.localMLXVoiceID = "warm_female"
+
+        let reloaded = AppSettings(defaults: defaults, keychain: nil)
+        XCTAssertEqual(reloaded.ttsEngineKind, .localMLX)
+        XCTAssertEqual(reloaded.localMLXModelVariantID, "cosyvoice3-0.5b-4bit")
+        XCTAssertEqual(reloaded.localMLXVoiceID, "warm_female")
+
+        try reloaded.resetForDataErase()
+        XCTAssertEqual(reloaded.ttsEngineKind, .appleSystem)
+        XCTAssertNil(reloaded.localMLXModelVariantID)
+        XCTAssertEqual(reloaded.localMLXVoiceID, LocalTTSModelCatalog.defaultVoiceID)
+    }
+
+    func testLocalMLXTTSRoutingAndFallbackToAppleOnUnreadyOrError() async {
+        let settings = makeSettings(autoSpeak: true)
+        settings.ttsEngineKind = .localMLX
+        settings.localMLXVoiceID = "Serena"
+        settings.ttsVoiceIdentifier = "voice-zh"
+
+        let appleEngine = MockTTSEngine()
+        let mlxEngine = MockTTSEngine()
+        mlxEngine.isReady = false
+
+        let coordinator = StreamingSpeechCoordinator(
+            engine: appleEngine,
+            localMLXEngine: mlxEngine,
+            settings: settings
+        )
+
+        // 1. Not ready yet -> falls back to Apple engine.
+        coordinator.speakMessage(text: "MLX unready fallback.", messageID: UUID())
+        for _ in 0..<10 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(appleEngine.spokenSegments, ["MLX unready fallback."])
+        XCTAssertEqual(mlxEngine.spokenSegments, [])
+
+        // 2. Ready -> routes to Local MLX engine with localMLXVoiceID.
+        mlxEngine.isReady = true
+        coordinator.speakMessage(text: "Local MLX speaks.", messageID: UUID())
+        for _ in 0..<10 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(mlxEngine.spokenSegments, ["Local MLX speaks."])
+        XCTAssertEqual(mlxEngine.lastVoiceID, "Serena")
+
+        // 3. Failure mid-turn -> seamlessly falls back to Apple System Voice.
+        mlxEngine.consecutiveErrorsRemaining = 1
+        coordinator.speakMessage(text: "MLX failed. Apple takes over.", messageID: UUID())
+        for _ in 0..<20 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(appleEngine.spokenSegments, ["MLX unready fallback.", "MLX failed.", "Apple takes over."])
+        XCTAssertFalse(coordinator.isSpeaking)
+    }
 }

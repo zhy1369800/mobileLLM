@@ -190,8 +190,12 @@ public final class AppSettings {
     public var ttsSpeechRate: Double { didSet { persist() } }
     /// Optional preferred voice identifier (`nil` = auto-detect language per sentence).
     public var ttsVoiceIdentifier: String? { didSet { persist() } }
-    /// Preferred speech synthesis backend (Apple native vs. Cloud OpenAI-compatible TTS).
+    /// Preferred speech synthesis backend (`appleSystem`, `localMLX`, or `cloudOpenAI`).
     public var ttsEngineKind: TTSEngineKind { didSet { persist() } }
+    /// Selected downloaded `LocalTTSModelVariant.id` when `ttsEngineKind == .localMLX`.
+    public var localMLXModelVariantID: String? { didSet { persist() } }
+    /// Preset speaker identifier for local MLX neural voices (e.g. `"default_zh"` or `"Vivian"`).
+    public var localMLXVoiceID: String { didSet { persist() } }
     /// Base URL for Cloud TTS (`/v1/audio/speech` compatible).
     public var cloudTTSBaseURL: String { didSet { persist() } }
     /// Model identifier for Cloud TTS (e.g. `tts-1`, `gpt-4o-mini-tts`, `FunAudioLLM/CosyVoice2-0.5B`).
@@ -553,6 +557,8 @@ public final class AppSettings {
         ttsSpeechRate = snap?.ttsSpeechRate ?? 1.0
         ttsVoiceIdentifier = snap?.ttsVoiceIdentifier ?? nil
         ttsEngineKind = snap?.ttsEngineKind ?? .appleSystem
+        localMLXModelVariantID = snap?.localMLXModelVariantID
+        localMLXVoiceID = snap?.localMLXVoiceID ?? LocalTTSModelCatalog.defaultVoiceID
         cloudTTSBaseURL = snap?.cloudTTSBaseURL ?? "https://api.openai.com/v1"
         cloudTTSModel = snap?.cloudTTSModel ?? "tts-1"
         cloudTTSVoice = snap?.cloudTTSVoice ?? "alloy"
@@ -780,6 +786,8 @@ public final class AppSettings {
         var ttsSpeechRate: Double? = 1.0
         var ttsVoiceIdentifier: String? = nil
         var ttsEngineKind: TTSEngineKind? = .appleSystem
+        var localMLXModelVariantID: String? = nil
+        var localMLXVoiceID: String? = nil
         var cloudTTSBaseURL: String? = nil
         var cloudTTSModel: String? = nil
         var cloudTTSVoice: String? = nil
@@ -852,6 +860,8 @@ public final class AppSettings {
                             ttsSpeechRate: ttsSpeechRate,
                             ttsVoiceIdentifier: ttsVoiceIdentifier,
                             ttsEngineKind: ttsEngineKind,
+                            localMLXModelVariantID: localMLXModelVariantID,
+                            localMLXVoiceID: localMLXVoiceID,
                             cloudTTSBaseURL: cloudTTSBaseURL,
                             cloudTTSModel: cloudTTSModel,
                             cloudTTSVoice: cloudTTSVoice,
@@ -919,6 +929,9 @@ public final class AppSettings {
         autoCompactionEnabled = false
         compactionModelTarget = .followCurrent
         dictationLocale = nil
+        ttsEngineKind = .appleSystem
+        localMLXModelVariantID = nil
+        localMLXVoiceID = LocalTTSModelCatalog.defaultVoiceID
         voiceBargeInMode = .free
         voiceBargeInKeywords = ""
         showVoiceSubtitles = true

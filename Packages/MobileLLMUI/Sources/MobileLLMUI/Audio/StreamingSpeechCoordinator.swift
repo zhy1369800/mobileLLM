@@ -22,6 +22,7 @@ public final class StreamingSpeechCoordinator {
     public var isVoiceCallActive: Bool = false {
         didSet {
             engine.preservesExternalAudioSession = isVoiceCallActive
+            localMLXEngine?.preservesExternalAudioSession = isVoiceCallActive
             cloudEngine?.preservesExternalAudioSession = isVoiceCallActive
         }
     }
@@ -29,6 +30,7 @@ public final class StreamingSpeechCoordinator {
     @ObservationIgnored public var externalOutputSink: (any VoiceAudioOutputSink)? {
         didSet {
             engine.externalOutputSink = externalOutputSink
+            localMLXEngine?.externalOutputSink = externalOutputSink
             cloudEngine?.externalOutputSink = externalOutputSink
         }
     }
@@ -38,6 +40,15 @@ public final class StreamingSpeechCoordinator {
     public private(set) var currentSpokenSentence: String = ""
 
     public let engine: any TTSEngine
+    public var localMLXEngine: (any TTSEngine)? {
+        didSet {
+            localMLXEngine?.preservesExternalAudioSession = isVoiceCallActive
+            localMLXEngine?.externalOutputSink = externalOutputSink
+            localMLXEngine?.onExternalInterruption = { [weak self] in
+                self?.stop(suppressCurrentTurn: true)
+            }
+        }
+    }
     public var cloudEngine: (any TTSEngine)? {
         didSet {
             cloudEngine?.preservesExternalAudioSession = isVoiceCallActive
@@ -56,10 +67,16 @@ public final class StreamingSpeechCoordinator {
         let task: Task<Data, Error>
     }
 
+    private enum DrainEngineKind {
+        case appleSystem
+        case localMLX
+        case cloudOpenAI
+    }
+
     private struct ActiveDrainContext {
         let generation: UInt64
         var engine: any TTSEngine
-        var usingCloud: Bool
+        var engineKind: DrainEngineKind
         var isPlayingCurrent: Bool
     }
 
@@ -87,13 +104,18 @@ public final class StreamingSpeechCoordinator {
 
     public init(
         engine: (any TTSEngine)? = nil,
+        localMLXEngine: (any TTSEngine)? = nil,
         cloudEngine: (any TTSEngine)? = nil,
         settings: AppSettings
     ) {
         self.engine = engine ?? AppleSystemTTSEngine()
+        self.localMLXEngine = localMLXEngine
         self.cloudEngine = cloudEngine
         self.settings = settings
         self.engine.onExternalInterruption = { [weak self] in
+            self?.stop(suppressCurrentTurn: true)
+        }
+        self.localMLXEngine?.onExternalInterruption = { [weak self] in
             self?.stop(suppressCurrentTurn: true)
         }
         self.cloudEngine?.onExternalInterruption = { [weak self] in
@@ -102,10 +124,19 @@ public final class StreamingSpeechCoordinator {
     }
 
     /// Returns the currently selected and ready engine, falling back to `engine` (Apple System)
-    /// when Cloud TTS is not configured.
+    /// when Local MLX or Cloud TTS is not ready.
     public func activeEngine() -> any TTSEngine {
-        if settings.ttsEngineKind == .cloudOpenAI, let cloudEngine, cloudEngine.isReady {
-            return cloudEngine
+        switch settings.ttsEngineKind {
+        case .cloudOpenAI:
+            if let cloudEngine, cloudEngine.isReady {
+                return cloudEngine
+            }
+        case .localMLX:
+            if let localMLXEngine, localMLXEngine.isReady {
+                return localMLXEngine
+            }
+        case .appleSystem:
+            break
         }
         return engine
     }
@@ -117,6 +148,7 @@ public final class StreamingSpeechCoordinator {
     /// Prewarms the underlying TTS backend ahead of a voice call without touching `AVAudioSession`.
     public func prewarmForVoiceCall() {
         engine.prewarm()
+        localMLXEngine?.prewarm()
         cloudEngine?.prewarm()
     }
 
@@ -230,9 +262,11 @@ public final class StreamingSpeechCoordinator {
         drainTask?.cancel()
         drainTask = nil
         engine.stop()
+        localMLXEngine?.stop()
         cloudEngine?.stop()
         if !isVoiceCallActive {
             engine.endPlaybackSession()
+            localMLXEngine?.endPlaybackSession()
             cloudEngine?.endPlaybackSession()
         }
         isSpeaking = false
@@ -256,11 +290,11 @@ public final class StreamingSpeechCoordinator {
         let generation = sessionGeneration
 
         let initialEngine = self.activeEngine()
-        let initialUsingCloud = initialEngine === self.cloudEngine
+        let initialKind = self.drainEngineKind(for: initialEngine)
         self.activeDrainContext = ActiveDrainContext(
             generation: generation,
             engine: initialEngine,
-            usingCloud: initialUsingCloud,
+            engineKind: initialKind,
             isPlayingCurrent: false
         )
 
@@ -274,9 +308,9 @@ public final class StreamingSpeechCoordinator {
             {
                 let ctx = self.activeDrainContext
                 var targetEngine = ctx?.engine ?? self.activeEngine()
-                var usingCloud = ctx?.usingCloud ?? (targetEngine === self.cloudEngine)
-                var preferredVoiceID = self.currentPreferredVoiceID(usingCloud: usingCloud)
-                let splitScripts = self.shouldSplitScripts(usingCloud: usingCloud, preferredVoiceID: preferredVoiceID)
+                var engineKind = ctx?.engineKind ?? self.drainEngineKind(for: targetEngine)
+                var preferredVoiceID = self.currentPreferredVoiceID(for: engineKind)
+                let splitScripts = self.shouldSplitScripts(for: engineKind, preferredVoiceID: preferredVoiceID)
                 var currentTextToSpeak: String?
 
                 do {
@@ -341,15 +375,15 @@ public final class StreamingSpeechCoordinator {
                     }
                     self.requeuePrefetchAndCancel()
 
-                    // Seamless automatic fallback to Apple System Voice if Cloud TTS fails (offline, HTTP error, etc.).
-                    if usingCloud, let fallbackText = currentTextToSpeak {
-                        usingCloud = false
+                    // Seamless automatic fallback to Apple System Voice if Cloud/Local MLX TTS fails.
+                    if engineKind != .appleSystem, let fallbackText = currentTextToSpeak {
+                        engineKind = .appleSystem
                         targetEngine = self.engine
-                        preferredVoiceID = self.currentPreferredVoiceID(usingCloud: false)
+                        preferredVoiceID = self.currentPreferredVoiceID(for: .appleSystem)
                         self.activeDrainContext = ActiveDrainContext(
                             generation: generation,
                             engine: targetEngine,
-                            usingCloud: false,
+                            engineKind: .appleSystem,
                             isPlayingCurrent: false
                         )
                         do {
@@ -396,12 +430,25 @@ public final class StreamingSpeechCoordinator {
         }
     }
 
-    private func currentPreferredVoiceID(usingCloud: Bool) -> String? {
-        usingCloud ? settings.cloudTTSVoice : settings.ttsVoiceIdentifier
+    private func drainEngineKind(for targetEngine: any TTSEngine) -> DrainEngineKind {
+        if targetEngine === cloudEngine { return .cloudOpenAI }
+        if targetEngine === localMLXEngine { return .localMLX }
+        return .appleSystem
     }
 
-    private func shouldSplitScripts(usingCloud: Bool, preferredVoiceID: String?) -> Bool {
-        !usingCloud && (preferredVoiceID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    private func currentPreferredVoiceID(for kind: DrainEngineKind) -> String? {
+        switch kind {
+        case .cloudOpenAI:
+            return settings.cloudTTSVoice
+        case .localMLX:
+            return settings.localMLXVoiceID
+        case .appleSystem:
+            return settings.ttsVoiceIdentifier
+        }
+    }
+
+    private func shouldSplitScripts(for kind: DrainEngineKind, preferredVoiceID: String?) -> Bool {
+        kind == .appleSystem && (preferredVoiceID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
     }
 
     private func effectiveBatchCharacterLimit(for engine: any TTSEngine) -> Int {
@@ -456,8 +503,8 @@ public final class StreamingSpeechCoordinator {
             return
         }
 
-        let voiceID = currentPreferredVoiceID(usingCloud: ctx.usingCloud)
-        let splitScripts = shouldSplitScripts(usingCloud: ctx.usingCloud, preferredVoiceID: voiceID)
+        let voiceID = currentPreferredVoiceID(for: ctx.engineKind)
+        let splitScripts = shouldSplitScripts(for: ctx.engineKind, preferredVoiceID: voiceID)
         let nextText = dequeueNextBatch(
             maxCharacters: effectiveBatchCharacterLimit(for: prefetchEngine),
             splitOnScriptChange: splitScripts

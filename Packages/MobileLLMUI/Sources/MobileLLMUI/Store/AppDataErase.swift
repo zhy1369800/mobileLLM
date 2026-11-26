@@ -85,6 +85,8 @@ public extension AppContainer {
         if intent.allData {
             do { try await models.eraseDownloadedData() }
             catch { failures.append("Models: \(error.localizedDescription)") }
+            do { try await voiceModels.eraseDownloadedData() }
+            catch { failures.append("Voice models: \(error.localizedDescription)") }
             syncActive()
             do { try await memory.deleteAll() }
             catch { failures.append("Memory: \(error.localizedDescription)") }
