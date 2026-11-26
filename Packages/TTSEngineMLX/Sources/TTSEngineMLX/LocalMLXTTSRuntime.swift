@@ -34,6 +34,19 @@ public enum LocalMLXTTSError: LocalizedError, Sendable {
     }
 }
 
+/// Reference clip + transcript passed when speaking with a zero-shot cloned voice.
+public struct LocalMLXTTSVoiceCloneReference: Sendable, Equatable {
+    public let profileID: String
+    public let audioURL: URL
+    public let referenceTranscript: String?
+
+    public init(profileID: String, audioURL: URL, referenceTranscript: String?) {
+        self.profileID = profileID
+        self.audioURL = audioURL
+        self.referenceTranscript = referenceTranscript
+    }
+}
+
 /// Self-contained inference request passed into `LocalMLXTTSRuntime`.
 public struct LocalMLXTTSRequest: Sendable {
     public let text: String
@@ -42,6 +55,7 @@ public struct LocalMLXTTSRequest: Sendable {
     public let weightsDirectory: URL
     public let voiceID: String?
     public let rate: Double
+    public let cloneReference: LocalMLXTTSVoiceCloneReference?
 
     public init(
         text: String,
@@ -49,7 +63,8 @@ public struct LocalMLXTTSRequest: Sendable {
         variantID: String,
         weightsDirectory: URL,
         voiceID: String?,
-        rate: Double
+        rate: Double,
+        cloneReference: LocalMLXTTSVoiceCloneReference? = nil
     ) {
         self.text = text
         self.modelID = modelID
@@ -57,6 +72,7 @@ public struct LocalMLXTTSRequest: Sendable {
         self.weightsDirectory = weightsDirectory
         self.voiceID = voiceID
         self.rate = rate
+        self.cloneReference = cloneReference
     }
 }
 
@@ -96,7 +112,10 @@ public enum LocalMLXTTSMapping {
 
     public static func qwen3Speaker(for voiceID: String?) -> String {
         let trimmed = voiceID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? "vivian" : trimmed.lowercased()
+        if trimmed.isEmpty || ClonedVoiceProfile.isClonedVoiceID(trimmed) {
+            return "vivian"
+        }
+        return trimmed.lowercased()
     }
 }
 
@@ -125,7 +144,16 @@ public actor LocalMLXTTSRuntime {
         }
     }
 
+    private struct CloneProfileCacheKey: Equatable {
+        let variantID: String
+        let profileID: String
+        let audioPath: String
+        let fileModificationDate: Date?
+        let referenceTranscript: String?
+    }
+
     private var loaded: LoadedBackend?
+    private var cachedCosyVoiceProfile: (key: CloneProfileCacheKey, profile: CosyVoiceVoiceProfile)?
 
     public init() {}
 
@@ -158,13 +186,28 @@ public actor LocalMLXTTSRuntime {
         let sampleRate: Int
 
         switch backend {
-        case .cosyVoice(let model, _):
-            let instruction = LocalMLXTTSMapping.cosyVoiceInstruction(for: request.voiceID)
-            samples = model.synthesize(
-                text: request.text,
-                language: language,
-                instruction: instruction
-            )
+        case .cosyVoice(let model, let variantID):
+            if let cloneRef = request.cloneReference {
+                let profile = try ensureCosyVoiceProfile(
+                    model: model,
+                    variantID: variantID,
+                    weightsDirectory: request.weightsDirectory,
+                    reference: cloneRef
+                )
+                try Task.checkCancellation()
+                samples = model.synthesize(
+                    text: request.text,
+                    voiceProfile: profile,
+                    language: language
+                )
+            } else {
+                let instruction = LocalMLXTTSMapping.cosyVoiceInstruction(for: request.voiceID)
+                samples = model.synthesize(
+                    text: request.text,
+                    language: language,
+                    instruction: instruction
+                )
+            }
             sampleRate = model.config.sampleRate
         case .qwen3(let model, _):
             let speaker = LocalMLXTTSMapping.qwen3Speaker(for: request.voiceID)
@@ -185,10 +228,56 @@ public actor LocalMLXTTSRuntime {
     }
 
     public func unload() {
+        cachedCosyVoiceProfile = nil
         guard let loaded else { return }
         loaded.unload()
         self.loaded = nil
         Memory.clearCache()
+    }
+
+    private func ensureCosyVoiceProfile(
+        model: CosyVoiceTTSModel,
+        variantID: String,
+        weightsDirectory: URL,
+        reference: LocalMLXTTSVoiceCloneReference
+    ) throws -> CosyVoiceVoiceProfile {
+        let normalizedTranscript: String? = {
+            let trimmed = reference.referenceTranscript?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return trimmed.isEmpty ? nil : trimmed
+        }()
+        let modDate = (try? FileManager.default.attributesOfItem(atPath: reference.audioURL.path)[.modificationDate]) as? Date
+        let key = CloneProfileCacheKey(
+            variantID: variantID,
+            profileID: reference.profileID,
+            audioPath: reference.audioURL.path,
+            fileModificationDate: modDate,
+            referenceTranscript: normalizedTranscript
+        )
+        if let cached = cachedCosyVoiceProfile, cached.key == key {
+            return cached.profile
+        }
+
+        let tokenizerURL = weightsDirectory.appending(component: "speech_tokenizer.safetensors")
+        guard FileManager.default.fileExists(atPath: tokenizerURL.path) else {
+            throw LocalMLXTTSError.missingWeights(tokenizerURL.path)
+        }
+
+        let decoded = try AudioSampleDecoder.loadMonoFloatSamples(from: reference.audioURL)
+        try Task.checkCancellation()
+
+        let profile: CosyVoiceVoiceProfile = try {
+            let speechTokenizer = try SpeechTokenizerModel.fromSafetensors(at: tokenizerURL)
+            return try model.extractVoiceProfile(
+                audio: decoded.samples,
+                sampleRate: decoded.sampleRate,
+                speechTokenizer: speechTokenizer,
+                referenceTranscript: normalizedTranscript
+            )
+        }()
+        // Release the 484 MB S3-Tokenizer buffers immediately after extracting compact FSQ + Mel tensors.
+        Memory.clearCache()
+        cachedCosyVoiceProfile = (key, profile)
+        return profile
     }
 
     private func ensureLoaded(

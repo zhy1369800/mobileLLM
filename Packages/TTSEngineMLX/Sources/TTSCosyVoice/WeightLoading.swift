@@ -359,6 +359,50 @@ public enum CosyVoiceWeightLoader {
         }
     }
 
+    // MARK: - Speech Tokenizer (zero-shot voice cloning)
+
+    public static func loadSpeechTokenizer(
+        _ tokenizer: SpeechTokenizerModel, from url: URL
+    ) throws {
+        let weights = try CommonWeightLoader.loadSafetensors(url: url)
+
+        CommonWeightLoader.applyConv1dWeights(
+            to: tokenizer.encoder.conv1, prefix: "encoder.conv1", from: weights, transpose: false)
+        CommonWeightLoader.applyConv1dWeights(
+            to: tokenizer.encoder.conv2, prefix: "encoder.conv2", from: weights, transpose: false)
+
+        for (i, block) in tokenizer.encoder.blocks.enumerated() {
+            let p = "encoder.blocks.\(i)"
+
+            CommonWeightLoader.applyLinearWeights(
+                to: block.attn.query, prefix: "\(p).attn.query", from: weights)
+            CommonWeightLoader.applyLinearWeights(
+                to: block.attn.key, prefix: "\(p).attn.key", from: weights)
+            CommonWeightLoader.applyLinearWeights(
+                to: block.attn.value, prefix: "\(p).attn.value", from: weights)
+            CommonWeightLoader.applyLinearWeights(
+                to: block.attn.out, prefix: "\(p).attn.out", from: weights)
+
+            CommonWeightLoader.applyConv1dWeights(
+                to: block.attn.fsmnBlock, prefix: "\(p).attn.fsmn_block",
+                from: weights, transpose: false)
+
+            CommonWeightLoader.applyLayerNormWeights(
+                to: block.attnLN, prefix: "\(p).attn_ln", from: weights)
+            CommonWeightLoader.applyLayerNormWeights(
+                to: block.mlpLN, prefix: "\(p).mlp_ln", from: weights)
+
+            CommonWeightLoader.applyLinearWeights(
+                to: block.mlpFc1, prefix: "\(p).mlp.0", from: weights)
+            CommonWeightLoader.applyLinearWeights(
+                to: block.mlpFc2, prefix: "\(p).mlp.2", from: weights)
+        }
+
+        CommonWeightLoader.applyLinearWeights(
+            to: tokenizer.quantizer.codebook.projectDown,
+            prefix: "quantizer._codebook.project_down", from: weights)
+    }
+
     // MARK: - Quantization inference helpers
 
     /// Validate MLX's packed 4-bit or 8-bit QuantizedLinear layout. bf16 bundles do not

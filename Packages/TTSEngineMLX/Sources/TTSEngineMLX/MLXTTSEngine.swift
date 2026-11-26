@@ -23,6 +23,8 @@ public final class MLXTTSEngine: PrefetchableTTSEngine {
     public var preferredBatchCharacterLimit: Int { 140 }
 
     private let modelResolver: @MainActor () -> ModelResolution?
+    private let voiceCloneResolver: @MainActor (String) -> LocalMLXTTSVoiceCloneReference?
+    private let clonedVoicesProvider: @MainActor () -> [TTSVoiceInfo]
     private let runtime: LocalMLXTTSRuntime
     private let idleUnloadDelay: Duration
     private let playerDelegate = PlayerDelegateProxy()
@@ -54,6 +56,7 @@ public final class MLXTTSEngine: PrefetchableTTSEngine {
     public convenience init(
         voiceModels: LocalTTSModelManager,
         settings: AppSettings,
+        voiceClones: VoiceCloneStore? = nil,
         runtime: LocalMLXTTSRuntime = LocalMLXTTSRuntime(),
         idleUnloadDelay: Duration = .seconds(90)
     ) {
@@ -72,6 +75,23 @@ public final class MLXTTSEngine: PrefetchableTTSEngine {
                     }
                 }
                 return nil
+            },
+            voiceCloneResolver: { voiceID in
+                guard ClonedVoiceProfile.isClonedVoiceID(voiceID),
+                      let profile = voiceClones?.profile(id: voiceID),
+                      let url = voiceClones?.audioURL(for: profile) else {
+                    return nil
+                }
+                return LocalMLXTTSVoiceCloneReference(
+                    profileID: profile.id,
+                    audioURL: url,
+                    referenceTranscript: profile.referenceTranscript
+                )
+            },
+            clonedVoicesProvider: {
+                (voiceClones?.profiles ?? []).map {
+                    TTSVoiceInfo(id: $0.id, name: $0.name, language: "clone", qualityLabel: "Voice Clone")
+                }
             }
         )
     }
@@ -79,11 +99,15 @@ public final class MLXTTSEngine: PrefetchableTTSEngine {
     public init(
         runtime: LocalMLXTTSRuntime = LocalMLXTTSRuntime(),
         idleUnloadDelay: Duration = .seconds(90),
-        modelResolver: @escaping @MainActor () -> ModelResolution?
+        modelResolver: @escaping @MainActor () -> ModelResolution?,
+        voiceCloneResolver: @escaping @MainActor (String) -> LocalMLXTTSVoiceCloneReference? = { _ in nil },
+        clonedVoicesProvider: @escaping @MainActor () -> [TTSVoiceInfo] = { [] }
     ) {
         self.runtime = runtime
         self.idleUnloadDelay = idleUnloadDelay
         self.modelResolver = modelResolver
+        self.voiceCloneResolver = voiceCloneResolver
+        self.clonedVoicesProvider = clonedVoicesProvider
         self.playerDelegate.owner = self
         #if os(iOS)
         self.memoryWarningObserver = NotificationCenter.default.addObserver(
@@ -110,9 +134,10 @@ public final class MLXTTSEngine: PrefetchableTTSEngine {
 
     public func availableVoices() -> [TTSVoiceInfo] {
         let model = modelResolver()?.model ?? LocalTTSModelCatalog.defaultModel
-        return model.presetVoices.map {
+        let presets = model.presetVoices.map {
             TTSVoiceInfo(id: $0.id, name: $0.name, language: $0.language, qualityLabel: "Local MLX")
         }
+        return clonedVoicesProvider() + presets
     }
 
     public func speak(text: String, voiceID: String?, rate: Double) async throws {
@@ -133,13 +158,15 @@ public final class MLXTTSEngine: PrefetchableTTSEngine {
             throw LocalMLXTTSError.noInstalledModel
         }
 
+        let cloneReference = voiceID.flatMap { voiceCloneResolver($0) }
         let request = LocalMLXTTSRequest(
             text: trimmed,
             modelID: resolved.model.id,
             variantID: resolved.variant.id,
             weightsDirectory: resolved.directory,
             voiceID: voiceID,
-            rate: rate
+            rate: rate,
+            cloneReference: cloneReference
         )
         let result = try await runtime.synthesize(request)
         try Task.checkCancellation()

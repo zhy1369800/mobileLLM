@@ -31,4 +31,25 @@ final class WAVEncoderTests: XCTestCase {
         }
         XCTAssertEqual(decoded, [0, 32767, -32767, 0, 0, 0])
     }
+
+    func testAudioSampleDecoderRoundTripsEncodedWAV() throws {
+        let rate = 24_000
+        let count = 2_400
+        let samples: [Float] = (0..<count).map { i in
+            sin(2.0 * Float.pi * 440.0 * Float(i) / Float(rate)) * 0.5
+        }
+        let wav = LocalTTSWAVEncoder.encodePCM16WAV(samples: samples, sampleRate: rate)
+
+        let tempURL = FileManager.default.temporaryDirectory
+            .appending(component: "wav-roundtrip-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: tempURL) }
+        try wav.write(to: tempURL)
+
+        let decoded = try AudioSampleDecoder.loadMonoFloatSamples(from: tempURL)
+        XCTAssertEqual(decoded.sampleRate, rate)
+        XCTAssertEqual(decoded.samples.count, count)
+        for i in 0..<count {
+            XCTAssertLessThan(abs(decoded.samples[i] - samples[i]), 0.001)
+        }
+    }
 }

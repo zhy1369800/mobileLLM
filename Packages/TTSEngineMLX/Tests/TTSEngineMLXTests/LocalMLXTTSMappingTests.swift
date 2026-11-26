@@ -27,6 +27,7 @@ final class LocalMLXTTSMappingTests: XCTestCase {
         XCTAssertEqual(LocalMLXTTSMapping.qwen3Speaker(for: "  Uncle_Fu "), "uncle_fu")
         XCTAssertEqual(LocalMLXTTSMapping.qwen3Speaker(for: nil), "vivian")
         XCTAssertEqual(LocalMLXTTSMapping.qwen3Speaker(for: "   "), "vivian")
+        XCTAssertEqual(LocalMLXTTSMapping.qwen3Speaker(for: "clone:abc"), "vivian")
     }
 
     func testMLXTTSEngineReadinessMatchesResolverAndSimulatorGuard() {

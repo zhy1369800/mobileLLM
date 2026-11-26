@@ -520,7 +520,8 @@ struct MobileLLMApp: App {
             )
             container.speech.localMLXEngine = MLXTTSEngine(
                 voiceModels: container.voiceModels,
-                settings: container.settings
+                settings: container.settings,
+                voiceClones: container.voiceClones
             )
             return container
         }

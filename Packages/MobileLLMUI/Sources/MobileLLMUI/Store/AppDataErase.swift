@@ -88,6 +88,8 @@ public extension AppContainer {
             speech.localMLXEngine?.unloadWeights()
             do { try await voiceModels.eraseDownloadedData() }
             catch { failures.append("Voice models: \(error.localizedDescription)") }
+            do { try voiceClones.eraseAllData() }
+            catch { failures.append("Cloned voices: \(error.localizedDescription)") }
             syncActive()
             do { try await memory.deleteAll() }
             catch { failures.append("Memory: \(error.localizedDescription)") }

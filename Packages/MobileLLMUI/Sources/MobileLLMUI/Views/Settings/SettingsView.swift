@@ -21,6 +21,7 @@ struct SettingsView: View {
     @State private var showOpenAI = false
     @State private var showShortcuts = false
     @State private var showLocalLogs = false
+    @State private var showVoiceCloneSheet = false
     @State private var isAdvancedExpanded = false
     private enum FocusField: Hashable {
         case bargeInKeywords
@@ -563,8 +564,26 @@ struct SettingsView: View {
 
     private var localMLXTTSSettingsRows: some View {
         let installed = resolvedInstalledLocalMLXVariant
-        let presets = (installed?.model ?? LocalTTSModelCatalog.defaultModel).presetVoices
+        let activeModel = installed?.model ?? LocalTTSModelCatalog.defaultModel
+        let presets = activeModel.presetVoices
+        let clonedVoices = container.voiceClones.profiles
+        let selectedClone = clonedVoices.first(where: { $0.id == settings.localMLXVoiceID })
         let selectedPreset = presets.first(where: { $0.id == settings.localMLXVoiceID })
+        let speakerLabel = selectedClone.map { "🎙 \($0.name)" }
+            ?? selectedPreset.map { "\($0.name) (\($0.language))" }
+            ?? settings.localMLXVoiceID
+        let isCosyVoiceActive = activeModel.id == LocalTTSModelCatalog.cosyVoice305B.id
+        let installedCosyVoiceVariantID: String? = {
+            if let currentID = settings.localMLXModelVariantID,
+               let match = LocalTTSModelCatalog.cosyVoice305B.variants.first(where: {
+                   $0.id == currentID && container.voiceModels.isInstalled($0)
+               }) {
+                return match.id
+            }
+            return LocalTTSModelCatalog.cosyVoice305B.variants
+                .first { container.voiceModels.isInstalled($0) }?
+                .id
+        }()
 
         return VStack(alignment: .leading, spacing: Theme.Space.sm) {
             HStack {
@@ -589,21 +608,67 @@ struct SettingsView: View {
                 Text("Speaker").font(.subheadline).foregroundStyle(Theme.textSecondary)
                 Spacer()
                 Menu {
-                    ForEach(presets) { preset in
-                        Button {
-                            settings.localMLXVoiceID = preset.id
-                        } label: {
-                            let label = "\(preset.name) · \(preset.language)"
-                            if settings.localMLXVoiceID == preset.id {
-                                Label(label, systemImage: "checkmark")
-                            } else {
-                                Text(label)
+                    if !clonedVoices.isEmpty {
+                        Section("Cloned Voices") {
+                            ForEach(clonedVoices) { clone in
+                                Button {
+                                    settings.localMLXVoiceID = clone.id
+                                } label: {
+                                    let label = "🎙 \(clone.name)"
+                                    if settings.localMLXVoiceID == clone.id {
+                                        Label(label, systemImage: "checkmark")
+                                    } else {
+                                        Text(label)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Section("Preset Voices") {
+                        ForEach(presets) { preset in
+                            Button {
+                                settings.localMLXVoiceID = preset.id
+                            } label: {
+                                let label = "\(preset.name) · \(preset.language)"
+                                if settings.localMLXVoiceID == preset.id {
+                                    Label(label, systemImage: "checkmark")
+                                } else {
+                                    Text(label)
+                                }
                             }
                         }
                     }
                 } label: {
-                    menuLabel(selectedPreset.map { "\($0.name) (\($0.language))" } ?? settings.localMLXVoiceID)
+                    menuLabel(speakerLabel)
                 }
+            }
+
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Voice cloning").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                    Text(clonedVoices.isEmpty ? "Record or import 5–15s audio" : "\(clonedVoices.count) cloned voice(s) saved")
+                        .font(.caption).foregroundStyle(Theme.textTertiary)
+                }
+                Spacer()
+                Button(clonedVoices.isEmpty ? "Clone Voice" : "Manage") {
+                    showVoiceCloneSheet = true
+                }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(Theme.accent)
+                .buttonStyle(.plain)
+            }
+            .sheet(isPresented: $showVoiceCloneSheet) {
+                VoiceCloneSheet(
+                    voiceClones: container.voiceClones,
+                    settings: settings,
+                    isCosyVoiceActive: isCosyVoiceActive,
+                    installedCosyVoiceVariantID: installedCosyVoiceVariantID
+                )
+            }
+
+            if selectedClone != nil && !isCosyVoiceActive {
+                Text("Cloned voices require CosyVoice3 0.5B. Switch back to CosyVoice3 in Models → Voice.")
+                    .font(.caption).foregroundStyle(Theme.fitAmber)
             }
 
             if installed == nil {

@@ -19,6 +19,7 @@ public final class AppContainer {
     public let conversationStore: ConversationStore
     public let models: ModelManager
     public let voiceModels: LocalTTSModelManager
+    public let voiceClones: VoiceCloneStore
     public let speech: StreamingSpeechCoordinator
     public let chat: ChatStore
     public let voiceChat: VoiceChatSession
@@ -140,6 +141,8 @@ public final class AppContainer {
             installProbe: voiceInstallProbe
         )
         self.voiceModels = voiceManager
+        let voiceCloneStore = VoiceCloneStore(directory: store.directory.appending(component: "voice_clones"))
+        self.voiceClones = voiceCloneStore
         // Tool seams for the agent loop. The memory store lives beside the conversation records (durable +
         // atomic — losing saved facts is annoying). The privacy-gated calendar / location adapters are
         // injected by the app-assembly layer (the App scene), NOT constructed here, so previews and unit
@@ -191,14 +194,35 @@ public final class AppContainer {
                 }
             }
             settings.localMLXModelVariantID = nextMatch?.variant.id
-            if let nextModel = nextMatch?.model,
-               !nextModel.presetVoices.contains(where: { $0.id == settings.localMLXVoiceID }) {
-                settings.localMLXVoiceID = nextModel.presetVoices.first?.id
-                    ?? LocalTTSModelCatalog.defaultVoiceID
+            if let nextModel = nextMatch?.model {
+                let keepClone = nextModel.id == LocalTTSModelCatalog.cosyVoice305B.id
+                    && ClonedVoiceProfile.isClonedVoiceID(settings.localMLXVoiceID)
+                if !keepClone,
+                   !nextModel.presetVoices.contains(where: { $0.id == settings.localMLXVoiceID }) {
+                    settings.localMLXVoiceID = nextModel.presetVoices.first?.id
+                        ?? LocalTTSModelCatalog.defaultVoiceID
+                }
             }
             if settings.ttsEngineKind == .localMLX {
                 speechCoordinator?.stop(suppressCurrentTurn: false)
             }
+        }
+        voiceCloneStore.onProfileDeleted = { [weak settings, weak speechCoordinator, weak voiceManager] deletedID in
+            guard let settings else { return }
+            if settings.localMLXVoiceID == deletedID {
+                let activeModel = settings.localMLXModelVariantID
+                    .flatMap { LocalTTSModelCatalog.variant(id: $0)?.model }
+                    ?? voiceManager?.catalog.first { model in
+                        model.variants.contains { voiceManager?.isInstalled($0) == true }
+                    }
+                    ?? LocalTTSModelCatalog.defaultModel
+                settings.localMLXVoiceID = activeModel.presetVoices.first?.id
+                    ?? LocalTTSModelCatalog.defaultVoiceID
+                if settings.ttsEngineKind == .localMLX {
+                    speechCoordinator?.stop(suppressCurrentTurn: false)
+                }
+            }
+            speechCoordinator?.localMLXEngine?.unloadWeights()
         }
         self.chat = ChatStore(engine: loggingEngine, store: store, settings: settings,
                               memoryBook: memoryBook, eventStore: eventStore,

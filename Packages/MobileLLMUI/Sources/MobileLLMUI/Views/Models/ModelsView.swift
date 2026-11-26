@@ -242,7 +242,10 @@ struct ModelsView: View {
                     quantSel: voiceQuantBinding(for: model),
                     onUse: { chosenModel, variant in
                         settings.localMLXModelVariantID = variant.id
-                        if !chosenModel.presetVoices.contains(where: { $0.id == settings.localMLXVoiceID }) {
+                        let keepClone = chosenModel.id == LocalTTSModelCatalog.cosyVoice305B.id
+                            && ClonedVoiceProfile.isClonedVoiceID(settings.localMLXVoiceID)
+                        if !keepClone,
+                           !chosenModel.presetVoices.contains(where: { $0.id == settings.localMLXVoiceID }) {
                             settings.localMLXVoiceID = chosenModel.presetVoices.first?.id
                                 ?? LocalTTSModelCatalog.defaultVoiceID
                         }
