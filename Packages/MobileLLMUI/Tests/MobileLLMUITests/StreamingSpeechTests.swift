@@ -877,4 +877,54 @@ final class StreamingSpeechTests: XCTestCase {
         }
         XCTAssertEqual(cloudEngine.playedSegments, [multiSentence])
     }
+
+    func testLocalMLXUsesSteppedBatchLimitsAndEagerSecondBatchPrefetch() async {
+        let settings = makeSettings(autoSpeak: true)
+        settings.ttsEngineKind = .localMLX
+
+        // 1. Stepped batch limits: batch #1 <= 24, batch #2 <= 40, batch #3 <= 75.
+        let steppedEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 75)
+        let coordinator = StreamingSpeechCoordinator(
+            engine: MockTTSEngine(),
+            localMLXEngine: steppedEngine,
+            settings: settings
+        )
+        let s1 = "这是第一句长度刚好十五个字哦。" // 15 chars
+        let s2 = "这是第二句长度刚好十五个字哦。" // 15 chars
+        let s3 = "这是第三句长度刚好十五个字哦。" // 15 chars -> s2+s3 = 30 <= 40
+        let s4 = "这是第四句长度刚好十五个字哦。" // 15 chars -> s2+s3+s4 = 45 > 40, so s4 moves to batch #3
+        let s5 = "这是第五句长度刚好十五个字哦。" // 15 chars -> s4+s5 = 30 <= 75
+        coordinator.speakMessage(text: s1 + s2 + s3 + s4 + s5, messageID: UUID())
+        for _ in 0..<30 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(steppedEngine.playedSegments, [s1, s2 + s3, s4 + s5])
+
+        // 2. Streaming batch #2 prefetches eagerly while batch #1 plays, even below 40 chars.
+        let prefetchEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 75)
+        prefetchEngine.hangPlayOnCallIndex = 1
+        let streamCoordinator = StreamingSpeechCoordinator(
+            engine: MockTTSEngine(),
+            localMLXEngine: prefetchEngine,
+            settings: settings
+        )
+        let msgID = UUID()
+        let firstClause = "今天天气真的很不错，我们下午一起去公园散步呼吸空气吧，"
+        let shortSecond = "你好。"
+        streamCoordinator.resetForNewTurn(messageID: msgID)
+        streamCoordinator.feed(delta: firstClause, messageID: msgID)
+        for _ in 0..<10 where prefetchEngine.playedSegments.count < 1 {
+            await Task.yield()
+        }
+        streamCoordinator.feed(delta: shortSecond, messageID: msgID)
+        for _ in 0..<10 where prefetchEngine.synthesizedTexts.count < 2 {
+            await Task.yield()
+        }
+        XCTAssertEqual(prefetchEngine.synthesizedTexts, [firstClause, shortSecond])
+        streamCoordinator.finish(fullText: nil, messageID: msgID)
+        prefetchEngine.resumePendingPlay()
+        for _ in 0..<20 where streamCoordinator.isSpeaking {
+            await Task.yield()
+        }
+    }
 }
