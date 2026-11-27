@@ -1691,8 +1691,9 @@ private final class EnginePlaybackController: VoiceAudioOutputSink, @unchecked S
 
         try await Task.detached(priority: .userInitiated) { [weak self] in
             guard let self, self.currentGeneration() == expectedGen else { throw CancellationError() }
+            let ext = Self.encodedAudioFileExtension(for: data)
             let tempURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("voice-tts-\(UUID().uuidString).mp3")
+                .appendingPathComponent("voice-tts-\(UUID().uuidString).\(ext)")
             try data.write(to: tempURL, options: .atomic)
             defer { try? FileManager.default.removeItem(at: tempURL) }
 
@@ -1844,5 +1845,25 @@ private final class EnginePlaybackController: VoiceAudioOutputSink, @unchecked S
             let rms = sqrt(sum / Float(frameLength * channelCount))
             return VoiceBargeInDetector.normalizeRMS(rms)
         }
+    }
+
+    static func encodedAudioFileExtension(for data: Data) -> String {
+        let header = [UInt8](data.prefix(12))
+        if header.count >= 12,
+           header.starts(with: [0x52, 0x49, 0x46, 0x46]), // "RIFF"
+           header[8..<12].elementsEqual([0x57, 0x41, 0x56, 0x45]) // "WAVE"
+        {
+            return "wav"
+        }
+        if header.starts(with: [0x66, 0x4C, 0x61, 0x43]) { // "fLaC"
+            return "flac"
+        }
+        if header.starts(with: [0x4F, 0x67, 0x67, 0x53]) { // "OggS"
+            return "ogg"
+        }
+        if header.count >= 8, header[4..<8].elementsEqual([0x66, 0x74, 0x79, 0x70]) { // "ftyp"
+            return "m4a"
+        }
+        return "mp3"
     }
 }
