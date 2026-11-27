@@ -303,23 +303,31 @@ struct SettingsView: View {
             voiceBargeInSettingsRows
             hairline
             HStack {
+                let isCloudTTSMissingConfig = settings.ttsEngineKind == .cloudOpenAI
+                    && (cloudTTSAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || CloudTTSEngine.speechEndpoint(from: settings.cloudTTSBaseURL) == nil)
+                let isLocalMLXNotReady = settings.ttsEngineKind == .localMLX
+                    && container.speech.localMLXEngine?.isReady != true
+                let canPreviewSelectedVoice = !isCloudTTSMissingConfig && !isLocalMLXNotReady
+
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Preview voice")
                         .font(.subheadline)
                         .foregroundStyle(Theme.textSecondary)
-                    if settings.ttsEngineKind == .cloudOpenAI,
-                       cloudTTSAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || CloudTTSEngine.speechEndpoint(from: settings.cloudTTSBaseURL) == nil {
-                        Text("Configure Base URL & API Key above (falls back to Apple voice).")
+                    if isCloudTTSMissingConfig {
+                        Text("Configure Base URL & API Key above to test Cloud TTS.")
                             .font(.caption)
                             .foregroundStyle(Theme.textTertiary)
-                    } else if settings.ttsEngineKind == .localMLX,
-                              container.speech.localMLXEngine?.isReady != true {
+                    } else if isLocalMLXNotReady {
                         Text(resolvedInstalledLocalMLXVariant == nil
-                             ? "Download CosyVoice3 0.5B in Models → Voice (falls back to Apple voice)."
-                             : "Local MLX engine is not active yet (falls back to Apple voice).")
+                             ? "Download a local voice model in Models → Voice to test Local MLX."
+                             : "Local MLX engine is unavailable on this device.")
                             .font(.caption)
                             .foregroundStyle(Theme.textTertiary)
+                    } else if let previewError = container.speech.lastPlaybackError {
+                        Text(previewError)
+                            .font(.caption)
+                            .foregroundStyle(Theme.danger)
                     }
                 }
                 Spacer()
@@ -329,7 +337,8 @@ struct SettingsView: View {
                     } else {
                         container.speech.speakMessage(
                             text: "Hello! 你好，这是实时语音播报效果预览。",
-                            messageID: nil
+                            messageID: nil,
+                            allowFallback: false
                         )
                     }
                 } label: {
@@ -341,10 +350,24 @@ struct SettingsView: View {
                     .foregroundStyle(Theme.accent)
                 }
                 .buttonStyle(.plain)
+                .disabled(!container.speech.isSpeaking && !canPreviewSelectedVoice)
+                .opacity(!container.speech.isSpeaking && !canPreviewSelectedVoice ? 0.45 : 1.0)
             }
         }
         .onAppear {
             cloudTTSAPIKey = container.cloudTTSAPIKey()
+        }
+        .onChange(of: settings.ttsEngineKind) { _, _ in
+            container.speech.clearPlaybackError()
+        }
+        .onChange(of: settings.localMLXVoiceID) { _, _ in
+            container.speech.clearPlaybackError()
+        }
+        .onChange(of: settings.localMLXModelVariantID) { _, _ in
+            container.speech.clearPlaybackError()
+        }
+        .onChange(of: settings.cloudTTSVoice) { _, _ in
+            container.speech.clearPlaybackError()
         }
     }
 

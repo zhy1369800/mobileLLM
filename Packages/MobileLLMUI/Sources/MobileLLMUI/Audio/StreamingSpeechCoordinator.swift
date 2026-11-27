@@ -38,6 +38,8 @@ public final class StreamingSpeechCoordinator {
     @ObservationIgnored public var onPlaybackFinished: (@MainActor @Sendable () -> Void)?
     /// Currently spoken sentence (useful for live captions / subtitles).
     public private(set) var currentSpokenSentence: String = ""
+    /// Last playback error surfaced when fallback is disabled (e.g. Settings "Test voice" preview).
+    public private(set) var lastPlaybackError: String?
 
     public let engine: any TTSEngine
     public var localMLXEngine: (any TTSEngine)? {
@@ -78,6 +80,7 @@ public final class StreamingSpeechCoordinator {
         var engine: any TTSEngine
         var engineKind: DrainEngineKind
         var isPlayingCurrent: Bool
+        var allowFallback: Bool
     }
 
     private enum SpeechScript {
@@ -97,6 +100,7 @@ public final class StreamingSpeechCoordinator {
     @ObservationIgnored private var prefetchedChunk: PrefetchedChunk?
     @ObservationIgnored private var activeDrainContext: ActiveDrainContext?
     @ObservationIgnored private var isCurrentBatchComplete: Bool = false
+    @ObservationIgnored private var allowFallbackForActiveBatch: Bool = true
 
     private let voiceCallBatchCharacterLimit = 100
     private let streamingPrefetchMinCharacters = 80
@@ -126,19 +130,39 @@ public final class StreamingSpeechCoordinator {
     /// Returns the currently selected and ready engine, falling back to `engine` (Apple System)
     /// when Local MLX or Cloud TTS is not ready.
     public func activeEngine() -> any TTSEngine {
+        selectedEngine(allowFallback: true)?.engine ?? engine
+    }
+
+    private func selectedEngine(allowFallback: Bool) -> (engine: any TTSEngine, kind: DrainEngineKind)? {
         switch settings.ttsEngineKind {
         case .cloudOpenAI:
             if let cloudEngine, cloudEngine.isReady {
-                return cloudEngine
+                return (cloudEngine, .cloudOpenAI)
             }
+            return allowFallback ? (engine, .appleSystem) : nil
         case .localMLX:
             if let localMLXEngine, localMLXEngine.isReady {
-                return localMLXEngine
+                return (localMLXEngine, .localMLX)
             }
+            return allowFallback ? (engine, .appleSystem) : nil
         case .appleSystem:
-            break
+            return (engine, .appleSystem)
         }
-        return engine
+    }
+
+    private func selectedEngineUnavailableMessage() -> String {
+        switch settings.ttsEngineKind {
+        case .localMLX:
+            return "Local MLX voice engine is not ready. Download a local voice model on an Apple Silicon device."
+        case .cloudOpenAI:
+            return "Cloud TTS is not configured. Check Base URL and API Key."
+        case .appleSystem:
+            return "Apple System Voice is currently unavailable."
+        }
+    }
+
+    public func clearPlaybackError() {
+        lastPlaybackError = nil
     }
 
     public func availableVoices() -> [TTSVoiceInfo] {
@@ -222,13 +246,19 @@ public final class StreamingSpeechCoordinator {
     }
 
     /// Speaks a full message on demand, segmented sentence by sentence.
-    public func speakMessage(text: String, messageID: UUID?) {
+    public func speakMessage(text: String, messageID: UUID?, allowFallback: Bool = true) {
         haltPlayback(suppressCurrentTurn: false)
+        if !allowFallback && selectedEngine(allowFallback: false) == nil {
+            lastPlaybackError = selectedEngineUnavailableMessage()
+            return
+        }
+        allowFallbackForActiveBatch = allowFallback
         isCurrentBatchComplete = true
         var oneShot = SentenceSegmenter()
         let sentences = oneShot.append(text) + oneShot.finish()
         guard !sentences.isEmpty else {
             isCurrentBatchComplete = false
+            allowFallbackForActiveBatch = true
             return
         }
         enqueue(sentences, messageID: messageID)
@@ -257,6 +287,8 @@ public final class StreamingSpeechCoordinator {
             isSuppressedForCurrentTurn = true
         }
         isCurrentBatchComplete = false
+        allowFallbackForActiveBatch = true
+        lastPlaybackError = nil
         activeDrainContext = nil
         cancelPrefetch()
         queue.removeAll(keepingCapacity: false)
@@ -290,14 +322,25 @@ public final class StreamingSpeechCoordinator {
     private func ensureDraining() {
         guard drainTask == nil else { return }
         let generation = sessionGeneration
+        let allowFallback = allowFallbackForActiveBatch
 
-        let initialEngine = self.activeEngine()
-        let initialKind = self.drainEngineKind(for: initialEngine)
+        guard let resolved = selectedEngine(allowFallback: allowFallback) else {
+            queue.removeAll(keepingCapacity: false)
+            isCurrentBatchComplete = false
+            isSpeaking = false
+            speakingMessageID = nil
+            lastPlaybackError = selectedEngineUnavailableMessage()
+            return
+        }
+
+        let initialEngine = resolved.engine
+        let initialKind = resolved.kind
         self.activeDrainContext = ActiveDrainContext(
             generation: generation,
             engine: initialEngine,
             engineKind: initialKind,
-            isPlayingCurrent: false
+            isPlayingCurrent: false,
+            allowFallback: allowFallback
         )
 
         drainTask = Task { @MainActor [weak self] in
@@ -377,6 +420,14 @@ public final class StreamingSpeechCoordinator {
                     }
                     self.requeuePrefetchAndCancel()
 
+                    let allowFallback = self.activeDrainContext?.allowFallback ?? true
+                    if !allowFallback {
+                        self.lastPlaybackError = error.localizedDescription
+                        self.queue.removeAll(keepingCapacity: false)
+                        self.cancelPrefetch()
+                        break
+                    }
+
                     // Seamless automatic fallback to Apple System Voice if Cloud/Local MLX TTS fails.
                     if engineKind != .appleSystem, let fallbackText = currentTextToSpeak {
                         engineKind = .appleSystem
@@ -386,7 +437,8 @@ public final class StreamingSpeechCoordinator {
                             generation: generation,
                             engine: targetEngine,
                             engineKind: .appleSystem,
-                            isPlayingCurrent: false
+                            isPlayingCurrent: false,
+                            allowFallback: true
                         )
                         do {
                             self.currentSpokenSentence = fallbackText
@@ -421,6 +473,7 @@ public final class StreamingSpeechCoordinator {
             self.cancelPrefetch()
             self.activeDrainContext = nil
             self.isCurrentBatchComplete = false
+            self.allowFallbackForActiveBatch = true
             self.drainTask = nil
             self.isSpeaking = false
             self.speakingMessageID = nil

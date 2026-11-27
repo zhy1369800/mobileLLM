@@ -768,4 +768,50 @@ final class StreamingSpeechTests: XCTestCase {
         XCTAssertEqual(mlxEngine.playedSegments, [firstSentence, secondSentence])
         XCTAssertFalse(coordinator.isSpeaking)
     }
+
+    func testSpeakMessageWithoutFallbackDoesNotUseAppleOnUnreadyOrError() async {
+        let settings = makeSettings(autoSpeak: true)
+        settings.ttsEngineKind = .localMLX
+        settings.localMLXVoiceID = "Serena"
+
+        let appleEngine = MockTTSEngine()
+        let mlxEngine = MockTTSEngine()
+        mlxEngine.isReady = false
+
+        let coordinator = StreamingSpeechCoordinator(
+            engine: appleEngine,
+            localMLXEngine: mlxEngine,
+            settings: settings
+        )
+
+        // 1. Unready Local MLX with allowFallback: false -> must NOT use Apple, surfaces error.
+        coordinator.speakMessage(text: "Preview test.", messageID: UUID(), allowFallback: false)
+        for _ in 0..<5 {
+            await Task.yield()
+        }
+        XCTAssertEqual(appleEngine.spokenSegments, [])
+        XCTAssertEqual(mlxEngine.spokenSegments, [])
+        XCTAssertFalse(coordinator.isSpeaking)
+        XCTAssertNotNil(coordinator.lastPlaybackError)
+
+        // 2. Failing Local MLX with allowFallback: false -> must NOT fall back to Apple, records error.
+        mlxEngine.isReady = true
+        mlxEngine.consecutiveErrorsRemaining = 1
+        coordinator.speakMessage(text: "First fails. Second skipped.", messageID: UUID(), allowFallback: false)
+        for _ in 0..<20 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(appleEngine.spokenSegments, [])
+        XCTAssertEqual(mlxEngine.spokenSegments, [])
+        XCTAssertFalse(coordinator.isSpeaking)
+        XCTAssertNotNil(coordinator.lastPlaybackError)
+
+        // 3. Subsequent successful playback clears lastPlaybackError.
+        coordinator.speakMessage(text: "Works now.", messageID: UUID(), allowFallback: false)
+        for _ in 0..<15 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(mlxEngine.spokenSegments, ["Works now."])
+        XCTAssertNil(coordinator.lastPlaybackError)
+    }
 }
