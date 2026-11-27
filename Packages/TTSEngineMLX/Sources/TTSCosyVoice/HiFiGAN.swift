@@ -493,6 +493,40 @@ private func stft(
 
 // MARK: - ISTFT
 
+/// Overlap-add `[B, nFrames, segmentsPerFrame, hopLen]` segments into `[B, outLen]`.
+private func overlapAddSegments(
+    _ segments: MLXArray,
+    batch: Int,
+    nFrames: Int,
+    segmentsPerFrame: Int,
+    hopLen: Int,
+    outLen: Int
+) -> MLXArray {
+    var accumulated = MLXArray.zeros([batch, outLen])
+    for s in 0..<segmentsPerFrame {
+        // Extract segment s from all frames: [B, nFrames, hopLen]
+        let seg = segments[0..., 0..., s, 0...]
+        let segFlat = seg.reshaped([batch, nFrames * hopLen])
+        // Pad: s*hopLen zeros on left, remaining on right
+        let leftPad = s * hopLen
+        let rightPad = outLen - leftPad - nFrames * hopLen
+        if leftPad > 0 || rightPad > 0 {
+            var parts: [MLXArray] = []
+            if leftPad > 0 {
+                parts.append(MLXArray.zeros([batch, leftPad]))
+            }
+            parts.append(segFlat)
+            if rightPad > 0 {
+                parts.append(MLXArray.zeros([batch, rightPad]))
+            }
+            accumulated = accumulated + concatenated(parts, axis: 1)
+        } else {
+            accumulated = accumulated + segFlat
+        }
+    }
+    return accumulated
+}
+
 /// Compute Inverse STFT using DFT matrix for small n_fft with overlap-add.
 ///
 /// The overlap-add is performed by reshaping windowed frames into segments of hopLen
@@ -578,49 +612,28 @@ private func istft(
 
     // For each segment offset s (0..segmentsPerFrame-1), the contribution goes to
     // output hop position (frame_index + s).
-    // Pad each segment channel so they align when summed:
-    //   offset s: pad s hops on the left and (segmentsPerFrame - 1 - s) hops on the right
-    var accumulated = MLXArray.zeros([batch, outLen])
-    for s in 0..<segmentsPerFrame {
-        // Extract segment s from all frames: [B, nFrames, hopLen]
-        let seg = segments[0..., 0..., s, 0...]  // [B, nFrames, hopLen]
-        // Flatten to [B, nFrames * hopLen]
-        let segFlat = seg.reshaped([batch, nFrames * hopLen])
-        // Pad: s*hopLen zeros on left, remaining on right
-        let leftPad = s * hopLen
-        let rightPad = outLen - leftPad - nFrames * hopLen
-        if leftPad > 0 || rightPad > 0 {
-            var parts: [MLXArray] = []
-            if leftPad > 0 {
-                parts.append(MLXArray.zeros([batch, leftPad]))
-            }
-            parts.append(segFlat)
-            if rightPad > 0 {
-                parts.append(MLXArray.zeros([batch, rightPad]))
-            }
-            accumulated = accumulated + concatenated(parts, axis: 1)
-        } else {
-            accumulated = accumulated + segFlat
-        }
-    }
+    let accumulated = overlapAddSegments(
+        segments,
+        batch: batch,
+        nFrames: nFrames,
+        segmentsPerFrame: segmentsPerFrame,
+        hopLen: hopLen,
+        outLen: outLen
+    )
 
     // Window normalization: compute sum of squared Hann window at each output position
-    var windowSumData = [Float](repeating: 0, count: outLen)
-    for f in 0..<nFrames {
-        for n in 0..<nFFT {
-            let outIdx = f * hopLen + n
-            if outIdx < outLen {
-                windowSumData[outIdx] += hannCoeffs[n] * hannCoeffs[n]
-            }
-        }
-    }
-    // Clamp to avoid division by zero
-    for i in 0..<outLen {
-        if windowSumData[i] < 1e-8 {
-            windowSumData[i] = 1e-8
-        }
-    }
-    let windowNorm = MLXArray(windowSumData).reshaped([1, outLen])
+    // using the same segment overlap-add on GPU instead of a per-frame Swift loop.
+    let winSq = (window * window).reshaped([1, 1, segmentsPerFrame, hopLen])
+    let winSegments = repeated(winSq, count: nFrames, axis: 1)
+    let windowSum = overlapAddSegments(
+        winSegments,
+        batch: 1,
+        nFrames: nFrames,
+        segmentsPerFrame: segmentsPerFrame,
+        hopLen: hopLen,
+        outLen: outLen
+    )
+    let windowNorm = maximum(windowSum, MLXArray(Float(1e-8)))
     let normalized = accumulated / windowNorm
 
     // torch.istft (center=True) trims n_fft/2 partial-window samples from
