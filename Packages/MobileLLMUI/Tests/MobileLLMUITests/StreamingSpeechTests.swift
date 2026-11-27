@@ -882,23 +882,25 @@ final class StreamingSpeechTests: XCTestCase {
         let settings = makeSettings(autoSpeak: true)
         settings.ttsEngineKind = .localMLX
 
-        // 1. Stepped batch limits: batch #1 <= 24, batch #2 <= 40, batch #3 <= 75.
+        // 1. Stepped batch limits: batch #1 <= 24, batch #2 <= 28, batch #3 <= 50, batch #4+ <= 75.
         let steppedEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 75)
         let coordinator = StreamingSpeechCoordinator(
             engine: MockTTSEngine(),
             localMLXEngine: steppedEngine,
             settings: settings
         )
-        let s1 = "这是第一句长度刚好十五个字哦。" // 15 chars
-        let s2 = "这是第二句长度刚好十五个字哦。" // 15 chars
-        let s3 = "这是第三句长度刚好十五个字哦。" // 15 chars -> s2+s3 = 30 <= 40
-        let s4 = "这是第四句长度刚好十五个字哦。" // 15 chars -> s2+s3+s4 = 45 > 40, so s4 moves to batch #3
-        let s5 = "这是第五句长度刚好十五个字哦。" // 15 chars -> s4+s5 = 30 <= 75
-        coordinator.speakMessage(text: s1 + s2 + s3 + s4 + s5, messageID: UUID())
+        let s1 = "这是第一句长度刚好十五个字哦。" // 15 chars -> batch #1 <= 24
+        let s2 = "第二句长度十三个字。" // 10 chars
+        let s3 = "第三句长度十三个字。" // 10 chars -> s2+s3 = 20 <= 28 (batch #2)
+        let s4 = "这是第四句长度刚好十五个字哦。" // 15 chars -> 20+15 = 35 > 28, moves to batch #3
+        let s5 = "这是第五句长度刚好十五个字哦。" // 15 chars
+        let s6 = "这是第六句长度刚好十五个字哦。" // 15 chars -> s4+s5+s6 = 45 <= 50 (batch #3)
+        let s7 = "这是第七句长度刚好十五个字哦。" // 15 chars -> 45+15 = 60 > 50, moves to batch #4
+        coordinator.speakMessage(text: s1 + s2 + s3 + s4 + s5 + s6 + s7, messageID: UUID())
         for _ in 0..<30 where coordinator.isSpeaking {
             await Task.yield()
         }
-        XCTAssertEqual(steppedEngine.playedSegments, [s1, s2 + s3, s4 + s5])
+        XCTAssertEqual(steppedEngine.playedSegments, [s1, s2 + s3, s4 + s5 + s6, s7])
 
         // 2. Streaming batch #2 prefetches eagerly while batch #1 plays, even below 40 chars.
         let prefetchEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 75)
@@ -937,9 +939,9 @@ final class StreamingSpeechTests: XCTestCase {
             defaults: UserDefaults(suiteName: "speech-flow-steps-\(UUID().uuidString)")!,
             keychain: nil
         )
-        XCTAssertEqual(reloaded.localMLXFlowSteps, 10)
+        XCTAssertEqual(reloaded.localMLXFlowSteps, 6)
         settings.resetToDefaults()
-        XCTAssertEqual(settings.localMLXFlowSteps, 10)
+        XCTAssertEqual(settings.localMLXFlowSteps, 6)
         settings.ttsEngineKind = .localMLX
 
         let mlxEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 75)
@@ -949,13 +951,13 @@ final class StreamingSpeechTests: XCTestCase {
             settings: settings
         )
         let first = "今天天气很好。"
-        // 58-char single sentence with internal commas (previously stayed monolithic < 72 chars).
-        let longSecond = "我们上午先去附近的公园散步晒太阳呼吸新鲜空气，然后沿着湖边的小路慢慢散步聊聊天，最后去图书馆看一会儿自己喜欢的书。"
+        // 61-char single sentence with internal commas (split <= 28 chars for batch #2).
+        let longSecond = "我们上午先去街角那边附近的公园散步晒太阳呼吸新鲜空气，然后沿着湖边的小路慢慢散步聊聊天，最后去图书馆看一会儿自己喜欢的书。"
         coordinator.speakMessage(text: first + longSecond, messageID: UUID())
         for _ in 0..<20 where coordinator.isSpeaking {
             await Task.yield()
         }
         XCTAssertEqual(mlxEngine.playedSegments.count, 3)
-        XCTAssertLessThanOrEqual(mlxEngine.playedSegments[1].count, 40)
+        XCTAssertLessThanOrEqual(mlxEngine.playedSegments[1].count, 28)
     }
 }

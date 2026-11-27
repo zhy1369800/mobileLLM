@@ -107,7 +107,7 @@ public final class MLXTTSEngine: PrefetchableTTSEngine {
         modelResolver: @escaping @MainActor () -> ModelResolution?,
         voiceCloneResolver: @escaping @MainActor (String) -> LocalMLXTTSVoiceCloneReference? = { _ in nil },
         clonedVoicesProvider: @escaping @MainActor () -> [TTSVoiceInfo] = { [] },
-        flowStepsProvider: @escaping @MainActor () -> Int = { 10 },
+        flowStepsProvider: @escaping @MainActor () -> Int = { 6 },
         onBeforeSynthesis: (@MainActor @Sendable () async -> Void)? = nil
     ) {
         self.runtime = runtime

@@ -561,7 +561,7 @@ public final class AppSettings {
         ttsEngineKind = snap?.ttsEngineKind ?? .appleSystem
         localMLXModelVariantID = snap?.localMLXModelVariantID
         localMLXVoiceID = snap?.localMLXVoiceID ?? LocalTTSModelCatalog.defaultVoiceID
-        localMLXFlowSteps = Self.normalizedLocalMLXFlowSteps(snap?.localMLXFlowSteps ?? 10)
+        localMLXFlowSteps = Self.normalizedLocalMLXFlowSteps(snap?.localMLXFlowSteps ?? 6)
         cloudTTSBaseURL = snap?.cloudTTSBaseURL ?? "https://api.openai.com/v1"
         cloudTTSModel = snap?.cloudTTSModel ?? "tts-1"
         cloudTTSVoice = snap?.cloudTTSVoice ?? "alloy"
@@ -937,7 +937,7 @@ public final class AppSettings {
         ttsEngineKind = .appleSystem
         localMLXModelVariantID = nil
         localMLXVoiceID = LocalTTSModelCatalog.defaultVoiceID
-        localMLXFlowSteps = 10
+        localMLXFlowSteps = 6
         voiceBargeInMode = .free
         voiceBargeInKeywords = ""
         showVoiceSubtitles = true
@@ -1022,7 +1022,7 @@ public extension AppSettings {
     nonisolated static func normalizedLocalMLXFlowSteps(_ value: Int) -> Int {
         switch value {
         case 6, 8, 10: return value
-        default: return 10
+        default: return 6
         }
     }
 }

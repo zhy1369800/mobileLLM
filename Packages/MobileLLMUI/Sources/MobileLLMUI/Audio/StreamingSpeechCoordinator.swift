@@ -107,9 +107,10 @@ public final class StreamingSpeechCoordinator {
     private let streamingPrefetchMinCharacters = 80
     private let voiceCallStreamingPrefetchMinCharacters = 60
     private let localMLXFirstBatchCharacterLimit = 24
-    private let localMLXSecondBatchCharacterLimit = 40
+    private let localMLXSecondBatchCharacterLimit = 28
+    private let localMLXThirdBatchCharacterLimit = 50
     private let localMLXFirstClauseThreshold = 24
-    private let localMLXLongClauseThreshold = 38
+    private let localMLXLongClauseThreshold = 26
     private let defaultLongClauseThreshold = 72
 
     public init(
@@ -584,6 +585,9 @@ public final class StreamingSpeechCoordinator {
             }
             if batchNumber == 2 {
                 return min(limit, localMLXSecondBatchCharacterLimit)
+            }
+            if batchNumber == 3 {
+                return min(limit, localMLXThirdBatchCharacterLimit)
             }
         }
         return limit

@@ -65,7 +65,7 @@ public struct LocalMLXTTSRequest: Sendable {
         weightsDirectory: URL,
         voiceID: String?,
         rate: Double,
-        flowSteps: Int = 10,
+        flowSteps: Int = 6,
         cloneReference: LocalMLXTTSVoiceCloneReference? = nil
     ) {
         self.text = text
