@@ -45,9 +45,10 @@ public class ConditionalFlowMatching: Module {
 
     /// Compiled DiT forward passes for kernel fusion. Uses shapeless=false
     /// since all shapes are constant across the 10 ODE steps within a
-    /// generation. Two variants: nil spks/cond (plain TTS) and full
-    /// conditioning (zero-shot cloning: spks + cond present).
+    /// generation. Three variants: nil spks/cond (plain TTS), cond-only
+    /// (zero-shot cloning with promptFeat), and full conditioning (spks + cond).
     private var compiledDiTForward: (([MLXArray]) -> [MLXArray])?
+    private var compiledDiTForwardCondOnly: (([MLXArray]) -> [MLXArray])?
     private var compiledDiTForwardFull: (([MLXArray]) -> [MLXArray])?
 
     /// Fixed initial ODE noise `[1, 80, N]`. Upstream CausalConditionalCFM
@@ -93,6 +94,15 @@ public class ConditionalFlowMatching: Module {
             return [velocity]
         }
 
+        compiledDiTForwardCondOnly = compile(
+            inputs: [decoderRef], outputs: [decoderRef], shapeless: false
+        ) { inputs in
+            let velocity = decoderRef(
+                inputs[0], mask: inputs[1], mu: inputs[2], t: inputs[3],
+                spks: nil, cond: inputs[4])
+            return [velocity]
+        }
+
         compiledDiTForwardFull = compile(
             inputs: [decoderRef], outputs: [decoderRef], shapeless: false
         ) { inputs in
@@ -112,6 +122,9 @@ public class ConditionalFlowMatching: Module {
         if let compiled = compiledDiTForward, spks == nil, cond == nil {
             return compiled([x, mask, mu, t])[0]
         }
+        if let compiled = compiledDiTForwardCondOnly, spks == nil, let cond {
+            return compiled([x, mask, mu, t, cond])[0]
+        }
         if let compiled = compiledDiTForwardFull, let spks, let cond {
             return compiled([x, mask, mu, t, spks, cond])[0]
         }
@@ -119,7 +132,7 @@ public class ConditionalFlowMatching: Module {
     }
 
     /// Warm up the compiled DiT with small dummy forward passes.
-    /// Traces both compiled graphs and pre-compiles Metal shaders so the
+    /// Traces all compiled graphs and pre-compiles Metal shaders so the
     /// first real generation pays zero compilation cost. Dummies use the
     /// loaded weight dtype so the traces match runtime call signatures.
     public func warmUp() {
@@ -137,8 +150,13 @@ public class ConditionalFlowMatching: Module {
             spks: nil, cond: nil)
         eval(plain)
 
-        let dummySpks = MLXArray.zeros([2, config.dit.spkDim]).asType(dtype)
         let dummyCond = MLXArray.zeros([2, melDim, 4]).asType(dtype)
+        let condOnly = executeDiTForward(
+            x: dummyX, mask: dummyMask, mu: dummyMu, t: dummyT,
+            spks: nil, cond: dummyCond)
+        eval(condOnly)
+
+        let dummySpks = MLXArray.zeros([2, config.dit.spkDim]).asType(dtype)
         let full = executeDiTForward(
             x: dummyX, mask: dummyMask, mu: dummyMu, t: dummyT,
             spks: dummySpks, cond: dummyCond)
@@ -205,28 +223,27 @@ public class ConditionalFlowMatching: Module {
         let ditDtype = mu.dtype
         let cfgRate = config.cfgRate
 
-        // Pre-build unconditioned inputs (zeros) for CFG — reused across all ODE steps
+        // Pre-build CFG-doubled loop-invariant inputs once across all ODE steps
+        let batchSize = x.dim(0)
         let muZeros = MLXArray.zeros(mu.shape, dtype: mu.dtype)
         let spksZeros: MLXArray? = spks.map { MLXArray.zeros($0.shape, dtype: ditDtype) }
         let condZeros: MLXArray? = cond.map { MLXArray.zeros($0.shape, dtype: ditDtype) }
+        let maskIn = concatenated([mask, mask], axis: 0)              // [2B, 1, T]
+        let muIn = concatenated([mu, muZeros], axis: 0)               // [2B, 80, T]
+        let spksIn: MLXArray? = spks.flatMap { s in
+            spksZeros.map { z in concatenated([s.asType(ditDtype), z], axis: 0) }
+        }
+        let condIn: MLXArray? = cond.flatMap { c in
+            condZeros.map { z in concatenated([c.asType(ditDtype), z], axis: 0) }
+        }
 
         for i in 0 ..< nTimesteps {
             let t = tSchedule[i]
             let dt = tSchedule[i + 1] - tSchedule[i]
 
             // Batch doubling for CFG: run conditioned + unconditioned in one forward pass
-            let batchSize = x.dim(0)
             let xIn = concatenated([x, x], axis: 0).asType(ditDtype)      // [2B, 80, T]
-            let maskIn = concatenated([mask, mask], axis: 0)              // [2B, 1, T]
-            let muIn = concatenated([mu, muZeros], axis: 0)               // [2B, 80, T]
             let tArr = MLXArray([Float](repeating: t, count: batchSize * 2)).asType(ditDtype)
-
-            let spksIn: MLXArray? = spks.flatMap { s in
-                spksZeros.map { z in concatenated([s.asType(ditDtype), z], axis: 0) }
-            }
-            let condIn: MLXArray? = cond.flatMap { c in
-                condZeros.map { z in concatenated([c.asType(ditDtype), z], axis: 0) }
-            }
 
             // Single forward pass through DiT with doubled batch
             let velocity = executeDiTForward(

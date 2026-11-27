@@ -81,6 +81,7 @@ public final class StreamingSpeechCoordinator {
         var engineKind: DrainEngineKind
         var isPlayingCurrent: Bool
         var allowFallback: Bool
+        var hasDequeuedFirstBatch: Bool = false
     }
 
     private enum SpeechScript {
@@ -105,6 +106,8 @@ public final class StreamingSpeechCoordinator {
     private let voiceCallBatchCharacterLimit = 100
     private let streamingPrefetchMinCharacters = 80
     private let voiceCallStreamingPrefetchMinCharacters = 60
+    private let localMLXFirstBatchCharacterLimit = 24
+    private let localMLXFirstClauseThreshold = 24
 
     public init(
         engine: (any TTSEngine)? = nil,
@@ -165,6 +168,14 @@ public final class StreamingSpeechCoordinator {
         lastPlaybackError = nil
     }
 
+    private var isLocalMLXActive: Bool {
+        selectedEngine(allowFallback: true)?.kind == .localMLX
+    }
+
+    private func makeSegmenter(forLocalMLX: Bool) -> SentenceSegmenter {
+        SentenceSegmenter(firstClauseThreshold: forLocalMLX ? localMLXFirstClauseThreshold : nil)
+    }
+
     public func availableVoices() -> [TTSVoiceInfo] {
         activeEngine().availableVoices()
     }
@@ -186,11 +197,13 @@ public final class StreamingSpeechCoordinator {
         isSuppressedForCurrentTurn = false
         activeTurnMessageID = messageID
         hasFedStreamingText = false
+        segmenter.firstClauseThreshold = isLocalMLXActive ? localMLXFirstClauseThreshold : nil
     }
 
     /// Clears buffered partial text when provisional answer output is discarded (e.g. before a tool call).
     public func discardBufferedStream() {
         segmenter.reset()
+        segmenter.firstClauseThreshold = isLocalMLXActive ? localMLXFirstClauseThreshold : nil
         hasFedStreamingText = false
     }
 
@@ -199,6 +212,9 @@ public final class StreamingSpeechCoordinator {
         guard (settings.autoSpeakResponses || isVoiceCallActive), !isSuppressedForCurrentTurn, !delta.isEmpty else { return }
         if let activeTurnMessageID, let messageID, activeTurnMessageID != messageID {
             return
+        }
+        if !hasFedStreamingText {
+            segmenter.firstClauseThreshold = isLocalMLXActive ? localMLXFirstClauseThreshold : nil
         }
         hasFedStreamingText = true
         isCurrentBatchComplete = false
@@ -221,7 +237,7 @@ public final class StreamingSpeechCoordinator {
             sentences = segmenter.finish()
         } else if let fullText, !fullText.isEmpty {
             // Non-streamed paths (e.g. Shortcuts completion) did not feed tokens incrementally.
-            var oneShot = SentenceSegmenter()
+            var oneShot = makeSegmenter(forLocalMLX: isLocalMLXActive)
             sentences = oneShot.append(fullText) + oneShot.finish()
         } else {
             sentences = []
@@ -248,13 +264,14 @@ public final class StreamingSpeechCoordinator {
     /// Speaks a full message on demand, segmented sentence by sentence.
     public func speakMessage(text: String, messageID: UUID?, allowFallback: Bool = true) {
         haltPlayback(suppressCurrentTurn: false)
-        if !allowFallback && selectedEngine(allowFallback: false) == nil {
+        let resolved = selectedEngine(allowFallback: allowFallback)
+        if !allowFallback && resolved == nil {
             lastPlaybackError = selectedEngineUnavailableMessage()
             return
         }
         allowFallbackForActiveBatch = allowFallback
         isCurrentBatchComplete = true
-        var oneShot = SentenceSegmenter()
+        var oneShot = makeSegmenter(forLocalMLX: resolved?.kind == .localMLX)
         let sentences = oneShot.append(text) + oneShot.finish()
         guard !sentences.isEmpty else {
             isCurrentBatchComplete = false
@@ -293,6 +310,7 @@ public final class StreamingSpeechCoordinator {
         cancelPrefetch()
         queue.removeAll(keepingCapacity: false)
         segmenter.reset()
+        segmenter.firstClauseThreshold = isLocalMLXActive ? localMLXFirstClauseThreshold : nil
         drainTask?.cancel()
         drainTask = nil
         engine.stop()
@@ -364,6 +382,7 @@ public final class StreamingSpeechCoordinator {
                         let audioData: Data
                         if let prefetched = self.prefetchedChunk {
                             self.prefetchedChunk = nil
+                            self.activeDrainContext?.hasDequeuedFirstBatch = true
                             nextText = prefetched.text
                             currentTextToSpeak = nextText
                             if prefetched.voiceID == preferredVoiceID,
@@ -379,8 +398,14 @@ public final class StreamingSpeechCoordinator {
                                 )
                             }
                         } else {
+                            let isFirstBatch = !(self.activeDrainContext?.hasDequeuedFirstBatch ?? true)
+                            self.activeDrainContext?.hasDequeuedFirstBatch = true
                             nextText = self.dequeueNextBatch(
-                                maxCharacters: self.effectiveBatchCharacterLimit(for: prefetchEngine),
+                                maxCharacters: self.effectiveBatchCharacterLimit(
+                                    for: prefetchEngine,
+                                    kind: engineKind,
+                                    isFirstBatch: isFirstBatch
+                                ),
                                 splitOnScriptChange: splitScripts
                             )
                             currentTextToSpeak = nextText
@@ -399,8 +424,14 @@ public final class StreamingSpeechCoordinator {
                         defer { self.activeDrainContext?.isPlayingCurrent = false }
                         try await prefetchEngine.play(synthesizedData: audioData)
                     } else {
+                        let isFirstBatch = !(self.activeDrainContext?.hasDequeuedFirstBatch ?? true)
+                        self.activeDrainContext?.hasDequeuedFirstBatch = true
                         let nextText = self.dequeueNextBatch(
-                            maxCharacters: self.effectiveBatchCharacterLimit(for: targetEngine),
+                            maxCharacters: self.effectiveBatchCharacterLimit(
+                                for: targetEngine,
+                                kind: engineKind,
+                                isFirstBatch: isFirstBatch
+                            ),
                             splitOnScriptChange: splitScripts
                         )
                         currentTextToSpeak = nextText
@@ -506,10 +537,18 @@ public final class StreamingSpeechCoordinator {
         kind == .appleSystem && (preferredVoiceID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
     }
 
-    private func effectiveBatchCharacterLimit(for engine: any TTSEngine) -> Int {
+    private func effectiveBatchCharacterLimit(
+        for engine: any TTSEngine,
+        kind: DrainEngineKind,
+        isFirstBatch: Bool = false
+    ) -> Int {
         let base = engine.preferredBatchCharacterLimit
         guard base > 0 else { return 0 }
-        return isVoiceCallActive ? min(base, voiceCallBatchCharacterLimit) : base
+        let limit = isVoiceCallActive ? min(base, voiceCallBatchCharacterLimit) : base
+        if isFirstBatch && kind == .localMLX {
+            return min(limit, localMLXFirstBatchCharacterLimit)
+        }
+        return limit
     }
 
     private func dequeueNextBatch(maxCharacters: Int, splitOnScriptChange: Bool = false) -> String {
@@ -551,7 +590,11 @@ public final class StreamingSpeechCoordinator {
               let prefetchEngine = ctx.engine as? any PrefetchableTTSEngine else {
             return
         }
-        let effectiveLimit = effectiveBatchCharacterLimit(for: prefetchEngine)
+        let effectiveLimit = effectiveBatchCharacterLimit(
+            for: prefetchEngine,
+            kind: ctx.engineKind,
+            isFirstBatch: false
+        )
         let baseMinPrefetchChars = isVoiceCallActive
             ? voiceCallStreamingPrefetchMinCharacters
             : streamingPrefetchMinCharacters
@@ -565,7 +608,7 @@ public final class StreamingSpeechCoordinator {
         let voiceID = currentPreferredVoiceID(for: ctx.engineKind)
         let splitScripts = shouldSplitScripts(for: ctx.engineKind, preferredVoiceID: voiceID)
         let nextText = dequeueNextBatch(
-            maxCharacters: effectiveBatchCharacterLimit(for: prefetchEngine),
+            maxCharacters: effectiveLimit,
             splitOnScriptChange: splitScripts
         )
         let rate = settings.ttsSpeechRate

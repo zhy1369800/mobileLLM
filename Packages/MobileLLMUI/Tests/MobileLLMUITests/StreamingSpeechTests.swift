@@ -814,4 +814,67 @@ final class StreamingSpeechTests: XCTestCase {
         XCTAssertEqual(mlxEngine.spokenSegments, ["Works now."])
         XCTAssertNil(coordinator.lastPlaybackError)
     }
+
+    func testLocalMLXUsesShortFirstBatchAndEarlyClauseSplitWhileCloudUnchanged() async {
+        // 1. Streaming Local MLX flushes first clause early at >= 24 chars, then uses full 75-char batching.
+        let settings = makeSettings(autoSpeak: true)
+        settings.ttsEngineKind = .localMLX
+
+        let mlxEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 75)
+        mlxEngine.hangPlayOnCallIndex = 1
+        let coordinator = StreamingSpeechCoordinator(
+            engine: MockTTSEngine(),
+            localMLXEngine: mlxEngine,
+            settings: settings
+        )
+
+        let msgID = UUID()
+        let firstClause = "今天天气真的很不错，我们下午一起去公园散步呼吸空气吧，"
+        let secondSentence = "随后再去附近的咖啡馆坐一坐聊聊天，晚上顺便看场电影。"
+        coordinator.resetForNewTurn(messageID: msgID)
+        coordinator.feed(delta: firstClause, messageID: msgID)
+        for _ in 0..<10 where mlxEngine.playedSegments.count < 1 {
+            await Task.yield()
+        }
+        XCTAssertEqual(mlxEngine.playedSegments, [firstClause])
+
+        coordinator.feed(delta: secondSentence, messageID: msgID)
+        coordinator.finish(fullText: nil, messageID: msgID)
+        mlxEngine.resumePendingPlay()
+        for _ in 0..<20 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(mlxEngine.playedSegments, [firstClause, secondSentence])
+
+        // 2. On-demand Local MLX caps batch #1 at 24 chars, then coalesces batch #2 up to 75 chars.
+        let mlxBatchEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 75)
+        let batchCoordinator = StreamingSpeechCoordinator(
+            engine: MockTTSEngine(),
+            localMLXEngine: mlxBatchEngine,
+            settings: settings
+        )
+        let multiSentence = "这是第一句长度刚好十五个字哦。这是第二句长度刚好十五个字哦。这是第三句长度刚好十五个字哦。"
+        batchCoordinator.speakMessage(text: multiSentence, messageID: UUID())
+        for _ in 0..<20 where batchCoordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(
+            mlxBatchEngine.playedSegments,
+            ["这是第一句长度刚好十五个字哦。", "这是第二句长度刚好十五个字哦。这是第三句长度刚好十五个字哦。"]
+        )
+
+        // 3. Cloud TTS keeps full batching even on the very first utterance.
+        settings.ttsEngineKind = .cloudOpenAI
+        let cloudEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 280)
+        let cloudCoordinator = StreamingSpeechCoordinator(
+            engine: MockTTSEngine(),
+            cloudEngine: cloudEngine,
+            settings: settings
+        )
+        cloudCoordinator.speakMessage(text: multiSentence, messageID: UUID())
+        for _ in 0..<15 where cloudCoordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(cloudEngine.playedSegments, [multiSentence])
+    }
 }

@@ -14,12 +14,16 @@ import Foundation
 public struct SentenceSegmenter: Sendable {
     private var rawBuffer: String = ""
     private var insideCodeFence: Bool = false
+    private var hasEmittedSegment: Bool = false
 
     /// Minimum buffer length before a clause boundary (comma/semicolon) is treated as a flush point.
     private let longClauseThreshold: Int
+    /// Optional shorter threshold applied only to the first emitted segment of a turn/utterance.
+    public var firstClauseThreshold: Int?
 
-    public init(longClauseThreshold: Int = 72) {
+    public init(longClauseThreshold: Int = 72, firstClauseThreshold: Int? = nil) {
         self.longClauseThreshold = longClauseThreshold
+        self.firstClauseThreshold = firstClauseThreshold
     }
 
     /// Appends a streamed answer delta and returns zero or more complete, speakable sentences.
@@ -38,6 +42,7 @@ public struct SentenceSegmenter: Sendable {
     public mutating func reset() {
         rawBuffer.removeAll(keepingCapacity: false)
         insideCodeFence = false
+        hasEmittedSegment = false
     }
 
     // MARK: - Core Pipeline
@@ -64,6 +69,7 @@ public struct SentenceSegmenter: Sendable {
                     let prose = String(speakable[segmentStart..<cursor])
                     if let cleaned = cleanForSpeech(prose) {
                         sentences.append(cleaned)
+                        hasEmittedSegment = true
                     }
                     insideCodeFence = true
                 } else {
@@ -80,6 +86,7 @@ public struct SentenceSegmenter: Sendable {
                 continue
             }
 
+            let clauseThreshold = (!hasEmittedSegment ? firstClauseThreshold : nil) ?? longClauseThreshold
             let isBoundary: Bool
             if Self.strongTerminators.contains(ch) {
                 isBoundary = true
@@ -90,7 +97,7 @@ public struct SentenceSegmenter: Sendable {
                     segmentStart: segmentStart,
                     isFinal: isFinal && withheldTail.isEmpty
                 )
-            } else if Self.clauseTerminators.contains(ch), distance >= longClauseThreshold {
+            } else if Self.clauseTerminators.contains(ch), distance >= clauseThreshold {
                 isBoundary = true
             } else {
                 isBoundary = false
@@ -100,6 +107,7 @@ public struct SentenceSegmenter: Sendable {
                 let candidate = String(speakable[segmentStart..<nextIdx])
                 if let cleaned = cleanForSpeech(candidate) {
                     sentences.append(cleaned)
+                    hasEmittedSegment = true
                 }
                 segmentStart = nextIdx
             }
@@ -111,6 +119,7 @@ public struct SentenceSegmenter: Sendable {
             let tail = String(speakable[segmentStart...])
             if let cleaned = cleanForSpeech(tail) {
                 sentences.append(cleaned)
+                hasEmittedSegment = true
             }
             segmentStart = speakable.endIndex
         }

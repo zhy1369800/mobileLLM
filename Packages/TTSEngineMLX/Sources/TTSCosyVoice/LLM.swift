@@ -7,42 +7,66 @@ import TTSAudioCommon
 
 // MARK: - Sampling
 
-/// Nucleus sampling: top-k + top-p filtering, then Gumbel-max multinomial sampling.
-/// Matches Python's `nucleus_sampling()` which sorts descending and accumulates from top.
+/// Precomputed static vocabulary masks reused across every autoregressive step in `CosyVoiceLLM.generate`.
+struct CosyVoiceSamplingMasks {
+    let indices: MLXArray
+    let suppressMask: MLXArray?
+    let stopMask: MLXArray
+
+    init(vocabSize: Int, suppressRange: (Int, Int)?, stopTokens: [Int]) {
+        let indices = MLXArray(0..<Int32(vocabSize))
+        self.indices = indices
+
+        if let (start, end) = suppressRange, start < end, start >= 0, end <= vocabSize {
+            let geStart = indices .>= MLXArray(Int32(start))
+            let ltEnd = indices .< MLXArray(Int32(end))
+            var mask = logicalAnd(geStart, ltEnd)
+            for st in stopTokens where st >= start && st < end {
+                mask = logicalAnd(mask, indices .!= MLXArray(Int32(st)))
+            }
+            self.suppressMask = mask
+        } else {
+            self.suppressMask = nil
+        }
+
+        var stop = MLXArray.zeros([vocabSize], dtype: .bool)
+        for st in stopTokens where st >= 0 && st < vocabSize {
+            stop = logicalOr(stop, indices .== MLXArray(Int32(st)))
+        }
+        self.stopMask = stop
+
+        if let suppressMask {
+            eval(indices, suppressMask, stop)
+        } else {
+            eval(indices, stop)
+        }
+    }
+}
+
+/// Nucleus sampling: single descending sort, top-k slice, top-p filtering on the compact slice,
+/// then Gumbel-max multinomial sampling without re-sorting the full vocabulary.
 private func nucleusSample(
     logits: MLXArray,
     topK: Int,
     topP: Float
 ) -> Int32 {
-    var logits = logits
-
-    // Top-k filtering
     let vocabSize = logits.dim(0)
-    if topK > 0 && topK < vocabSize {
-        let sorted = MLX.sorted(logits)
-        let threshold = sorted[vocabSize - topK]
-        logits = MLX.where(logits .< threshold, MLXArray(Float(-1e9)), logits)
-    }
+    let sortedIndices = argSort(-logits)  // single descending sort
+    let useTopK = topK > 0 && topK < vocabSize
+    let candidateIndices = useTopK ? sortedIndices[0..<topK] : sortedIndices
+    var candidateLogits = logits[candidateIndices]
 
-    // Top-p (nucleus) filtering — sort DESCENDING to accumulate from highest probability
     if topP < 1.0 {
-        let sortedIndices = argSort(-logits)  // negate for descending order
-        let sortedLogits = logits[sortedIndices]
-        let probs = softmax(sortedLogits)
+        let probs = softmax(candidateLogits)
         let cumProbs = cumsum(probs)
-
-        // Mask tokens where cumulative probability (excluding current) exceeds topP.
-        // First token (highest prob) always has cumProbs-probs=0, so it's never masked.
-        let sortedMask = cumProbs - probs .> MLXArray(topP)
-        let filteredLogits = MLX.where(sortedMask, MLXArray(Float(-1e9)), sortedLogits)
-
-        let unsortIndices = argSort(sortedIndices)
-        logits = filteredLogits[unsortIndices]
+        let mask = cumProbs - probs .> MLXArray(topP)
+        candidateLogits = MLX.where(mask, MLXArray(Float(-1e9)), candidateLogits)
     }
 
     // Gumbel-max sampling: argmax(logits + Gumbel) ~ Categorical(softmax(logits))
-    let gumbel = MLXRandom.gumbel(logits.shape)
-    return argMax(logits + gumbel).item(Int32.self)
+    let gumbel = MLXRandom.gumbel(candidateLogits.shape)
+    let pickedPos = argMax(candidateLogits + gumbel).reshaped([1])
+    return candidateIndices[pickedPos][0].asType(.int32).item(Int32.self)
 }
 
 /// Sample a speech token using Repetition Aware Sampling (RAS) from VALL-E 2.
@@ -62,7 +86,8 @@ func sampleToken(
     stopTokens: [Int] = [],
     ignoreEos: Bool = false,
     rasWinSize: Int = 10,
-    rasTauR: Float = 0.1
+    rasTauR: Float = 0.1,
+    precomputedMasks: CosyVoiceSamplingMasks? = nil
 ) -> Int32 {
     var logits = logits.squeezed().asType(.float32)
     let vocabSize = logits.dim(0)
@@ -73,7 +98,10 @@ func sampleToken(
     //    doesn't suppress anything outside the eos token; we additionally
     //    silence the speech-vocab tail to match how our converted decoder
     //    behaves with the speechTokenExtra padding rows.
-    if let (start, end) = suppressRange, start < end, start >= 0, end <= vocabSize {
+    if let suppressMask = precomputedMasks?.suppressMask {
+        logits = MLX.where(suppressMask, MLXArray(Float(-1e9)), logits)
+    } else if precomputedMasks == nil,
+              let (start, end) = suppressRange, start < end, start >= 0, end <= vocabSize {
         let indices = MLXArray(0..<Int32(vocabSize))
         let geStart = indices .>= MLXArray(Int32(start))
         let ltEnd = indices .< MLXArray(Int32(end))
@@ -88,12 +116,16 @@ func sampleToken(
     // 2. Mask ALL stop tokens when below minimum length (matching upstream's
     //    ignore_eos behaviour generalised to the multi-stop-token vocabulary).
     if ignoreEos {
-        let indices = MLXArray(0..<Int32(vocabSize))
-        var stopMask = MLXArray.zeros([vocabSize], dtype: .bool)
-        for st in stopTokens where st >= 0 && st < vocabSize {
-            stopMask = logicalOr(stopMask, indices .== MLXArray(Int32(st)))
+        if let stopMask = precomputedMasks?.stopMask {
+            logits = MLX.where(stopMask, MLXArray(Float(-1e9)), logits)
+        } else {
+            let indices = MLXArray(0..<Int32(vocabSize))
+            var stopMask = MLXArray.zeros([vocabSize], dtype: .bool)
+            for st in stopTokens where st >= 0 && st < vocabSize {
+                stopMask = logicalOr(stopMask, indices .== MLXArray(Int32(st)))
+            }
+            logits = MLX.where(stopMask, MLXArray(Float(-1e9)), logits)
         }
-        logits = MLX.where(stopMask, MLXArray(Float(-1e9)), logits)
     }
 
     // 3. Nucleus sample
@@ -109,7 +141,7 @@ func sampleToken(
         if repCount >= max(threshold, 1) {
             // Penalize the repeated token and resample from full distribution
             // Matches Python: weighted_scores[top_ids] = -inf; random_sampling(weighted_scores)
-            let indices = MLXArray(0..<Int32(vocabSize))
+            let indices = precomputedMasks?.indices ?? MLXArray(0..<Int32(vocabSize))
             let penaltyMask = indices .== MLXArray(token)
             logits = MLX.where(penaltyMask, MLXArray(Float(-1e9)), logits)
 
@@ -496,6 +528,11 @@ public class CosyVoiceLLM: Module {
         // The three stop tokens themselves stay live so the LLM can signal end.
         let suppressStart = config.speechTokenSize  // 6561
         let suppressEnd = config.totalSpeechVocabSize  // 6761
+        let samplingMasks = CosyVoiceSamplingMasks(
+            vocabSize: config.totalSpeechVocabSize,
+            suppressRange: (suppressStart, suppressEnd),
+            stopTokens: stopTokens
+        )
 
         // Min length: scale to content text length, not the full
         // instruction+content prefix. Upstream: min_len = content_len * ratio.
@@ -510,7 +547,8 @@ public class CosyVoiceLLM: Module {
             stopTokens: stopTokens,
             ignoreEos: true,  // always ignore stop tokens for first token
             rasWinSize: sampling.winSize,
-            rasTauR: sampling.tauR)
+            rasTauR: sampling.tauR,
+            precomputedMasks: samplingMasks)
 
         if stopTokenSet.contains(currentToken) {
             return []
@@ -544,7 +582,8 @@ public class CosyVoiceLLM: Module {
                 stopTokens: stopTokens,
                 ignoreEos: belowMinLen,
                 rasWinSize: sampling.winSize,
-                rasTauR: sampling.tauR)
+                rasTauR: sampling.tauR,
+                precomputedMasks: samplingMasks)
 
             if stopTokenSet.contains(currentToken) {
                 break
