@@ -346,9 +346,18 @@ public final class MLXTTSEngine: PrefetchableTTSEngine {
         }
     }
 
-    fileprivate func finishPlayback(token: UInt64? = nil, error: Error?) {
+    fileprivate func finishPlayback(
+        token: UInt64? = nil,
+        playerID: ObjectIdentifier? = nil,
+        error: Error?
+    ) {
         if let token, activePlaybackToken != token {
             return
+        }
+        if let playerID {
+            guard let currentPlayer = player, ObjectIdentifier(currentPlayer) == playerID else {
+                return
+            }
         }
         guard activePlaybackToken != nil || activeContinuation != nil else { return }
         isSpeaking = false
@@ -435,14 +444,22 @@ public final class MLXTTSEngine: PrefetchableTTSEngine {
         weak var owner: MLXTTSEngine?
 
         func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+            let playerID = ObjectIdentifier(player)
             Task { @MainActor [weak owner] in
-                owner?.finishPlayback(error: flag ? nil : LocalMLXTTSError.audioPlaybackFailed)
+                owner?.finishPlayback(
+                    playerID: playerID,
+                    error: flag ? nil : LocalMLXTTSError.audioPlaybackFailed
+                )
             }
         }
 
         func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+            let playerID = ObjectIdentifier(player)
             Task { @MainActor [weak owner] in
-                owner?.finishPlayback(error: error ?? LocalMLXTTSError.audioPlaybackFailed)
+                owner?.finishPlayback(
+                    playerID: playerID,
+                    error: error ?? LocalMLXTTSError.audioPlaybackFailed
+                )
             }
         }
     }

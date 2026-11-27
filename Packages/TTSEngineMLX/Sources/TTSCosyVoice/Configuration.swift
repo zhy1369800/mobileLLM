@@ -122,8 +122,8 @@ public struct CosyVoiceMelConfig: Codable, Sendable {
 // MARK: - Sampling Config
 
 public struct CosyVoiceSamplingConfig: Codable, Sendable {
-    public var topP: Float = 0.8
-    public var topK: Int = 25
+    public var topP: Float = 0.65
+    public var topK: Int = 15
     public var winSize: Int = 10
     public var tauR: Float = 0.1
     public var minTokenTextRatio: Float = 2.0
