@@ -281,12 +281,16 @@ public actor LocalMLXTTSRuntime {
             throw LocalMLXTTSError.emptyAudio
         }
 
+        let synthStart = CFAbsoluteTimeGetCurrent()
         var renderedChunks: [[Float]] = []
         renderedChunks.reserveCapacity(chunks.count)
         var sampleRate = 24_000
+        var chunkTimings: [CosyVoiceSynthesisTiming] = []
+        let backendLabel: String
 
         switch backend {
         case .cosyVoice(let model, let variantID):
+            backendLabel = "CosyVoice3"
             sampleRate = model.config.sampleRate
             let cloneProfile: CosyVoiceVoiceProfile?
             if let cloneRef = request.cloneReference {
@@ -309,13 +313,15 @@ public actor LocalMLXTTSRuntime {
                     chunkSamples = model.synthesize(
                         text: chunk,
                         voiceProfile: cloneProfile,
-                        language: chunkLang.isEmpty ? language : chunkLang
+                        language: chunkLang.isEmpty ? language : chunkLang,
+                        onTiming: { chunkTimings.append($0) }
                     )
                 } else {
                     chunkSamples = model.synthesize(
                         text: chunk,
                         language: chunkLang.isEmpty ? language : chunkLang,
-                        instruction: instruction
+                        instruction: instruction,
+                        onTiming: { chunkTimings.append($0) }
                     )
                 }
                 Memory.clearCache()
@@ -325,6 +331,7 @@ public actor LocalMLXTTSRuntime {
                 }
             }
         case .qwen3(let model, _):
+            backendLabel = "Qwen3-TTS"
             sampleRate = model.sampleRate
             let speaker = LocalMLXTTSMapping.qwen3Speaker(for: request.voiceID)
 
@@ -354,6 +361,25 @@ public actor LocalMLXTTSRuntime {
             sampleRate: sampleRate,
             rate: request.rate
         )
+        let totalMs = (CFAbsoluteTimeGetCurrent() - synthStart) * 1000
+        let audioSec = sampleRate > 0 ? Double(rateAdjustedSamples.count) / Double(sampleRate) : 0
+        let rtf = audioSec > 0 ? (totalMs / 1000) / audioSec : 0
+        if chunkTimings.isEmpty {
+            TTSPerfLogger.log(String(
+                format: "synth %@ | chars=%d chunks=%d | total=%.0fms | audio=%.2fs (RTF=%.2f)",
+                backendLabel, request.text.count, chunks.count, totalMs, audioSec, rtf
+            ))
+        } else {
+            let llmMs = chunkTimings.reduce(0) { $0 + $1.llmMs }
+            let tokens = chunkTimings.reduce(0) { $0 + $1.speechTokens }
+            let flowMs = chunkTimings.reduce(0) { $0 + $1.flowMs }
+            let hifiganMs = chunkTimings.reduce(0) { $0 + $1.hifiganMs }
+            TTSPerfLogger.log(String(
+                format: "synth %@ | chars=%d chunks=%d | LLM=%.0fms (%d tok) Flow=%.0fms HiFiGAN=%.0fms | total=%.0fms | audio=%.2fs (RTF=%.2f)",
+                backendLabel, request.text.count, chunks.count,
+                llmMs, tokens, flowMs, hifiganMs, totalMs, audioSec, rtf
+            ))
+        }
         return (rateAdjustedSamples, sampleRate)
         #endif
     }

@@ -170,7 +170,8 @@ extension CosyVoiceTTSModel {
         instruction: String = "You are a helpful assistant.",
         segmentGapSeconds: Float = 0.2,
         seed: UInt64? = nil,
-        verbose: Bool = false
+        verbose: Bool = false,
+        onTiming: ((CosyVoiceSynthesisTiming) -> Void)? = nil
     ) -> [Float] {
         let segments = Self.splitForLongForm(text)
         if segments.count <= 1 {
@@ -185,7 +186,8 @@ extension CosyVoiceTTSModel {
                 promptToken: voiceProfile.promptToken,
                 promptFeat: voiceProfile.promptFeat,
                 promptText: voiceProfile.promptText,
-                verbose: verbose
+                verbose: verbose,
+                onTiming: onTiming
             )
             return Self.cleanCloneOutput(samples, sampleRate: config.sampleRate)
         }
@@ -207,7 +209,8 @@ extension CosyVoiceTTSModel {
                 promptToken: voiceProfile.promptToken,
                 promptFeat: voiceProfile.promptFeat,
                 promptText: voiceProfile.promptText,
-                verbose: verbose
+                verbose: verbose,
+                onTiming: onTiming
             )
             if !samples.isEmpty {
                 renderedSegments.append(samples)

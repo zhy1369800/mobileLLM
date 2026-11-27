@@ -364,6 +364,8 @@ public final class StreamingSpeechCoordinator {
         drainTask = Task { @MainActor [weak self] in
             guard let self else { return }
             var consecutiveFailures = 0
+            var batchIndex = 0
+            var lastPlayEndedAt: CFAbsoluteTime?
 
             while self.sessionGeneration == generation,
                   !Task.isCancelled,
@@ -378,9 +380,13 @@ public final class StreamingSpeechCoordinator {
 
                 do {
                     if let prefetchEngine = targetEngine as? any PrefetchableTTSEngine {
+                        batchIndex += 1
+                        let waitStart = CFAbsoluteTimeGetCurrent()
+                        let usedPrefetch: Bool
                         let nextText: String
                         let audioData: Data
                         if let prefetched = self.prefetchedChunk {
+                            usedPrefetch = true
                             self.prefetchedChunk = nil
                             self.activeDrainContext?.hasDequeuedFirstBatch = true
                             nextText = prefetched.text
@@ -398,6 +404,7 @@ public final class StreamingSpeechCoordinator {
                                 )
                             }
                         } else {
+                            usedPrefetch = false
                             let isFirstBatch = !(self.activeDrainContext?.hasDequeuedFirstBatch ?? true)
                             self.activeDrainContext?.hasDequeuedFirstBatch = true
                             nextText = self.dequeueNextBatch(
@@ -418,11 +425,27 @@ public final class StreamingSpeechCoordinator {
 
                         guard self.sessionGeneration == generation, !Task.isCancelled else { break }
 
+                        let playStart = CFAbsoluteTimeGetCurrent()
+                        let waitMs = (playStart - waitStart) * 1000
+                        let gapMs = lastPlayEndedAt.map { (playStart - $0) * 1000 }
+
                         self.currentSpokenSentence = nextText
                         self.activeDrainContext?.isPlayingCurrent = true
                         self.maybeSchedulePrefetch()
                         defer { self.activeDrainContext?.isPlayingCurrent = false }
                         try await prefetchEngine.play(synthesizedData: audioData)
+
+                        let playEnd = CFAbsoluteTimeGetCurrent()
+                        let playMs = (playEnd - playStart) * 1000
+                        lastPlayEndedAt = playEnd
+                        if engineKind == .localMLX {
+                            let mode = usedPrefetch ? "prefetch" : "direct"
+                            let gapPart = gapMs.map { String(format: " gap=%.0fms", $0) } ?? ""
+                            TTSPerfLogger.log(String(
+                                format: "batch #%d (%@) | chars=%d | wait=%.0fms%@ | play=%.0fms",
+                                batchIndex, mode, nextText.count, waitMs, gapPart, playMs
+                            ))
+                        }
                     } else {
                         let isFirstBatch = !(self.activeDrainContext?.hasDequeuedFirstBatch ?? true)
                         self.activeDrainContext?.hasDequeuedFirstBatch = true

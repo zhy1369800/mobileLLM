@@ -4,6 +4,21 @@ import MLX
 import MLXNN
 import TTSAudioCommon
 
+/// Per-stage timing breakdown (in milliseconds) for a single CosyVoice3 synthesis pass.
+public struct CosyVoiceSynthesisTiming: Sendable {
+    public let llmMs: Double
+    public let speechTokens: Int
+    public let flowMs: Double
+    public let hifiganMs: Double
+
+    public init(llmMs: Double, speechTokens: Int, flowMs: Double, hifiganMs: Double) {
+        self.llmMs = llmMs
+        self.speechTokens = speechTokens
+        self.flowMs = flowMs
+        self.hifiganMs = hifiganMs
+    }
+}
+
 /// Error types for CosyVoice TTS
 public enum CosyVoiceTTSError: Error, LocalizedError {
     case modelLoadFailed(String)
@@ -229,7 +244,8 @@ public final class CosyVoiceTTSModel {
         promptToken: MLXArray? = nil,
         promptFeat: MLXArray? = nil,
         promptText: String? = nil,
-        verbose: Bool = false
+        verbose: Bool = false,
+        onTiming: ((CosyVoiceSynthesisTiming) -> Void)? = nil
     ) -> [Float] {
         // 1. Tokenize text via Qwen2.5 BPE tokenizer. Track the content text
         //    length separately (without the instruction frame) so the LLM's
@@ -291,11 +307,11 @@ public final class CosyVoiceTTSModel {
             contentTextLength: contentTokens.count,
             maxTokens: scaledMaxTokens
         )
+        let llmMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
         if verbose {
-            let llmTime = CFAbsoluteTimeGetCurrent() - t0
             print(String(format: "  LLM: %.0fms (%d tokens, %.1fms/token)",
-                         llmTime * 1000, speechTokens.count,
-                         speechTokens.isEmpty ? 0 : llmTime * 1000 / Double(speechTokens.count)))
+                         llmMs, speechTokens.count,
+                         speechTokens.isEmpty ? 0 : llmMs / Double(speechTokens.count)))
         }
 
         guard !speechTokens.isEmpty, !Task.isCancelled else {
@@ -339,13 +355,14 @@ public final class CosyVoiceTTSModel {
             mel = fullMel
         }
 
+        let flowMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
         if verbose {
             var path: [String] = []
             if speakerEmbedding != nil { path.append("spk") }
             if promptToken != nil { path.append("prompt_token") }
             if promptFeat != nil { path.append("prompt_feat") }
             let suffix = path.isEmpty ? "" : " (\(path.joined(separator: "+")))"
-            print(String(format: "  Flow: %.0fms%@", (CFAbsoluteTimeGetCurrent() - t0) * 1000, suffix))
+            print(String(format: "  Flow: %.0fms%@", flowMs, suffix))
         }
 
         // 4. Convert mel to waveform via HiFi-GAN
@@ -355,9 +372,19 @@ public final class CosyVoiceTTSModel {
         t0 = CFAbsoluteTimeGetCurrent()
         let audio = hifigan(mel)
         eval(audio)
+        let hifiganMs = (CFAbsoluteTimeGetCurrent() - t0) * 1000
         if verbose {
-            print(String(format: "  HiFi-GAN: %.0fms", (CFAbsoluteTimeGetCurrent() - t0) * 1000))
+            print(String(format: "  HiFi-GAN: %.0fms", hifiganMs))
         }
+        AudioLog.inference.info(
+            "CosyVoice3 synth: LLM=\(Int(llmMs))ms (\(speechTokens.count) tok) Flow=\(Int(flowMs))ms HiFiGAN=\(Int(hifiganMs))ms"
+        )
+        onTiming?(CosyVoiceSynthesisTiming(
+            llmMs: llmMs,
+            speechTokens: speechTokens.count,
+            flowMs: flowMs,
+            hifiganMs: hifiganMs
+        ))
 
         // 5. Extract float samples — the mel was already sliced to the
         //    generation region, so the render is content-only.
