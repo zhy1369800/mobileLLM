@@ -117,6 +117,100 @@ public enum LocalMLXTTSMapping {
         }
         return trimmed.lowercased()
     }
+
+    /// Splits a request into short chunks so DiT + HiFi-GAN intermediate Metal tensors stay
+    /// well within iOS memory budgets even for long unpunctuated replies.
+    public static func splitIntoSafeChunks(_ text: String, maxCharacters: Int = 85) -> [String] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let limit = max(1, maxCharacters)
+        guard trimmed.count > limit else { return [trimmed] }
+
+        let sentenceEnds: Set<Character> = ["。", "！", "？", "!", "?"]
+        let clauseEnds: Set<Character> = ["，", ",", "；", ";", "：", ":", "\n"]
+        var chunks: [String] = []
+        var cursor = trimmed.startIndex
+
+        while cursor < trimmed.endIndex {
+            let remaining = trimmed.distance(from: cursor, to: trimmed.endIndex)
+            if remaining <= limit {
+                let tail = String(trimmed[cursor...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !tail.isEmpty { chunks.append(tail) }
+                break
+            }
+
+            let hardEnd = trimmed.index(cursor, offsetBy: limit)
+            let window = trimmed[cursor..<hardEnd]
+
+            var splitAt: String.Index?
+            if let idx = window.lastIndex(where: { sentenceEnds.contains($0) }) {
+                let next = trimmed.index(after: idx)
+                if next > cursor { splitAt = next }
+            }
+            if splitAt == nil, let idx = window.lastIndex(where: { clauseEnds.contains($0) }) {
+                let next = trimmed.index(after: idx)
+                if next > cursor { splitAt = next }
+            }
+            if splitAt == nil, let idx = window.lastIndex(where: { $0.isWhitespace }) {
+                let next = trimmed.index(after: idx)
+                if next > cursor { splitAt = next }
+            }
+
+            let chosenEnd = splitAt ?? hardEnd
+            let piece = String(trimmed[cursor..<chosenEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !piece.isEmpty {
+                chunks.append(piece)
+            }
+            cursor = chosenEnd
+            while cursor < trimmed.endIndex, trimmed[cursor].isWhitespace {
+                cursor = trimmed.index(after: cursor)
+            }
+        }
+
+        return chunks
+    }
+
+    /// Joins multiple synthesized PCM chunks with brief zero-crossing fades and silence gaps
+    /// so inner-chunk boundaries avoid audible clicks while single-chunk outputs stay untouched.
+    public static func stitchAudioChunks(
+        _ chunks: [[Float]],
+        sampleRate: Int,
+        gapSeconds: Double = 0.08,
+        edgeFadeSeconds: Double = 0.015
+    ) -> [Float] {
+        let nonEmpty = chunks.filter { !$0.isEmpty }
+        guard !nonEmpty.isEmpty else { return [] }
+        if nonEmpty.count == 1 {
+            return nonEmpty[0]
+        }
+
+        let gapCount = max(0, Int(Double(sampleRate) * gapSeconds))
+        let fadeCount = max(0, Int(Double(sampleRate) * edgeFadeSeconds))
+        let totalCount = nonEmpty.reduce(0) { $0 + $1.count } + gapCount * (nonEmpty.count - 1)
+        var output: [Float] = []
+        output.reserveCapacity(totalCount)
+
+        for (index, chunk) in nonEmpty.enumerated() {
+            var samples = chunk
+            let n = min(fadeCount, samples.count / 2)
+            if n > 0 {
+                for i in 0..<n {
+                    let t = Double(i + 1) / Double(n + 1)
+                    samples[i] *= Float(sin(t * (.pi / 2)))
+                }
+                let tailStart = samples.count - n
+                for i in 0..<n {
+                    let t = Double(i + 1) / Double(n + 1)
+                    samples[tailStart + i] *= Float(cos(t * (.pi / 2)))
+                }
+            }
+            if index > 0 && gapCount > 0 {
+                output.append(contentsOf: repeatElement(Float(0), count: gapCount))
+            }
+            output.append(contentsOf: samples)
+        }
+        return output
+    }
 }
 
 /// Single-resident MLX TTS execution actor.
@@ -182,48 +276,80 @@ public actor LocalMLXTTSRuntime {
         try Task.checkCancellation()
 
         let language = LocalMLXTTSMapping.detectLanguage(for: request.text, voiceID: request.voiceID)
-        let samples: [Float]
-        let sampleRate: Int
+        let chunks = LocalMLXTTSMapping.splitIntoSafeChunks(request.text, maxCharacters: 85)
+        guard !chunks.isEmpty else {
+            throw LocalMLXTTSError.emptyAudio
+        }
+
+        var renderedChunks: [[Float]] = []
+        renderedChunks.reserveCapacity(chunks.count)
+        var sampleRate = 24_000
 
         switch backend {
         case .cosyVoice(let model, let variantID):
+            sampleRate = model.config.sampleRate
+            let cloneProfile: CosyVoiceVoiceProfile?
             if let cloneRef = request.cloneReference {
-                let profile = try ensureCosyVoiceProfile(
+                cloneProfile = try ensureCosyVoiceProfile(
                     model: model,
                     variantID: variantID,
                     weightsDirectory: request.weightsDirectory,
                     reference: cloneRef
                 )
-                try Task.checkCancellation()
-                samples = model.synthesize(
-                    text: request.text,
-                    voiceProfile: profile,
-                    language: language
-                )
             } else {
-                let instruction = LocalMLXTTSMapping.cosyVoiceInstruction(for: request.voiceID)
-                samples = model.synthesize(
-                    text: request.text,
-                    language: language,
-                    instruction: instruction
-                )
+                cloneProfile = nil
             }
-            sampleRate = model.config.sampleRate
+            let instruction = LocalMLXTTSMapping.cosyVoiceInstruction(for: request.voiceID)
+
+            for chunk in chunks {
+                try Task.checkCancellation()
+                let chunkLang = LocalMLXTTSMapping.detectLanguage(for: chunk, voiceID: request.voiceID)
+                let chunkSamples: [Float]
+                if let cloneProfile {
+                    chunkSamples = model.synthesize(
+                        text: chunk,
+                        voiceProfile: cloneProfile,
+                        language: chunkLang.isEmpty ? language : chunkLang
+                    )
+                } else {
+                    chunkSamples = model.synthesize(
+                        text: chunk,
+                        language: chunkLang.isEmpty ? language : chunkLang,
+                        instruction: instruction
+                    )
+                }
+                Memory.clearCache()
+                try Task.checkCancellation()
+                if !chunkSamples.isEmpty {
+                    renderedChunks.append(chunkSamples)
+                }
+            }
         case .qwen3(let model, _):
-            let speaker = LocalMLXTTSMapping.qwen3Speaker(for: request.voiceID)
-            samples = try model.synthesizeCheckingCancellation(
-                text: request.text,
-                language: language,
-                speaker: speaker
-            )
             sampleRate = model.sampleRate
+            let speaker = LocalMLXTTSMapping.qwen3Speaker(for: request.voiceID)
+
+            for chunk in chunks {
+                try Task.checkCancellation()
+                let chunkLang = LocalMLXTTSMapping.detectLanguage(for: chunk, voiceID: request.voiceID)
+                let chunkSamples = try model.synthesizeCheckingCancellation(
+                    text: chunk,
+                    language: chunkLang.isEmpty ? language : chunkLang,
+                    speaker: speaker
+                )
+                Memory.clearCache()
+                try Task.checkCancellation()
+                if !chunkSamples.isEmpty {
+                    renderedChunks.append(chunkSamples)
+                }
+            }
         }
 
         try Task.checkCancellation()
-        guard !samples.isEmpty else {
+        let combinedSamples = LocalMLXTTSMapping.stitchAudioChunks(renderedChunks, sampleRate: sampleRate)
+        guard !combinedSamples.isEmpty else {
             throw LocalMLXTTSError.emptyAudio
         }
-        return (samples, sampleRate)
+        return (combinedSamples, sampleRate)
         #endif
     }
 

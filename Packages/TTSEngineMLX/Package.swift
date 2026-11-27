@@ -69,6 +69,7 @@ let package = Package(
             name: "TTSEngineMLXTests",
             dependencies: [
                 "TTSEngineMLX",
+                "TTSCosyVoice",
                 .product(name: "MobileLLMUI", package: "MobileLLMUI"),
                 .product(name: "AppRuntime", package: "AppRuntime"),
             ]

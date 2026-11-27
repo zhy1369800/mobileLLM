@@ -4,7 +4,11 @@ import MLX
 /// Bounds spare buffers independently of model weights and live inference arrays.
 package enum MLXCacheLimitPolicy {
     package static func defaultCeiling(physicalMemoryBytes: Int) -> Int {
-        max(0, min(2 * 1024 * 1024 * 1024, physicalMemoryBytes / 4))
+        #if os(iOS)
+        return max(0, min(64 * 1024 * 1024, physicalMemoryBytes / 32))
+        #else
+        return max(0, min(512 * 1024 * 1024, physicalMemoryBytes / 8))
+        #endif
     }
 }
 

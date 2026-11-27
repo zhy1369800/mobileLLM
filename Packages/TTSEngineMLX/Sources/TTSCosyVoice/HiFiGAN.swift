@@ -792,6 +792,9 @@ public class HiFiGANGenerator: Module {
 
         // Concatenate real and imaginary as source STFT features: [B, 18, T_stft]
         let sourceSTFT = concatenated([sourceReal, sourceImag], axis: 1)
+        #if os(iOS)
+        eval(sourceSTFT)
+        #endif
 
         // 5. Main decoder: conv_pre
         var x = convPre(melNCL)  // [B, 512, T]
@@ -843,6 +846,9 @@ public class HiFiGANGenerator: Module {
                 fused = fused + resblocks[i][j](x)
             }
             x = fused / MLXArray(numKernels)
+            #if os(iOS)
+            eval(x)
+            #endif
         }
 
         // 7. Final layers (LeakyReLU + conv_post)

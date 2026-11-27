@@ -148,7 +148,9 @@ public final class StreamingSpeechCoordinator {
     /// Prewarms the underlying TTS backend ahead of a voice call without touching `AVAudioSession`.
     public func prewarmForVoiceCall() {
         engine.prewarm()
-        localMLXEngine?.prewarm()
+        if settings.ttsEngineKind == .localMLX {
+            localMLXEngine?.prewarm()
+        }
         cloudEngine?.prewarm()
     }
 
@@ -496,9 +498,13 @@ public final class StreamingSpeechCoordinator {
               let prefetchEngine = ctx.engine as? any PrefetchableTTSEngine else {
             return
         }
-        let minPrefetchChars = isVoiceCallActive
+        let effectiveLimit = effectiveBatchCharacterLimit(for: prefetchEngine)
+        let baseMinPrefetchChars = isVoiceCallActive
             ? voiceCallStreamingPrefetchMinCharacters
             : streamingPrefetchMinCharacters
+        let minPrefetchChars = effectiveLimit > 0
+            ? min(baseMinPrefetchChars, effectiveLimit)
+            : baseMinPrefetchChars
         guard isCurrentBatchComplete || queuedCharacterCount() >= minPrefetchChars else {
             return
         }

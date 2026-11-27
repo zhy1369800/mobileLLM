@@ -403,16 +403,18 @@ public class CosyVoiceFlowModel: Module {
             precondition(pf.dim(1) == config.outputSize,
                          "promptFeat mel dim must be \(config.outputSize), got \(pf.dim(1))")
             let promptMelLen = pf.dim(2)
-            precondition(promptMelLen <= melLen,
-                         "promptFeat (\(promptMelLen) frames) longer than total mel (\(melLen))")
-            let genMelLen = melLen - promptMelLen
+            let clampedPromptFeat = promptMelLen > melLen
+                ? pf[0..., 0..., 0..<melLen]
+                : pf
+            let clampedPromptLen = clampedPromptFeat.dim(2)
+            let genMelLen = melLen - clampedPromptLen
             if genMelLen > 0 {
                 let zerosAfter = MLXArray.zeros(
                     [batchSize, config.outputSize, genMelLen]
-                ).asType(pf.dtype)
-                cond = concatenated([pf, zerosAfter], axis: 2)
+                ).asType(clampedPromptFeat.dtype)
+                cond = concatenated([clampedPromptFeat, zerosAfter], axis: 2)
             } else {
-                cond = pf
+                cond = clampedPromptFeat
             }
         } else {
             cond = nil

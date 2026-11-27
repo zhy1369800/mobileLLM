@@ -304,12 +304,13 @@ extension CosyVoiceTTSModel {
     static func splitForLongForm(_ text: String) -> [String] {
         let maxWordsPerSegment = 25
         let minWordsPerSegment = 6
+        let maxCharsPerSegment = 85
 
         let input = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !input.isEmpty else { return [] }
 
-        // Split on . ! ? while keeping the punctuation attached.
-        let sentenceTerminators: Set<Character> = [".", "!", "?"]
+        // Split on sentence terminators (English + CJK) while keeping punctuation attached.
+        let sentenceTerminators: Set<Character> = [".", "!", "?", "。", "！", "？"]
         var sentences: [String] = []
         var current = ""
         for ch in input {
@@ -322,16 +323,16 @@ extension CosyVoiceTTSModel {
         }
         let tail = current.trimmingCharacters(in: .whitespacesAndNewlines)
         if !tail.isEmpty { sentences.append(tail) }
-        if sentences.isEmpty { return [input] }
+        if sentences.isEmpty { sentences = [input] }
 
         // Further split overly long sentences on clause boundaries.
         var segments: [String] = []
+        let clauseSeparators: Set<Character> = [",", ";", ":", "，", "；", "："]
         for s in sentences {
             let wordCount = s.split(whereSeparator: { $0.isWhitespace }).count
-            if wordCount <= maxWordsPerSegment {
+            if wordCount <= maxWordsPerSegment && s.count <= maxCharsPerSegment {
                 segments.append(s)
             } else {
-                let clauseSeparators: Set<Character> = [",", ";", ":"]
                 var clauses: [String] = []
                 var buf = ""
                 for ch in s {
@@ -348,13 +349,30 @@ extension CosyVoiceTTSModel {
             }
         }
 
-        // Merge short fragments forward so we don't emit 2-word segments.
-        var merged: [String] = []
+        // Enforce a hard character ceiling on unpunctuated segments.
+        var capped: [String] = []
         for s in segments {
+            if s.count <= maxCharsPerSegment {
+                capped.append(s)
+            } else {
+                var start = s.startIndex
+                while start < s.endIndex {
+                    let end = s.index(start, offsetBy: maxCharsPerSegment, limitedBy: s.endIndex) ?? s.endIndex
+                    let slice = String(s[start..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !slice.isEmpty { capped.append(slice) }
+                    start = end
+                }
+            }
+        }
+
+        // Merge short fragments forward so we don't emit tiny segments.
+        var merged: [String] = []
+        for s in capped {
             let wc = s.split(whereSeparator: { $0.isWhitespace }).count
             if let last = merged.last,
                last.split(whereSeparator: { $0.isWhitespace }).count < minWordsPerSegment,
-               (last.split(whereSeparator: { $0.isWhitespace }).count + wc) <= maxWordsPerSegment {
+               (last.split(whereSeparator: { $0.isWhitespace }).count + wc) <= maxWordsPerSegment,
+               (last.count + 1 + s.count) <= maxCharsPerSegment {
                 merged[merged.count - 1] = last + " " + s
             } else {
                 merged.append(s)

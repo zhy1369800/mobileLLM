@@ -294,6 +294,35 @@ final class VoiceBargeInTests: XCTestCase {
         XCTAssertGreaterThan(appleEngine.endSessionCount, 0)
     }
 
+    func testPrewarmForVoiceCallOnlyPrewarmsLocalMLXWhenSelected() {
+        let suite = "voice-bargein-mlx-prewarm-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        let settings = AppSettings(defaults: defaults, keychain: nil)
+
+        let appleEngine = PrewarmSpyTTSEngine(id: "apple", displayName: "Apple")
+        let localMLXEngine = PrewarmSpyTTSEngine(id: "local-mlx", displayName: "Local MLX")
+        let cloudEngine = PrewarmSpyTTSEngine(id: "cloud", displayName: "Cloud")
+        let coordinator = StreamingSpeechCoordinator(
+            engine: appleEngine,
+            localMLXEngine: localMLXEngine,
+            cloudEngine: cloudEngine,
+            settings: settings
+        )
+
+        settings.ttsEngineKind = .appleSystem
+        coordinator.prewarmForVoiceCall()
+        XCTAssertEqual(appleEngine.prewarmCount, 1)
+        XCTAssertEqual(localMLXEngine.prewarmCount, 0)
+
+        settings.ttsEngineKind = .cloudOpenAI
+        coordinator.prewarmForVoiceCall()
+        XCTAssertEqual(localMLXEngine.prewarmCount, 0)
+
+        settings.ttsEngineKind = .localMLX
+        coordinator.prewarmForVoiceCall()
+        XCTAssertEqual(localMLXEngine.prewarmCount, 1)
+    }
+
     func testKeywordModeEmitsBeginKeywordVerificationInsteadOfImmediateInterrupt() {
         var detector = VoiceBargeInDetector(
             config: VoiceBargeInConfig.speakerWithHardwareAEC.withKeywordVerification(true)

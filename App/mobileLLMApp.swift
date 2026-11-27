@@ -518,10 +518,22 @@ struct MobileLLMApp: App {
                 lifecycle: lifecycle,
                 continuedProcessing: continuedProcessing
             )
+            #if os(iOS)
+            let beforeLocalTTSSynthesis: (@MainActor @Sendable () async -> Void)? = { [weak container] in
+                guard let container,
+                      !container.chat.isStreaming,
+                      container.models.engineResident else { return }
+                await container.models.suspend()
+                container.syncActive()
+            }
+            #else
+            let beforeLocalTTSSynthesis: (@MainActor @Sendable () async -> Void)? = nil
+            #endif
             container.speech.localMLXEngine = MLXTTSEngine(
                 voiceModels: container.voiceModels,
                 settings: container.settings,
-                voiceClones: container.voiceClones
+                voiceClones: container.voiceClones,
+                onBeforeSynthesis: beforeLocalTTSSynthesis
             )
             return container
         }

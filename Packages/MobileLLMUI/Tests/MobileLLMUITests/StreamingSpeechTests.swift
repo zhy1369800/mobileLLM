@@ -729,4 +729,43 @@ final class StreamingSpeechTests: XCTestCase {
         XCTAssertEqual(appleEngine.spokenSegments, ["MLX unready fallback.", "MLX failed.", "Apple takes over."])
         XCTAssertFalse(coordinator.isSpeaking)
     }
+
+    func testStreamingPrefetchCapsThresholdToEngineBatchLimit() async {
+        let settings = makeSettings(autoSpeak: true)
+        settings.ttsEngineKind = .localMLX
+
+        let mlxEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 40)
+        mlxEngine.hangPlayOnCallIndex = 1
+        let coordinator = StreamingSpeechCoordinator(
+            engine: MockTTSEngine(),
+            localMLXEngine: mlxEngine,
+            settings: settings
+        )
+
+        let msgID = UUID()
+        let firstSentence = "这是第一句测试内容。"
+        let secondSentence = String(repeating: "测", count: 41) + "。"
+        coordinator.resetForNewTurn(messageID: msgID)
+        coordinator.feed(delta: firstSentence, messageID: msgID)
+        for _ in 0..<10 where mlxEngine.playedSegments.count < 1 {
+            await Task.yield()
+        }
+        XCTAssertEqual(mlxEngine.playedSegments, [firstSentence])
+
+        // Without calling finish(), 42 chars is below streamingPrefetchMinCharacters (80)
+        // yet meets the engine's 40-char batch limit, so prefetch must trigger immediately.
+        coordinator.feed(delta: secondSentence, messageID: msgID)
+        for _ in 0..<10 where mlxEngine.synthesizedSegments.count < 2 {
+            await Task.yield()
+        }
+        XCTAssertEqual(mlxEngine.synthesizedSegments, [firstSentence, secondSentence])
+
+        coordinator.finish(fullText: nil, messageID: msgID)
+        mlxEngine.resumePendingPlay()
+        for _ in 0..<15 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(mlxEngine.playedSegments, [firstSentence, secondSentence])
+        XCTAssertFalse(coordinator.isSpeaking)
+    }
 }
