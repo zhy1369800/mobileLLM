@@ -17,6 +17,9 @@ public struct ResponsesAPIConfiguration: Sendable, Equatable {
     /// falls back to the conversation's context window as the accounting ceiling and the wire limit
     /// is omitted in auto mode so the service uses its own model default.
     public let maximumOutputTokens: UInt64?
+    /// True to forbid implicit automatic retries (stream failures, truncation, reasoning-only,
+    /// or compatibility fallbacks). Recommended for image generation and pay-per-request services.
+    public let disableAutoRetry: Bool
 
     public static let defaultServiceID = "responses-api-key"
 
@@ -25,13 +28,15 @@ public struct ResponsesAPIConfiguration: Sendable, Equatable {
         baseURL: String,
         apiKey: String,
         reasoningEffort: ReasoningEffort? = nil,
-        maximumOutputTokens: UInt64? = nil
+        maximumOutputTokens: UInt64? = nil,
+        disableAutoRetry: Bool = false
     ) {
         self.serviceID = serviceID
         self.baseURL = baseURL
         self.apiKey = apiKey
         self.reasoningEffort = reasoningEffort
         self.maximumOutputTokens = maximumOutputTokens
+        self.disableAutoRetry = disableAutoRetry
     }
 }
 
@@ -396,14 +401,16 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                         bytes,
                         emitter: emitter,
                         emitReasoning: emitReasoning,
-                        emit: streamEmission
+                        emit: streamEmission,
+                        disableAutoRetry: configuration.disableAutoRetry
                     )
                 case .deepSeekChatCompletions:
                     try await Self.consumeChatCompletionsEventStream(
                         bytes,
                         emitter: emitter,
                         emitReasoning: emitReasoning,
-                        emit: streamEmission
+                        emit: streamEmission,
+                        disableAutoRetry: configuration.disableAutoRetry
                     )
                 }
                 try await accounting.record(parsed.usage)
@@ -420,11 +427,13 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
         }
 
         let started = ContinuousClock.now
+        let allowRetries = !configuration.disableAutoRetry
         let firstBody = try body()
         var (parsed, streamed, _) = try await attempt(
             firstBody,
-            allowEffortFallback: true,
-            allowAutoFallback: parameters.outputBudgetMode == .auto,
+            allowEffortFallback: allowRetries,
+            allowAutoFallback: allowRetries && parameters.outputBudgetMode == .auto,
+            allowDialectFallback: allowRetries,
             streamEmission: emitStreamDeltas
         )
 
@@ -433,7 +442,8 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
         // preserves the shown prefix — never duplicating or splicing text.
         let outputCeiling = configuration.maximumOutputTokens ?? Self.maximumContextTokens
         let retryCeiling = min(outputCeiling, parameters.maximumOutputTokens)
-        if parsed.isTruncated,
+        if allowRetries,
+           parsed.isTruncated,
            parameters.outputBudgetMode == .auto
                 || parameters.maximumOutputTokens < retryCeiling
         {
@@ -477,10 +487,24 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
             }
         }
 
-        if !streamed {
-            // Non-streaming fallback keeps the reasoning-only retry (streamed reasoning-only is
-            // handled below; both stay inside the same authorization boundary).
-            if parsed.text.isEmpty, parsed.calls.isEmpty, parsed.hasReasoning {
+        if allowRetries {
+            if !streamed {
+                // Non-streaming fallback keeps the reasoning-only retry (streamed reasoning-only is
+                // handled below; both stay inside the same authorization boundary).
+                if parsed.text.isEmpty, parsed.calls.isEmpty, parsed.hasReasoning {
+                    let retryBody = try body(reasoningDisabled: true)
+                    let (retried, retriedStreamed, _) = try await attempt(
+                        retryBody,
+                        allowEffortFallback: false,
+                        allowAutoFallback: false,
+                        streamEmission: emitStreamDeltas
+                    )
+                    parsed = retried
+                    streamed = retriedStreamed
+                }
+            } else if parsed.text.isEmpty, parsed.calls.isEmpty, parsed.hasReasoning {
+                // Streamed reasoning-only: reasoning was already shown live; retry once without reasoning
+                // so the ANSWER streams too (no duplication of answer text).
                 let retryBody = try body(reasoningDisabled: true)
                 let (retried, retriedStreamed, _) = try await attempt(
                     retryBody,
@@ -491,18 +515,6 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                 parsed = retried
                 streamed = retriedStreamed
             }
-        } else if parsed.text.isEmpty, parsed.calls.isEmpty, parsed.hasReasoning {
-            // Streamed reasoning-only: reasoning was already shown live; retry once without reasoning
-            // so the ANSWER streams too (no duplication of answer text).
-            let retryBody = try body(reasoningDisabled: true)
-            let (retried, retriedStreamed, _) = try await attempt(
-                retryBody,
-                allowEffortFallback: false,
-                allowAutoFallback: false,
-                streamEmission: emitStreamDeltas
-            )
-            parsed = retried
-            streamed = retriedStreamed
         }
         try Task.checkCancellation()
         let elapsedMilliseconds = UInt64(
@@ -581,7 +593,8 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
         _ bytes: AccountedResponseBytes,
         emitter: AgentModelBoundaryEmitter,
         emitReasoning: Bool,
-        emit: Bool = true
+        emit: Bool = true,
+        disableAutoRetry: Bool = false
     ) async throws -> ParsedResponse {
         var reasoning = ""
         var text = ""
@@ -702,7 +715,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                 } else {
                     message = "The online model stream failed."
                 }
-                throw AgentModelProviderFailure(try Self.streamFailure(message))
+                throw AgentModelProviderFailure(try Self.streamFailure(message, disableAutoRetry: disableAutoRetry))
             default:
                 break
             }
@@ -721,7 +734,8 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
         _ bytes: AccountedResponseBytes,
         emitter: AgentModelBoundaryEmitter,
         emitReasoning: Bool,
-        emit: Bool = true
+        emit: Bool = true,
+        disableAutoRetry: Bool = false
     ) async throws -> ParsedResponse {
         var reasoning = ""
         var text = ""
@@ -747,7 +761,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                 let message: String
                 if case .string(let value)? = error["message"] { message = value }
                 else { message = "The online model stream failed." }
-                throw AgentModelProviderFailure(try streamFailure(message))
+                throw AgentModelProviderFailure(try streamFailure(message, disableAutoRetry: disableAutoRetry))
             }
             if case .object(let usageObject)? = root["usage"] {
                 usage = ParsedUsage(
@@ -877,15 +891,17 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
         }
     }
 
-    private static func streamFailure(_ message: String) throws -> AgentFailure {
+    private static func streamFailure(_ message: String, disableAutoRetry: Bool = false) throws -> AgentFailure {
         try AgentFailure(
             code: "model.online.stream",
-            classification: .transient,
+            classification: disableAutoRetry ? .permanent : .transient,
             safeMessage: message,
-            retryAdvice: AgentRetryAdvice(
-                automaticallyRetryable: true,
-                maximumAdditionalAttempts: 1
-            ),
+            retryAdvice: disableAutoRetry
+                ? .never
+                : AgentRetryAdvice(
+                    automaticallyRetryable: true,
+                    maximumAdditionalAttempts: 1
+                ),
             externalEffect: .confirmedNone,
             requiredUserAction: .none,
             redaction: RedactionMetadata(classification: .publicMetadata, policyVersion: 1)

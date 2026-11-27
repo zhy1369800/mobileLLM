@@ -579,6 +579,7 @@ public final class OpenAIOnlineConfigurationBox: @unchecked Sendable {
         let baseURL: String
         let reasoningEffort: ReasoningEffort?
         let maximumOutputTokens: Int?
+        let disableAutoRetry: Bool
     }
 
     private let lock = NSLock()
@@ -591,6 +592,7 @@ public final class OpenAIOnlineConfigurationBox: @unchecked Sendable {
         baseURL: String,
         modelID: String?,
         maximumOutputTokens: Int? = nil,
+        disableAutoRetry: Bool = false,
         credentials: any OpenAICredentialStoring
     ) {
         self.credentials = credentials
@@ -599,7 +601,8 @@ public final class OpenAIOnlineConfigurationBox: @unchecked Sendable {
                 serviceID: OnlineService.defaultID,
                 baseURL: baseURL,
                 modelID: modelID,
-                maximumOutputTokens: maximumOutputTokens
+                maximumOutputTokens: maximumOutputTokens,
+                disableAutoRetry: disableAutoRetry
             )
         }
     }
@@ -611,7 +614,8 @@ public final class OpenAIOnlineConfigurationBox: @unchecked Sendable {
         baseURL: String,
         modelID: String?,
         reasoningEffort: ReasoningEffort? = nil,
-        maximumOutputTokens: Int? = nil
+        maximumOutputTokens: Int? = nil,
+        disableAutoRetry: Bool = false
     ) -> String {
         let configurationID = StableDigest.fingerprint(
             domain: "mobilellm.responses-configuration.v1",
@@ -621,13 +625,15 @@ public final class OpenAIOnlineConfigurationBox: @unchecked Sendable {
                 Data((modelID ?? "").utf8),
                 Data((reasoningEffort?.rawValue ?? "").utf8),
                 Data(String(maximumOutputTokens ?? 0).utf8),
+                Data([disableAutoRetry ? 1 : 0]),
             ]
         ).rawValue
         let entry = Entry(
             serviceID: serviceID,
             baseURL: baseURL,
             reasoningEffort: reasoningEffort,
-            maximumOutputTokens: maximumOutputTokens
+            maximumOutputTokens: maximumOutputTokens,
+            disableAutoRetry: disableAutoRetry
         )
         lock.withLock {
             if entries[configurationID] == nil { insertionOrder.append(configurationID) }
@@ -655,7 +661,8 @@ public final class OpenAIOnlineConfigurationBox: @unchecked Sendable {
                 apiKey: key,
                 reasoningEffort: entry.reasoningEffort,
                 maximumOutputTokens: entry.maximumOutputTokens
-                    .flatMap { $0 > 0 ? UInt64($0) : nil }
+                    .flatMap { $0 > 0 ? UInt64($0) : nil },
+                disableAutoRetry: entry.disableAutoRetry
             )
         }
     }

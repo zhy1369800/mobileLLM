@@ -128,6 +128,7 @@ private struct OnlineServiceEditorView: View {
     @State private var key = ""
     @State private var enabled = false
     @State private var supportsNativeWebSearch = false
+    @State private var disableAutoRetry = false
     @State private var stored = false
     @State private var status = ""
 
@@ -176,6 +177,15 @@ private struct OnlineServiceEditorView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Native web search").font(.subheadline).foregroundStyle(Theme.textPrimary)
                         Text("This service searches the web server-side. Omits the app's web_search tool for this model to avoid duplicate searches.")
+                            .font(.caption).foregroundStyle(Theme.textTertiary)
+                    }
+                }
+                .tint(Theme.accent)
+
+                Toggle(isOn: $disableAutoRetry) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Disable auto-retry").font(.subheadline).foregroundStyle(Theme.textPrimary)
+                        Text("Prevents silent automatic retries on stream errors, truncation, or fallbacks. Recommended for image generation and pay-per-request services.")
                             .font(.caption).foregroundStyle(Theme.textTertiary)
                     }
                 }
@@ -249,10 +259,12 @@ private struct OnlineServiceEditorView: View {
             maximumOutputTokens = service.maximumOutputTokens.map(String.init) ?? ""
             enabled = service.isEnabled
             supportsNativeWebSearch = service.supportsNativeWebSearch
+            disableAutoRetry = service.disableAutoRetry
         } else {
             baseURL = settings.openAIBaseURL
             enabled = settings.onlineServices.isEmpty
             supportsNativeWebSearch = false
+            disableAutoRetry = false
         }
         stored = (try? store.loadAPIKey(serviceID: draftID)) != nil
     }
@@ -287,7 +299,8 @@ private struct OnlineServiceEditorView: View {
             modelID: trimmedModel.isEmpty ? nil : trimmedModel,
             maximumOutputTokens: parsedMaxOutput.flatMap { $0 > 0 ? $0 : nil },
             isEnabled: enabled,
-            supportsNativeWebSearch: supportsNativeWebSearch
+            supportsNativeWebSearch: supportsNativeWebSearch,
+            disableAutoRetry: disableAutoRetry
         ))
         dismiss()
     }

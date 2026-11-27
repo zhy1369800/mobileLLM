@@ -527,6 +527,7 @@ final class SettingsPersistenceTests: XCTestCase {
         let decoded = try JSONDecoder().decode(OnlineService.self, from: Data(legacyJSON.utf8))
         XCTAssertEqual(decoded.id, "svc-legacy")
         XCTAssertFalse(decoded.supportsNativeWebSearch)
+        XCTAssertFalse(decoded.disableAutoRetry)
     }
 
     func testOnlineServiceSupportsNativeWebSearchRoundTrips() {
@@ -537,12 +538,14 @@ final class SettingsPersistenceTests: XCTestCase {
             baseURL: "https://api.deepseek.com/v1",
             modelID: "deepseek-chat",
             isEnabled: true,
-            supportsNativeWebSearch: true
+            supportsNativeWebSearch: true,
+            disableAutoRetry: true
         ))
 
         let reloaded = AppSettings(defaults: defaults)
         let service = reloaded.onlineServices.first { $0.id == "svc-native-search" }
         XCTAssertEqual(service?.supportsNativeWebSearch, true)
+        XCTAssertEqual(service?.disableAutoRetry, true)
     }
 
     func testVoiceBargeInSettingsDefaultRoundTripAndReset() throws {

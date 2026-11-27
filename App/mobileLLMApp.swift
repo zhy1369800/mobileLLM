@@ -552,6 +552,7 @@ struct MobileLLMApp: App {
             baseURL: container.settings.openAIBaseURL,
             modelID: container.settings.openAIModelID,
             maximumOutputTokens: container.settings.onlineActiveService?.maximumOutputTokens,
+            disableAutoRetry: container.settings.onlineActiveService?.disableAutoRetry ?? false,
             credentials: container.openAICredentials
         )
         #if DEBUG
@@ -597,7 +598,8 @@ struct MobileLLMApp: App {
                     baseURL: service.baseURL,
                     modelID: service.modelID,
                     reasoningEffort: effort,
-                    maximumOutputTokens: service.maximumOutputTokens
+                    maximumOutputTokens: service.maximumOutputTokens,
+                    disableAutoRetry: service.disableAutoRetry
                 )
             }
         }
@@ -1112,7 +1114,8 @@ func makeAgentSnapshot(
             baseURL: onlineService.baseURL,
             modelID: onlineParts.model,
             reasoningEffort: conversation.reasoningEffort ?? .medium,
-            maximumOutputTokens: onlineService.maximumOutputTokens
+            maximumOutputTokens: onlineService.maximumOutputTokens,
+            disableAutoRetry: onlineService.disableAutoRetry
         )
     } else {
         onlineConfigurationID = nil

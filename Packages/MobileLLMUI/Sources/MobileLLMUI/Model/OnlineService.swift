@@ -22,6 +22,9 @@ public struct OnlineService: Sendable, Hashable, Codable, Identifiable {
     /// True when this service executes web search natively on the server (spec §15.5).
     /// When active, the app omits its client-side `web_search` tool to prevent duplicate searches.
     public var supportsNativeWebSearch: Bool
+    /// True to forbid implicit automatic retries (stream failures, truncation, reasoning-only,
+    /// or compatibility fallbacks). Recommended for image generation and pay-per-request endpoints.
+    public var disableAutoRetry: Bool
 
     /// The id used by the single-service era (and by the Mac-local config / test env seeding). Keeping
     /// it lets an upgraded install reuse the key already stored under this Keychain account.
@@ -34,7 +37,8 @@ public struct OnlineService: Sendable, Hashable, Codable, Identifiable {
         modelID: String? = nil,
         maximumOutputTokens: Int? = nil,
         isEnabled: Bool = false,
-        supportsNativeWebSearch: Bool = false
+        supportsNativeWebSearch: Bool = false,
+        disableAutoRetry: Bool = false
     ) {
         self.id = id
         self.name = name
@@ -43,6 +47,7 @@ public struct OnlineService: Sendable, Hashable, Codable, Identifiable {
         self.maximumOutputTokens = maximumOutputTokens
         self.isEnabled = isEnabled
         self.supportsNativeWebSearch = supportsNativeWebSearch
+        self.disableAutoRetry = disableAutoRetry
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -53,6 +58,7 @@ public struct OnlineService: Sendable, Hashable, Codable, Identifiable {
         case maximumOutputTokens
         case isEnabled
         case supportsNativeWebSearch
+        case disableAutoRetry
     }
 
     public init(from decoder: Decoder) throws {
@@ -66,6 +72,10 @@ public struct OnlineService: Sendable, Hashable, Codable, Identifiable {
         supportsNativeWebSearch = try container.decodeIfPresent(
             Bool.self,
             forKey: .supportsNativeWebSearch
+        ) ?? false
+        disableAutoRetry = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .disableAutoRetry
         ) ?? false
     }
 

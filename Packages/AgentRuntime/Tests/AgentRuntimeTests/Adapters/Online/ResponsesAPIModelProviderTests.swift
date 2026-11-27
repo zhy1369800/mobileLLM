@@ -1688,4 +1688,95 @@ final class ResponsesAPIModelProviderTests: XCTestCase {
         return try await AgentModelExecutor().execute(provider: provider, authorized: authorized)
     }
 
+    func testDisableAutoRetryForbidsImplicitRetriesAndMarksStreamFailureNonRetryable() async throws {
+        MockResponsesURLProtocol.requestCount = 0
+        MockResponsesURLProtocol.handler = { request in
+            MockResponsesURLProtocol.requestCount += 1
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            return (response, Data("""
+            {"status":"incomplete",
+             "incomplete_details":{"reason":"max_output_tokens"},
+             "usage":{"input_tokens":1,"output_tokens":4},
+             "output":[{"type":"message","role":"assistant","content":[
+               {"type":"output_text","text":"![img](data:image/png;base64,AAA)"}
+             ]}]}
+            """.utf8))
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockResponsesURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            MockResponsesURLProtocol.handler = nil
+            MockResponsesURLProtocol.capturedRequest = nil
+            MockResponsesURLProtocol.requestCount = 0
+        }
+
+        let provider = try ResponsesAPIModelProvider(
+            configuration: ResponsesAPIConfiguration(
+                baseURL: "https://gateway.example/v1",
+                apiKey: "sk-test",
+                disableAutoRetry: true
+            ),
+            session: session
+        )
+        let fixture = try ModelFixture(
+            location: .remote,
+            providerID: ResponsesAPIModelProvider.providerID,
+            remoteDestination: "openai.responses:responses-api-key:fixture-model"
+        )
+        let prepared = try await AgentModelRequestPreparer().prepare(
+            provider: provider,
+            request: fixture.request,
+            context: fixture.context
+        )
+        let policy = TestApprovalPolicyEngine()
+        let auth = try await policy.bindLocalPolicy(
+            prepared: prepared.preparedRequest.externalOperation,
+            approvalID: ApprovalID(),
+            trustedRunAuthority: fixture.authority,
+            at: AgentTimestamp(rawValue: 1_000)
+        )
+        let authorized = AuthorizedAgentModelAttempt(
+            preparedAttempt: prepared,
+            request: try AuthorizedModelRequest(
+                request: fixture.request,
+                authorization: auth,
+                clock: FixedAuthorizationClock(),
+                policyValidator: policy,
+                attemptLedger: TestAttemptLedger()
+            )
+        )
+        let result = try await AgentModelExecutor().execute(provider: provider, authorized: authorized)
+        XCTAssertEqual(MockResponsesURLProtocol.requestCount, 1, "disableAutoRetry must not retry on truncation")
+        guard case .completed(let completion) = result.outcome,
+              case .finalAnswer(let answer) = completion.action
+        else { return XCTFail("Expected completed answer, got \(result.outcome)") }
+        XCTAssertEqual(answer.text, "![img](data:image/png;base64,AAA)")
+
+        // Stream failure with disableAutoRetry must not be automaticallyRetryable
+        MockResponsesURLProtocol.requestCount = 0
+        MockResponsesURLProtocol.handler = { request in
+            MockResponsesURLProtocol.requestCount += 1
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "text/event-stream"]
+            )!
+            let sse = "data: {\"type\":\"response.failed\",\"error\":{\"message\":\"upstream timeout\"}}\n\n"
+            return (response, Data(sse.utf8))
+        }
+        let streamResult = try await AgentModelExecutor().execute(provider: provider, authorized: authorized)
+        XCTAssertEqual(MockResponsesURLProtocol.requestCount, 1, "disableAutoRetry must only send 1 request")
+        guard case .failed(let failure) = streamResult.outcome else {
+            return XCTFail("Expected failed outcome, got \(streamResult.outcome)")
+        }
+        XCTAssertFalse(failure.retryAdvice.automaticallyRetryable, "stream failure must not auto-retry when disabled")
+    }
+
 }
