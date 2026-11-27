@@ -927,4 +927,35 @@ final class StreamingSpeechTests: XCTestCase {
             await Task.yield()
         }
     }
+
+    func testLocalMLXSplitsLongCommaHeavySecondSentenceBelowBatchLimit() async {
+        let settings = makeSettings(autoSpeak: true)
+        settings.ttsEngineKind = .localMLX
+        settings.localMLXFlowSteps = 8
+
+        let reloaded = AppSettings(
+            defaults: UserDefaults(suiteName: "speech-flow-steps-\(UUID().uuidString)")!,
+            keychain: nil
+        )
+        XCTAssertEqual(reloaded.localMLXFlowSteps, 10)
+        settings.resetToDefaults()
+        XCTAssertEqual(settings.localMLXFlowSteps, 10)
+        settings.ttsEngineKind = .localMLX
+
+        let mlxEngine = MockPrefetchableTTSEngine(preferredBatchCharacterLimit: 75)
+        let coordinator = StreamingSpeechCoordinator(
+            engine: MockTTSEngine(),
+            localMLXEngine: mlxEngine,
+            settings: settings
+        )
+        let first = "今天天气很好。"
+        // 58-char single sentence with internal commas (previously stayed monolithic < 72 chars).
+        let longSecond = "我们上午先去附近的公园散步晒太阳呼吸新鲜空气，然后沿着湖边的小路慢慢散步聊聊天，最后去图书馆看一会儿自己喜欢的书。"
+        coordinator.speakMessage(text: first + longSecond, messageID: UUID())
+        for _ in 0..<20 where coordinator.isSpeaking {
+            await Task.yield()
+        }
+        XCTAssertEqual(mlxEngine.playedSegments.count, 3)
+        XCTAssertLessThanOrEqual(mlxEngine.playedSegments[1].count, 40)
+    }
 }

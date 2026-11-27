@@ -109,6 +109,8 @@ public final class StreamingSpeechCoordinator {
     private let localMLXFirstBatchCharacterLimit = 24
     private let localMLXSecondBatchCharacterLimit = 40
     private let localMLXFirstClauseThreshold = 24
+    private let localMLXLongClauseThreshold = 38
+    private let defaultLongClauseThreshold = 72
 
     public init(
         engine: (any TTSEngine)? = nil,
@@ -174,7 +176,15 @@ public final class StreamingSpeechCoordinator {
     }
 
     private func makeSegmenter(forLocalMLX: Bool) -> SentenceSegmenter {
-        SentenceSegmenter(firstClauseThreshold: forLocalMLX ? localMLXFirstClauseThreshold : nil)
+        SentenceSegmenter(
+            longClauseThreshold: forLocalMLX ? localMLXLongClauseThreshold : defaultLongClauseThreshold,
+            firstClauseThreshold: forLocalMLX ? localMLXFirstClauseThreshold : nil
+        )
+    }
+
+    private func applySegmenterThresholds(forLocalMLX: Bool) {
+        segmenter.longClauseThreshold = forLocalMLX ? localMLXLongClauseThreshold : defaultLongClauseThreshold
+        segmenter.firstClauseThreshold = forLocalMLX ? localMLXFirstClauseThreshold : nil
     }
 
     public func availableVoices() -> [TTSVoiceInfo] {
@@ -198,13 +208,13 @@ public final class StreamingSpeechCoordinator {
         isSuppressedForCurrentTurn = false
         activeTurnMessageID = messageID
         hasFedStreamingText = false
-        segmenter.firstClauseThreshold = isLocalMLXActive ? localMLXFirstClauseThreshold : nil
+        applySegmenterThresholds(forLocalMLX: isLocalMLXActive)
     }
 
     /// Clears buffered partial text when provisional answer output is discarded (e.g. before a tool call).
     public func discardBufferedStream() {
         segmenter.reset()
-        segmenter.firstClauseThreshold = isLocalMLXActive ? localMLXFirstClauseThreshold : nil
+        applySegmenterThresholds(forLocalMLX: isLocalMLXActive)
         hasFedStreamingText = false
     }
 
@@ -215,7 +225,7 @@ public final class StreamingSpeechCoordinator {
             return
         }
         if !hasFedStreamingText {
-            segmenter.firstClauseThreshold = isLocalMLXActive ? localMLXFirstClauseThreshold : nil
+            applySegmenterThresholds(forLocalMLX: isLocalMLXActive)
         }
         hasFedStreamingText = true
         isCurrentBatchComplete = false
@@ -311,7 +321,7 @@ public final class StreamingSpeechCoordinator {
         cancelPrefetch()
         queue.removeAll(keepingCapacity: false)
         segmenter.reset()
-        segmenter.firstClauseThreshold = isLocalMLXActive ? localMLXFirstClauseThreshold : nil
+        applySegmenterThresholds(forLocalMLX: isLocalMLXActive)
         drainTask?.cancel()
         drainTask = nil
         engine.stop()

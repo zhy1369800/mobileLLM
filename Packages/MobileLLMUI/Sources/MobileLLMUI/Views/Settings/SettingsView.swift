@@ -689,6 +689,24 @@ struct SettingsView: View {
                 }
             }
 
+            if isCosyVoiceActive {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Flow steps").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                        Spacer()
+                        Text(flowStepsDescription(settings.localMLXFlowSteps))
+                            .font(.caption)
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                    Picker("Flow steps", selection: $settings.localMLXFlowSteps) {
+                        Text("6 · Fast").tag(6)
+                        Text("8 · Balanced").tag(8)
+                        Text("10 · Quality").tag(10)
+                    }
+                    .pickerStyle(.segmented)
+                }
+            }
+
             if selectedClone != nil && !isCosyVoiceActive {
                 Text("Cloned voices require CosyVoice3 0.5B. Switch back to CosyVoice3 in Models → Voice.")
                     .font(.caption).foregroundStyle(Theme.fitAmber)
@@ -698,6 +716,14 @@ struct SettingsView: View {
                 Text("Download CosyVoice3 0.5B in Models → Voice. Best paired with Cloud LLM.")
                     .font(.caption).foregroundStyle(Theme.textTertiary)
             }
+        }
+    }
+
+    private func flowStepsDescription(_ steps: Int) -> String {
+        switch steps {
+        case 6: return "Faster response, slight detail trade-off"
+        case 8: return "Good balance of speed & quality"
+        default: return "Default full quality"
         }
     }
 

@@ -55,6 +55,7 @@ public struct LocalMLXTTSRequest: Sendable {
     public let weightsDirectory: URL
     public let voiceID: String?
     public let rate: Double
+    public let flowSteps: Int
     public let cloneReference: LocalMLXTTSVoiceCloneReference?
 
     public init(
@@ -64,6 +65,7 @@ public struct LocalMLXTTSRequest: Sendable {
         weightsDirectory: URL,
         voiceID: String?,
         rate: Double,
+        flowSteps: Int = 10,
         cloneReference: LocalMLXTTSVoiceCloneReference? = nil
     ) {
         self.text = text
@@ -72,6 +74,7 @@ public struct LocalMLXTTSRequest: Sendable {
         self.weightsDirectory = weightsDirectory
         self.voiceID = voiceID
         self.rate = rate
+        self.flowSteps = flowSteps
         self.cloneReference = cloneReference
     }
 }
@@ -314,6 +317,7 @@ public actor LocalMLXTTSRuntime {
                         text: chunk,
                         voiceProfile: cloneProfile,
                         language: chunkLang.isEmpty ? language : chunkLang,
+                        flowSteps: request.flowSteps,
                         onTiming: { chunkTimings.append($0) }
                     )
                 } else {
@@ -321,6 +325,7 @@ public actor LocalMLXTTSRuntime {
                         text: chunk,
                         language: chunkLang.isEmpty ? language : chunkLang,
                         instruction: instruction,
+                        flowSteps: request.flowSteps,
                         onTiming: { chunkTimings.append($0) }
                     )
                 }
@@ -375,8 +380,8 @@ public actor LocalMLXTTSRuntime {
             let flowMs = chunkTimings.reduce(0) { $0 + $1.flowMs }
             let hifiganMs = chunkTimings.reduce(0) { $0 + $1.hifiganMs }
             TTSPerfLogger.log(String(
-                format: "synth %@ | chars=%d chunks=%d | LLM=%.0fms (%d tok) Flow=%.0fms HiFiGAN=%.0fms | total=%.0fms | audio=%.2fs (RTF=%.2f)",
-                backendLabel, request.text.count, chunks.count,
+                format: "synth %@ (steps=%d) | chars=%d chunks=%d | LLM=%.0fms (%d tok) Flow=%.0fms HiFiGAN=%.0fms | total=%.0fms | audio=%.2fs (RTF=%.2f)",
+                backendLabel, request.flowSteps, request.text.count, chunks.count,
                 llmMs, tokens, flowMs, hifiganMs, totalMs, audioSec, rtf
             ))
         }

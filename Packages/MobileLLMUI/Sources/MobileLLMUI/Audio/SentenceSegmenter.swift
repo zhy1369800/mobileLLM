@@ -17,7 +17,7 @@ public struct SentenceSegmenter: Sendable {
     private var hasEmittedSegment: Bool = false
 
     /// Minimum buffer length before a clause boundary (comma/semicolon) is treated as a flush point.
-    private let longClauseThreshold: Int
+    public var longClauseThreshold: Int
     /// Optional shorter threshold applied only to the first emitted segment of a turn/utterance.
     public var firstClauseThreshold: Int?
 

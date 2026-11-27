@@ -244,6 +244,7 @@ public final class CosyVoiceTTSModel {
         promptToken: MLXArray? = nil,
         promptFeat: MLXArray? = nil,
         promptText: String? = nil,
+        flowSteps: Int? = nil,
         verbose: Bool = false,
         onTiming: ((CosyVoiceSynthesisTiming) -> Void)? = nil
     ) -> [Float] {
@@ -331,7 +332,8 @@ public final class CosyVoiceTTSModel {
             tokens: tokenArray,
             spkEmbedding: spkEmb,
             promptToken: promptToken,
-            promptFeat: promptFeat
+            promptFeat: promptFeat,
+            nTimesteps: flowSteps
         )
         eval(fullMel)
 

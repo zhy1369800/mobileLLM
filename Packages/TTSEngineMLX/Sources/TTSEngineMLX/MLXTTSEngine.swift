@@ -25,6 +25,7 @@ public final class MLXTTSEngine: PrefetchableTTSEngine {
     private let modelResolver: @MainActor () -> ModelResolution?
     private let voiceCloneResolver: @MainActor (String) -> LocalMLXTTSVoiceCloneReference?
     private let clonedVoicesProvider: @MainActor () -> [TTSVoiceInfo]
+    private let flowStepsProvider: @MainActor () -> Int
     private let onBeforeSynthesis: (@MainActor @Sendable () async -> Void)?
     private let runtime: LocalMLXTTSRuntime
     private let idleUnloadDelay: Duration
@@ -95,6 +96,7 @@ public final class MLXTTSEngine: PrefetchableTTSEngine {
                     TTSVoiceInfo(id: $0.id, name: $0.name, language: "clone", qualityLabel: "Voice Clone")
                 }
             },
+            flowStepsProvider: { settings.localMLXFlowSteps },
             onBeforeSynthesis: onBeforeSynthesis
         )
     }
@@ -105,6 +107,7 @@ public final class MLXTTSEngine: PrefetchableTTSEngine {
         modelResolver: @escaping @MainActor () -> ModelResolution?,
         voiceCloneResolver: @escaping @MainActor (String) -> LocalMLXTTSVoiceCloneReference? = { _ in nil },
         clonedVoicesProvider: @escaping @MainActor () -> [TTSVoiceInfo] = { [] },
+        flowStepsProvider: @escaping @MainActor () -> Int = { 10 },
         onBeforeSynthesis: (@MainActor @Sendable () async -> Void)? = nil
     ) {
         self.runtime = runtime
@@ -112,6 +115,7 @@ public final class MLXTTSEngine: PrefetchableTTSEngine {
         self.modelResolver = modelResolver
         self.voiceCloneResolver = voiceCloneResolver
         self.clonedVoicesProvider = clonedVoicesProvider
+        self.flowStepsProvider = flowStepsProvider
         self.onBeforeSynthesis = onBeforeSynthesis
         self.playerDelegate.owner = self
         #if os(iOS)
@@ -174,6 +178,7 @@ public final class MLXTTSEngine: PrefetchableTTSEngine {
             weightsDirectory: resolved.directory,
             voiceID: voiceID,
             rate: rate,
+            flowSteps: flowStepsProvider(),
             cloneReference: cloneReference
         )
         let result = try await runtime.synthesize(request)

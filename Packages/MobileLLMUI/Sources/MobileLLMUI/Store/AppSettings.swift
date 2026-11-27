@@ -196,6 +196,8 @@ public final class AppSettings {
     public var localMLXModelVariantID: String? { didSet { persist() } }
     /// Preset speaker identifier for local MLX neural voices (e.g. `"default_zh"` or `"Vivian"`).
     public var localMLXVoiceID: String { didSet { persist() } }
+    /// CosyVoice3 Flow Matching ODE integration steps (`6` = Fast, `8` = Balanced, `10` = Quality).
+    public var localMLXFlowSteps: Int { didSet { persist() } }
     /// Base URL for Cloud TTS (`/v1/audio/speech` compatible).
     public var cloudTTSBaseURL: String { didSet { persist() } }
     /// Model identifier for Cloud TTS (e.g. `tts-1`, `gpt-4o-mini-tts`, `FunAudioLLM/CosyVoice2-0.5B`).
@@ -559,6 +561,7 @@ public final class AppSettings {
         ttsEngineKind = snap?.ttsEngineKind ?? .appleSystem
         localMLXModelVariantID = snap?.localMLXModelVariantID
         localMLXVoiceID = snap?.localMLXVoiceID ?? LocalTTSModelCatalog.defaultVoiceID
+        localMLXFlowSteps = Self.normalizedLocalMLXFlowSteps(snap?.localMLXFlowSteps ?? 10)
         cloudTTSBaseURL = snap?.cloudTTSBaseURL ?? "https://api.openai.com/v1"
         cloudTTSModel = snap?.cloudTTSModel ?? "tts-1"
         cloudTTSVoice = snap?.cloudTTSVoice ?? "alloy"
@@ -788,6 +791,7 @@ public final class AppSettings {
         var ttsEngineKind: TTSEngineKind? = .appleSystem
         var localMLXModelVariantID: String? = nil
         var localMLXVoiceID: String? = nil
+        var localMLXFlowSteps: Int? = nil
         var cloudTTSBaseURL: String? = nil
         var cloudTTSModel: String? = nil
         var cloudTTSVoice: String? = nil
@@ -862,6 +866,7 @@ public final class AppSettings {
                             ttsEngineKind: ttsEngineKind,
                             localMLXModelVariantID: localMLXModelVariantID,
                             localMLXVoiceID: localMLXVoiceID,
+                            localMLXFlowSteps: localMLXFlowSteps,
                             cloudTTSBaseURL: cloudTTSBaseURL,
                             cloudTTSModel: cloudTTSModel,
                             cloudTTSVoice: cloudTTSVoice,
@@ -932,6 +937,7 @@ public final class AppSettings {
         ttsEngineKind = .appleSystem
         localMLXModelVariantID = nil
         localMLXVoiceID = LocalTTSModelCatalog.defaultVoiceID
+        localMLXFlowSteps = 10
         voiceBargeInMode = .free
         voiceBargeInKeywords = ""
         showVoiceSubtitles = true
@@ -1011,5 +1017,12 @@ public extension AppSettings {
             return (fitRank, enginePref, quantPref, -v.totalOnDiskBytes)
         }
         return candidates.max { key($0) < key($1) } ?? model.defaultVariantValue
+    }
+
+    nonisolated static func normalizedLocalMLXFlowSteps(_ value: Int) -> Int {
+        switch value {
+        case 6, 8, 10: return value
+        default: return 10
+        }
     }
 }

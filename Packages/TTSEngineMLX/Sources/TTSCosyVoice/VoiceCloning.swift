@@ -170,6 +170,7 @@ extension CosyVoiceTTSModel {
         instruction: String = "You are a helpful assistant.",
         segmentGapSeconds: Float = 0.2,
         seed: UInt64? = nil,
+        flowSteps: Int? = nil,
         verbose: Bool = false,
         onTiming: ((CosyVoiceSynthesisTiming) -> Void)? = nil
     ) -> [Float] {
@@ -186,6 +187,7 @@ extension CosyVoiceTTSModel {
                 promptToken: voiceProfile.promptToken,
                 promptFeat: voiceProfile.promptFeat,
                 promptText: voiceProfile.promptText,
+                flowSteps: flowSteps,
                 verbose: verbose,
                 onTiming: onTiming
             )
@@ -209,6 +211,7 @@ extension CosyVoiceTTSModel {
                 promptToken: voiceProfile.promptToken,
                 promptFeat: voiceProfile.promptFeat,
                 promptText: voiceProfile.promptText,
+                flowSteps: flowSteps,
                 verbose: verbose,
                 onTiming: onTiming
             )
