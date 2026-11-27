@@ -349,7 +349,12 @@ public actor LocalMLXTTSRuntime {
         guard !combinedSamples.isEmpty else {
             throw LocalMLXTTSError.emptyAudio
         }
-        return (combinedSamples, sampleRate)
+        let rateAdjustedSamples = LocalTTSAudioTimeStretcher.stretch(
+            samples: combinedSamples,
+            sampleRate: sampleRate,
+            rate: request.rate
+        )
+        return (rateAdjustedSamples, sampleRate)
         #endif
     }
 
