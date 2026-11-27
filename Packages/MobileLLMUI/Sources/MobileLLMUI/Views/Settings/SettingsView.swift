@@ -605,6 +605,29 @@ struct SettingsView: View {
             }
 
             HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Voice cloning").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                    Text(clonedVoices.isEmpty ? "Record or import 5–15s audio" : "\(clonedVoices.count) cloned voice(s) saved")
+                        .font(.caption).foregroundStyle(Theme.textTertiary)
+                }
+                Spacer()
+                Button(clonedVoices.isEmpty ? "Clone Voice" : "Manage") {
+                    showVoiceCloneSheet = true
+                }
+                .font(.caption.weight(.medium))
+                .foregroundStyle(Theme.accent)
+                .buttonStyle(.plain)
+            }
+            .sheet(isPresented: $showVoiceCloneSheet) {
+                VoiceCloneSheet(
+                    voiceClones: container.voiceClones,
+                    settings: settings,
+                    isCosyVoiceActive: isCosyVoiceActive,
+                    installedCosyVoiceVariantID: installedCosyVoiceVariantID
+                )
+            }
+
+            HStack {
                 Text("Speaker").font(.subheadline).foregroundStyle(Theme.textSecondary)
                 Spacer()
                 Menu {
@@ -641,29 +664,6 @@ struct SettingsView: View {
                 } label: {
                     menuLabel(speakerLabel)
                 }
-            }
-
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Voice cloning").font(.subheadline).foregroundStyle(Theme.textSecondary)
-                    Text(clonedVoices.isEmpty ? "Record or import 5–15s audio" : "\(clonedVoices.count) cloned voice(s) saved")
-                        .font(.caption).foregroundStyle(Theme.textTertiary)
-                }
-                Spacer()
-                Button(clonedVoices.isEmpty ? "Clone Voice" : "Manage") {
-                    showVoiceCloneSheet = true
-                }
-                .font(.caption.weight(.medium))
-                .foregroundStyle(Theme.accent)
-                .buttonStyle(.plain)
-            }
-            .sheet(isPresented: $showVoiceCloneSheet) {
-                VoiceCloneSheet(
-                    voiceClones: container.voiceClones,
-                    settings: settings,
-                    isCosyVoiceActive: isCosyVoiceActive,
-                    installedCosyVoiceVariantID: installedCosyVoiceVariantID
-                )
             }
 
             if selectedClone != nil && !isCosyVoiceActive {
@@ -1305,7 +1305,10 @@ struct SettingsView: View {
 
     private func menuLabel(_ text: String) -> some View {
         HStack(spacing: 4) {
-            Text(text).font(.subheadline).foregroundStyle(Theme.accent)
+            Text(text)
+                .font(.subheadline)
+                .foregroundStyle(Theme.accent)
+                .lineLimit(1)
             Image(systemName: "chevron.up.chevron.down").font(.caption2).foregroundStyle(Theme.textTertiary)
         }
     }

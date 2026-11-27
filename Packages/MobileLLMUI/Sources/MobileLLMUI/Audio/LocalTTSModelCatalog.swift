@@ -127,8 +127,8 @@ public enum LocalTTSModelCatalog {
         presetVoices: [
             LocalTTSVoicePreset(id: "default_zh", name: "Default Chinese", language: "zh-CN", detail: "Natural Mandarin voice"),
             LocalTTSVoicePreset(id: "default_en", name: "Default English", language: "en-US", detail: "Natural English voice"),
-            LocalTTSVoicePreset(id: "warm_female", name: "Warm Female", language: "zh-CN / en-US", detail: "Warm bilingual female style"),
-            LocalTTSVoicePreset(id: "clear_male", name: "Clear Male", language: "zh-CN / en-US", detail: "Clear bilingual male style"),
+            LocalTTSVoicePreset(id: "warm_female", name: "Warm Female", language: "zh / en", detail: "Warm bilingual female style"),
+            LocalTTSVoicePreset(id: "clear_male", name: "Clear Male", language: "zh / en", detail: "Clear bilingual male style"),
         ]
     )
 

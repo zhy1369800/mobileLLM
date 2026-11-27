@@ -102,4 +102,59 @@ final class VoiceCloneStoreTests: XCTestCase {
         XCTAssertFalse(ClonedVoiceProfile.isClonedVoiceID(container.settings.localMLXVoiceID))
         XCTAssertEqual(container.settings.localMLXVoiceID, LocalTTSModelCatalog.defaultVoiceID)
     }
+
+    func testVoiceCloneTranscriptDraftImportAndEditTransitions() {
+        var draft = VoiceCloneTranscriptDraft(initialSampleScript: "Sample text")
+        XCTAssertEqual(draft.text, "Sample text")
+        XCTAssertEqual(draft.source, .sampleScript)
+
+        // Built-in sample script must be cleared when importing audio so mismatched text isn't bound.
+        let defaultScript = VoiceSampleRecorder.sampleScripts.first?.text ?? ""
+        draft.applySampleScript(defaultScript)
+        XCTAssertEqual(draft.source, .sampleScript)
+        XCTAssertTrue(draft.prepareForImportedAudio(replacingExistingImport: false))
+        XCTAssertEqual(draft.text, "")
+        XCTAssertEqual(draft.source, .empty)
+
+        // Auto-transcription trims whitespace and records .autoTranscribed source.
+        XCTAssertTrue(draft.applyAutoTranscription("  你好世界。  ", overwriteUserText: false))
+        XCTAssertEqual(draft.text, "你好世界。")
+        XCTAssertEqual(draft.source, .autoTranscribed)
+
+        // User edits switch to .userEdited; passive auto-transcription won't overwrite, explicit overwrite will.
+        draft.userDidEdit(to: "自定义台词")
+        XCTAssertEqual(draft.source, .userEdited)
+        XCTAssertFalse(draft.applyAutoTranscription("识别结果", overwriteUserText: false))
+        XCTAssertEqual(draft.text, "自定义台词")
+        XCTAssertTrue(draft.applyAutoTranscription("识别结果", overwriteUserText: true))
+        XCTAssertEqual(draft.text, "识别结果")
+        XCTAssertEqual(draft.source, .autoTranscribed)
+
+        // Pre-typed user text before first import is preserved and suppresses auto-overwrite.
+        var preTyped = VoiceCloneTranscriptDraft(initialSampleScript: "")
+        preTyped.userDidEdit(to: "用户提前粘贴的台词")
+        XCTAssertFalse(preTyped.prepareForImportedAudio(replacingExistingImport: false))
+        XCTAssertEqual(preTyped.text, "用户提前粘贴的台词")
+        XCTAssertEqual(preTyped.source, .userEdited)
+
+        // Replacing an existing imported clip clears even user-edited text from the previous clip.
+        XCTAssertTrue(preTyped.prepareForImportedAudio(replacingExistingImport: true))
+        XCTAssertEqual(preTyped.text, "")
+        XCTAssertEqual(preTyped.source, .empty)
+
+        // Clearing an audio clip clears auto-transcribed text, but preserves user-edited or sample text.
+        preTyped.applyAutoTranscription("自动识别内容", overwriteUserText: false)
+        preTyped.clearAudioClip()
+        XCTAssertEqual(preTyped.text, "")
+        XCTAssertEqual(preTyped.source, .empty)
+
+        preTyped.userDidEdit(to: "手动文本")
+        preTyped.clearAudioClip()
+        XCTAssertEqual(preTyped.text, "手动文本")
+        XCTAssertEqual(preTyped.source, .userEdited)
+
+        preTyped.resetAfterSave()
+        XCTAssertEqual(preTyped.text, "")
+        XCTAssertEqual(preTyped.source, .empty)
+    }
 }

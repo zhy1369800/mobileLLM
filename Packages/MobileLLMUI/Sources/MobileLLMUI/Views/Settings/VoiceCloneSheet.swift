@@ -14,7 +14,13 @@ struct VoiceCloneSheet: View {
 
     @State private var recorder = VoiceSampleRecorder()
     @State private var draftName: String = ""
-    @State private var draftTranscript: String = VoiceSampleRecorder.sampleScripts.first?.text ?? ""
+    @State private var transcriptDraft = VoiceCloneTranscriptDraft()
+    @State private var transcriptionLocale: String?
+    @State private var hasInitializedLocale = false
+    @State private var isTranscribing = false
+    @State private var transcriptionNotice: String?
+    @State private var transcriptionTask: Task<Void, Never>?
+    @State private var transcriptionGeneration: UInt64 = 0
     @State private var importedStagingURL: URL?
     @State private var importedDuration: Double = 0
     @State private var showAudioImporter = false
@@ -34,6 +40,19 @@ struct VoiceCloneSheet: View {
             && activeSourceDuration >= 1.5
             && activeSourceDuration <= 30.0
             && !recorder.isRecording
+            && !isTranscribing
+    }
+
+    private var transcriptBinding: Binding<String> {
+        Binding(
+            get: { transcriptDraft.text },
+            set: { newValue in
+                guard newValue != transcriptDraft.text else { return }
+                cancelTranscription()
+                transcriptionNotice = nil
+                transcriptDraft.userDidEdit(to: newValue)
+            }
+        )
     }
 
     var body: some View {
@@ -62,6 +81,7 @@ struct VoiceCloneSheet: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
+                        cancelTranscription()
                         recorder.stopRecording()
                         recorder.stopPreview()
                         dismiss()
@@ -75,7 +95,14 @@ struct VoiceCloneSheet: View {
             ) { result in
                 handleImportedAudio(result)
             }
+            .onAppear {
+                if !hasInitializedLocale {
+                    transcriptionLocale = settings.dictationLocale
+                    hasInitializedLocale = true
+                }
+            }
             .onDisappear {
+                cancelTranscription()
                 recorder.stopRecording()
                 recorder.stopPreview()
                 cleanupImportedStaging()
@@ -177,13 +204,17 @@ struct VoiceCloneSheet: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text("Reference script (read aloud or match audio)")
-                            .font(.caption).foregroundStyle(Theme.textTertiary)
+                        Text("Reference script")
+                            .font(.caption)
+                            .foregroundStyle(Theme.textTertiary)
+                            .lineLimit(1)
                         Spacer()
                         HStack(spacing: 6) {
                             ForEach(VoiceSampleRecorder.sampleScripts) { script in
                                 Button(script.label) {
-                                    draftTranscript = script.text
+                                    cancelTranscription()
+                                    transcriptionNotice = nil
+                                    transcriptDraft.applySampleScript(script.text)
                                 }
                                 .font(.caption2.weight(.medium))
                                 .foregroundStyle(Theme.accent)
@@ -194,12 +225,33 @@ struct VoiceCloneSheet: View {
 
                     TextField(
                         "Enter the exact words spoken in the reference clip",
-                        text: $draftTranscript,
+                        text: transcriptBinding,
                         axis: .vertical
                     )
                     .lineLimit(2...4)
                     .textFieldStyle(.roundedBorder)
                     .font(.subheadline)
+
+                    if isTranscribing {
+                        HStack(spacing: Theme.Space.xs) {
+                            ProgressView()
+                                .controlSize(.mini)
+                            Text("Auto-transcribing audio…")
+                                .font(.caption2)
+                                .foregroundStyle(Theme.textSecondary)
+                            Spacer()
+                            Button("Cancel") {
+                                cancelTranscription()
+                            }
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(Theme.accent)
+                            .buttonStyle(.plain)
+                        }
+                    } else if let notice = transcriptionNotice {
+                        Text(notice)
+                            .font(.caption2)
+                            .foregroundStyle(Theme.fitAmber)
+                    }
 
                     Text("Providing the exact transcript improves voice similarity and pronunciation stability.")
                         .font(.caption2).foregroundStyle(Theme.textTertiary)
@@ -208,10 +260,13 @@ struct VoiceCloneSheet: View {
                 VStack(alignment: .leading, spacing: Theme.Space.xs) {
                     HStack(spacing: Theme.Space.sm) {
                         Button {
-                            cleanupImportedStaging()
                             if recorder.isRecording {
                                 recorder.stopRecording()
                             } else {
+                                cancelTranscription()
+                                transcriptionNotice = nil
+                                transcriptDraft.clearAudioClip()
+                                cleanupImportedStaging()
                                 Task { await recorder.startRecording() }
                             }
                         } label: {
@@ -249,8 +304,32 @@ struct VoiceCloneSheet: View {
                                 .foregroundStyle(Theme.accent)
                             }
                             .buttonStyle(.plain)
+
+                            Menu {
+                                ForEach(VoiceClipTranscriber.languageOptions, id: \.label) { option in
+                                    Button {
+                                        transcriptionLocale = option.id
+                                        startTranscription(for: url, locale: option.id, overwriteUserText: true)
+                                    } label: {
+                                        if transcriptionLocale == option.id {
+                                            Label(option.label, systemImage: "checkmark")
+                                        } else {
+                                            Text(option.label)
+                                        }
+                                    }
+                                }
+                            } label: {
+                                Label("Auto-transcribe", systemImage: "captions.bubble")
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(Theme.accent)
+                            }
+                            .disabled(isTranscribing)
+
                             Spacer()
                             Button("Clear") {
+                                cancelTranscription()
+                                transcriptionNotice = nil
+                                transcriptDraft.clearAudioClip()
                                 recorder.discardRecording()
                                 cleanupImportedStaging()
                             }
@@ -281,8 +360,6 @@ struct VoiceCloneSheet: View {
 
     private func handleImportedAudio(_ result: Result<[URL], Error>) {
         statusError = nil
-        recorder.discardRecording()
-        cleanupImportedStaging()
 
         switch result {
         case .success(let urls):
@@ -291,20 +368,32 @@ struct VoiceCloneSheet: View {
             defer { if scoped { picked.stopAccessingSecurityScopedResource() } }
 
             do {
+                let duration = try VoiceSampleRecorder.audioDuration(at: picked)
+                guard duration >= 1.5, duration <= 30.0 else {
+                    statusError = String(format: "Audio must be 1.5–30s long (selected clip is %.1fs).", duration)
+                    return
+                }
                 let ext = picked.pathExtension.isEmpty ? "wav" : picked.pathExtension.lowercased()
                 let staged = FileManager.default.temporaryDirectory
                     .appending(component: "voice-clone-import-\(UUID().uuidString).\(ext)")
                 try FileManager.default.copyItem(at: picked, to: staged)
-                let duration = try VoiceSampleRecorder.audioDuration(at: staged)
-                guard duration >= 1.5, duration <= 30.0 else {
-                    try? FileManager.default.removeItem(at: staged)
-                    statusError = String(format: "Audio must be 1.5–30s long (selected clip is %.1fs).", duration)
-                    return
-                }
+
+                let hadExistingImport = importedStagingURL != nil
+                cancelTranscription()
+                transcriptionNotice = nil
+                recorder.discardRecording()
+                cleanupImportedStaging()
+
                 importedStagingURL = staged
                 importedDuration = duration
                 if draftName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     draftName = picked.deletingPathExtension().lastPathComponent
+                }
+                let shouldAutoTranscribe = transcriptDraft.prepareForImportedAudio(
+                    replacingExistingImport: hadExistingImport
+                )
+                if shouldAutoTranscribe {
+                    startTranscription(for: staged, locale: transcriptionLocale, overwriteUserText: false)
                 }
             } catch {
                 statusError = "Could not import audio: \(error.localizedDescription)"
@@ -314,18 +403,57 @@ struct VoiceCloneSheet: View {
         }
     }
 
+    private func startTranscription(for url: URL, locale: String?, overwriteUserText: Bool) {
+        cancelTranscription()
+        let generation = transcriptionGeneration
+        isTranscribing = true
+        transcriptionNotice = nil
+
+        transcriptionTask = Task { @MainActor in
+            do {
+                let recognized = try await VoiceClipTranscriber.transcribe(
+                    url: url,
+                    localeIdentifier: locale
+                )
+                guard generation == transcriptionGeneration, !Task.isCancelled else { return }
+                isTranscribing = false
+                transcriptionTask = nil
+                transcriptDraft.applyAutoTranscription(recognized, overwriteUserText: overwriteUserText)
+            } catch is CancellationError {
+                guard generation == transcriptionGeneration else { return }
+                isTranscribing = false
+                transcriptionTask = nil
+            } catch {
+                guard generation == transcriptionGeneration else { return }
+                isTranscribing = false
+                transcriptionTask = nil
+                transcriptionNotice = error.localizedDescription
+            }
+        }
+    }
+
+    private func cancelTranscription() {
+        transcriptionGeneration &+= 1
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
+        isTranscribing = false
+    }
+
     private func saveDraftProfile() {
         guard let url = activeSourceURL else { return }
+        cancelTranscription()
         statusError = nil
         do {
             let profile = try voiceClones.addProfile(
                 name: draftName,
                 sourceAudioURL: url,
-                referenceTranscript: draftTranscript,
+                referenceTranscript: transcriptDraft.text,
                 durationSeconds: activeSourceDuration
             )
             activateClonedVoice(profile.id)
             draftName = ""
+            transcriptionNotice = nil
+            transcriptDraft.resetAfterSave()
             recorder.discardRecording()
             cleanupImportedStaging()
         } catch {
