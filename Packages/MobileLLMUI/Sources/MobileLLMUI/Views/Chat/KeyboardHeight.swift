@@ -73,6 +73,7 @@ struct KeyboardGuideReader: UIViewRepresentable {
     final class AnchorView: UIView {
         private let onHeight: (CGFloat) -> Void
         private var tracker: TrackerView?
+        private var lastReportedLift: CGFloat = 0
 
         init(onHeight: @escaping (CGFloat) -> Void) {
             self.onHeight = onHeight
@@ -93,6 +94,12 @@ struct KeyboardGuideReader: UIViewRepresentable {
                            name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
             nc.addObserver(self, selector: #selector(keyboardFrameChanged),
                            name: UIResponder.keyboardWillHideNotification, object: nil)
+            // Post-animation reconciliation: if `keyboardLayoutGuide` stalled (e.g. after a sheet or
+            // menu presentation), fall back to the notification's settled end frame and re-install the tracker.
+            nc.addObserver(self, selector: #selector(keyboardDidChangeFrame(_:)),
+                           name: UIResponder.keyboardDidChangeFrameNotification, object: nil)
+            nc.addObserver(self, selector: #selector(keyboardDidHide),
+                           name: UIResponder.keyboardDidHideNotification, object: nil)
         }
 
         @available(*, unavailable)
@@ -103,7 +110,7 @@ struct KeyboardGuideReader: UIViewRepresentable {
         override func didMoveToWindow() {
             super.didMoveToWindow()
             if window == nil {
-                onHeight(0)
+                reportLift(0)
             }
             installTracker()
         }
@@ -124,17 +131,56 @@ struct KeyboardGuideReader: UIViewRepresentable {
             pokeTracker()
         }
 
+        @objc private func keyboardDidChangeFrame(_ notification: Notification) {
+            pokeTracker()
+            guard let window,
+                  let endScreenFrame = (notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue
+            else { return }
+            let endInWindow = window.convert(endScreenFrame, from: nil)
+            let notifLift = KeyboardOverlapMath.netLift(
+                windowBounds: window.bounds,
+                keyboardFrameInWindow: endInWindow,
+                restingBottomInset: window.safeAreaInsets.bottom,
+                isHiding: false
+            )
+            reconcileWithNotificationLift(notifLift)
+        }
+
+        @objc private func keyboardDidHide() {
+            pokeTracker()
+            reconcileWithNotificationLift(0)
+        }
+
+        private func reconcileWithNotificationLift(_ notifLift: CGFloat) {
+            if notifLift <= 0.5 {
+                if lastReportedLift > 0.5 {
+                    reportLift(0)
+                }
+                return
+            }
+            guard isTopPresentedContext() else { return }
+            if abs(lastReportedLift - notifLift) > 1.0 {
+                reportLift(notifLift)
+                installTracker()
+            }
+        }
+
         private func pokeTracker() {
             tracker?.setNeedsLayout()
             setNeedsLayout()
             layoutIfNeeded()
         }
 
+        private func reportLift(_ lift: CGFloat) {
+            lastReportedLift = max(0, lift)
+            onHeight(lastReportedLift)
+        }
+
         private func handleGuideLift(_ lift: CGFloat) {
             if lift > 0.5 {
                 guard isTopPresentedContext() else { return }
             }
-            onHeight(lift)
+            reportLift(lift)
         }
 
         private func installTracker() {
