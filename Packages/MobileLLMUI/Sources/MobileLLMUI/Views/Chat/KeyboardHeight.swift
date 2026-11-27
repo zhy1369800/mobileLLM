@@ -82,13 +82,17 @@ struct KeyboardGuideReader: UIViewRepresentable {
             backgroundColor = .clear
             isOpaque = false
 
+            let nc = NotificationCenter.default
             // Re-install tracker when foregrounded (UIWindow survives Home round-trips while UIKit may rebind its guide).
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(sceneDidBecomeActive),
-                name: UIApplication.didBecomeActiveNotification,
-                object: nil
-            )
+            nc.addObserver(self, selector: #selector(sceneDidBecomeActive),
+                           name: UIApplication.didBecomeActiveNotification, object: nil)
+            // Keyboard notifications as layout-trigger fallback: the layout guide doesn't always call
+            // `layoutSubviews()` after sheet dismissals or programmatic `resignFirstResponder`. These
+            // observers simply poke the tracker so its next layout pass picks up the guide's new frame.
+            nc.addObserver(self, selector: #selector(keyboardFrameChanged),
+                           name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+            nc.addObserver(self, selector: #selector(keyboardFrameChanged),
+                           name: UIResponder.keyboardWillHideNotification, object: nil)
         }
 
         @available(*, unavailable)
@@ -112,6 +116,16 @@ struct KeyboardGuideReader: UIViewRepresentable {
 
         @objc private func sceneDidBecomeActive() {
             installTracker()
+            pokeTracker()
+        }
+
+        /// Force the tracker to re-measure the layout guide's current frame.
+        @objc private func keyboardFrameChanged() {
+            pokeTracker()
+        }
+
+        private func pokeTracker() {
+            tracker?.setNeedsLayout()
             setNeedsLayout()
             layoutIfNeeded()
         }
