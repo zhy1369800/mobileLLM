@@ -76,6 +76,8 @@ public struct AgentRunRequestSnapshot: Sendable {
     public let onlineReasoningEffort: ReasoningEffort?
     /// Whether all enabled tools should always remain exposed to the model across turns (OGAM style).
     public let alwaysExposeTools: Bool
+    /// True when the selected online service forbids implicit automatic retries (including structured repairs).
+    public let onlineDisableAutoRetry: Bool
 
     public init(
         conversationID: UUID,
@@ -117,7 +119,8 @@ public struct AgentRunRequestSnapshot: Sendable {
         onlineMaximumOutputTokens: Int?,
         approvalMode: AgentApprovalMode,
         onlineReasoningEffort: ReasoningEffort?,
-        alwaysExposeTools: Bool = false
+        alwaysExposeTools: Bool = false,
+        onlineDisableAutoRetry: Bool = false
     ) {
         self.conversationID = conversationID
         self.userTurnID = userTurnID
@@ -160,6 +163,7 @@ public struct AgentRunRequestSnapshot: Sendable {
         self.approvalMode = approvalMode
         self.onlineReasoningEffort = onlineReasoningEffort
         self.alwaysExposeTools = alwaysExposeTools
+        self.onlineDisableAutoRetry = onlineDisableAutoRetry
     }
 }
 
@@ -216,7 +220,8 @@ extension AgentRunRequestSnapshot {
             onlineMaximumOutputTokens: onlineMaximumOutputTokens,
             approvalMode: approvalMode,
             onlineReasoningEffort: onlineReasoningEffort,
-            alwaysExposeTools: alwaysExposeTools
+            alwaysExposeTools: alwaysExposeTools,
+            onlineDisableAutoRetry: onlineDisableAutoRetry
         )
     }
 }
@@ -580,7 +585,7 @@ struct AppFrozenInputBuilder: Sendable {
         var budgetLimits = Dictionary(uniqueKeysWithValues: BudgetDimension.allCases.map {
             ($0, defaultBudget.limits[$0])
         })
-        budgetLimits[.structuredRepairs] = 3
+        budgetLimits[.structuredRepairs] = snapshot.onlineDisableAutoRetry ? 0 : 3
         let budget = try AgentBudget(
             limits: BudgetQuantities(budgetLimits),
             maximumThermalState: defaultBudget.maximumThermalState,

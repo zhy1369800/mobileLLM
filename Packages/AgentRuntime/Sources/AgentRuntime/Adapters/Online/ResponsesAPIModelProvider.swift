@@ -536,8 +536,8 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
         )
         let totalUsage = await accounting.usage
         let usage = try AgentModelUsage(
-            inputTokens: totalUsage.inputTokens,
-            outputTokens: totalUsage.outputTokens,
+            inputTokens: min(totalUsage.inputTokens, parameters.maximumContextTokens),
+            outputTokens: min(totalUsage.outputTokens, parameters.maximumOutputTokens),
             activeMilliseconds: elapsedMilliseconds,
             peakMemoryBytes: 0
         )
@@ -578,6 +578,9 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                 }
                 action = .finalAnswer(try AgentAnswer(structuredOutput: value))
             } else {
+                guard finalText.utf8.count <= 8 * 1_024 * 1_024 else {
+                    throw AgentModelProviderFailure(try Self.oversizedOutputFailure())
+                }
                 action = .finalAnswer(try AgentAnswer(text: finalText))
             }
         } else {
@@ -1278,7 +1281,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
     }
 
     static func parseResponse(_ data: Data) throws -> ParsedResponse {
-        let value = try AgentWireDecoder.decode(JSONValue.self, from: data, limits: .inlineValue)
+        let value = try AgentWireDecoder.decode(JSONValue.self, from: data, limits: .contractEnvelope)
         func number(_ path: [String]) -> UInt64? {
             var current = value
             for key in path {
@@ -1374,7 +1377,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
     }
 
     static func parseChatCompletion(_ data: Data) throws -> ParsedResponse {
-        let value = try AgentWireDecoder.decode(JSONValue.self, from: data, limits: .inlineValue)
+        let value = try AgentWireDecoder.decode(JSONValue.self, from: data, limits: .contractEnvelope)
         guard case .object(let root) = value else {
             return ParsedResponse(
                 text: "",
@@ -1565,6 +1568,18 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
             code: "model.online.tool",
             classification: .permanent,
             safeMessage: message,
+            retryAdvice: .never,
+            externalEffect: .confirmedNone,
+            requiredUserAction: .none,
+            redaction: RedactionMetadata(classification: .publicMetadata, policyVersion: 1)
+        )
+    }
+
+    private static func oversizedOutputFailure() throws -> AgentFailure {
+        try AgentFailure(
+            code: "model.online.output-too-large",
+            classification: .permanent,
+            safeMessage: "The online model response exceeded the 8 MB inline text limit.",
             retryAdvice: .never,
             externalEffect: .confirmedNone,
             requiredUserAction: .none,
