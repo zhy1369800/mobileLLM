@@ -104,4 +104,32 @@ final class LocalMLXTTSMappingTests: XCTestCase {
         XCTAssertTrue(hardSegments.allSatisfy { !$0.isEmpty && $0.count <= 85 })
         XCTAssertEqual(hardSegments.joined(), unpunctuated)
     }
+
+    func testNormalizedCosyVoiceChunkHandlesDanglingTrailingPunctuation() {
+        XCTAssertEqual(
+            LocalMLXTTSMapping.normalizedCosyVoiceChunk("还有啥没试过的？比如："),
+            "还有啥没试过的？比如，"
+        )
+        XCTAssertEqual(
+            LocalMLXTTSMapping.normalizedCosyVoiceChunk("Try items:"),
+            "Try items,"
+        )
+        XCTAssertEqual(
+            LocalMLXTTSMapping.normalizedCosyVoiceChunk("第一项；"),
+            "第一项，"
+        )
+        XCTAssertEqual(
+            LocalMLXTTSMapping.normalizedCosyVoiceChunk("一气呵成——"),
+            "一气呵成，"
+        )
+        // Interior colons, trailing commas, and sentence-ending punctuation remain unchanged.
+        XCTAssertEqual(
+            LocalMLXTTSMapping.normalizedCosyVoiceChunk("比如：每周六上午。"),
+            "比如：每周六上午。"
+        )
+        XCTAssertEqual(
+            LocalMLXTTSMapping.normalizedCosyVoiceChunk("从创建提醒到删除提醒，"),
+            "从创建提醒到删除提醒，"
+        )
+    }
 }

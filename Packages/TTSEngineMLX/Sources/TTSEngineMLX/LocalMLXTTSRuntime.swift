@@ -173,6 +173,36 @@ public enum LocalMLXTTSMapping {
         return chunks
     }
 
+    /// Replaces dangling trailing clause/list punctuation (`：`, `:`, `；`, `;`, `、`, `——`)
+    /// with a comma pause so CosyVoice3 does not mistake it for an empty prompt boundary
+    /// and drop the trailing words. Existing trailing commas, periods, and interior colons stay intact.
+    public static func normalizedCosyVoiceChunk(_ text: String) -> String {
+        var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return text }
+
+        let doubleDashes = ["——", "--"]
+        var stripped = false
+        for dash in doubleDashes where trimmed.hasSuffix(dash) {
+            trimmed.removeLast(dash.count)
+            stripped = true
+            break
+        }
+
+        if !stripped {
+            let danglingChars: Set<Character> = ["：", ":", "；", ";", "、", "—"]
+            if let last = trimmed.last, danglingChars.contains(last) {
+                trimmed.removeLast()
+                stripped = true
+            }
+        }
+
+        guard stripped else { return trimmed }
+        let cleanStem = trimmed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanStem.isEmpty else { return text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let useASCII = cleanStem.last?.isASCII ?? false
+        return cleanStem + (useASCII ? "," : "，")
+    }
+
     /// Joins multiple synthesized PCM chunks with brief zero-crossing fades and silence gaps
     /// so inner-chunk boundaries avoid audible clicks while single-chunk outputs stay untouched.
     public static func stitchAudioChunks(
@@ -308,8 +338,9 @@ public actor LocalMLXTTSRuntime {
             }
             let instruction = LocalMLXTTSMapping.cosyVoiceInstruction(for: request.voiceID)
 
-            for chunk in chunks {
+            for rawChunk in chunks {
                 try Task.checkCancellation()
+                let chunk = LocalMLXTTSMapping.normalizedCosyVoiceChunk(rawChunk)
                 let chunkLang = LocalMLXTTSMapping.detectLanguage(for: chunk, voiceID: request.voiceID)
                 let chunkSamples: [Float]
                 if let cloneProfile {
