@@ -106,11 +106,6 @@ public final class StreamingSpeechCoordinator {
     private let voiceCallBatchCharacterLimit = 100
     private let streamingPrefetchMinCharacters = 80
     private let voiceCallStreamingPrefetchMinCharacters = 60
-    private let localMLXFirstBatchCharacterLimit = 24
-    private let localMLXSecondBatchCharacterLimit = 28
-    private let localMLXThirdBatchCharacterLimit = 50
-    private let localMLXFirstClauseThreshold = 24
-    private let localMLXLongClauseThreshold = 26
     private let defaultLongClauseThreshold = 72
 
     public init(
@@ -176,16 +171,22 @@ public final class StreamingSpeechCoordinator {
         selectedEngine(allowFallback: true)?.kind == .localMLX
     }
 
+    private var localMLXLimits: [Int] {
+        AppSettings.parsedLocalMLXBatchLimits(settings.localMLXBatchLimits)
+    }
+
     private func makeSegmenter(forLocalMLX: Bool) -> SentenceSegmenter {
-        SentenceSegmenter(
-            longClauseThreshold: forLocalMLX ? localMLXLongClauseThreshold : defaultLongClauseThreshold,
-            firstClauseThreshold: forLocalMLX ? localMLXFirstClauseThreshold : nil
+        let limits = localMLXLimits
+        return SentenceSegmenter(
+            longClauseThreshold: forLocalMLX ? max(12, limits[1] - 2) : defaultLongClauseThreshold,
+            firstClauseThreshold: forLocalMLX ? limits[0] : nil
         )
     }
 
     private func applySegmenterThresholds(forLocalMLX: Bool) {
-        segmenter.longClauseThreshold = forLocalMLX ? localMLXLongClauseThreshold : defaultLongClauseThreshold
-        segmenter.firstClauseThreshold = forLocalMLX ? localMLXFirstClauseThreshold : nil
+        let limits = localMLXLimits
+        segmenter.longClauseThreshold = forLocalMLX ? max(12, limits[1] - 2) : defaultLongClauseThreshold
+        segmenter.firstClauseThreshold = forLocalMLX ? limits[0] : nil
     }
 
     public func availableVoices() -> [TTSVoiceInfo] {
@@ -576,21 +577,15 @@ public final class StreamingSpeechCoordinator {
         kind: DrainEngineKind,
         batchNumber: Int
     ) -> Int {
+        if kind == .localMLX {
+            let limits = localMLXLimits
+            let index = min(max(batchNumber - 1, 0), 4)
+            let configured = limits[index]
+            return isVoiceCallActive ? min(configured, voiceCallBatchCharacterLimit) : configured
+        }
         let base = engine.preferredBatchCharacterLimit
         guard base > 0 else { return 0 }
-        let limit = isVoiceCallActive ? min(base, voiceCallBatchCharacterLimit) : base
-        if kind == .localMLX {
-            if batchNumber <= 1 {
-                return min(limit, localMLXFirstBatchCharacterLimit)
-            }
-            if batchNumber == 2 {
-                return min(limit, localMLXSecondBatchCharacterLimit)
-            }
-            if batchNumber == 3 {
-                return min(limit, localMLXThirdBatchCharacterLimit)
-            }
-        }
-        return limit
+        return isVoiceCallActive ? min(base, voiceCallBatchCharacterLimit) : base
     }
 
     private func dequeueNextBatch(maxCharacters: Int, splitOnScriptChange: Bool = false) -> String {

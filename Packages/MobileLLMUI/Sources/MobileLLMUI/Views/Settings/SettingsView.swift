@@ -707,6 +707,28 @@ struct SettingsView: View {
                 }
             }
 
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Batch limits (1–5)").font(.subheadline).foregroundStyle(Theme.textSecondary)
+                    Spacer()
+                    Text(AppSettings.parsedLocalMLXBatchLimits(settings.localMLXBatchLimits)
+                        .map(String.init)
+                        .joined(separator: " · "))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(Theme.textTertiary)
+                }
+                TextField("24,28,38,55,75", text: $settings.localMLXBatchLimits)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.subheadline.monospacedDigit())
+                    #if os(iOS)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.numbersAndPunctuation)
+                    #endif
+                Text("Max chars for batch #1–#4 and #5+ (comma-separated).")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textTertiary)
+            }
+
             if selectedClone != nil && !isCosyVoiceActive {
                 Text("Cloned voices require CosyVoice3 0.5B. Switch back to CosyVoice3 in Models → Voice.")
                     .font(.caption).foregroundStyle(Theme.fitAmber)

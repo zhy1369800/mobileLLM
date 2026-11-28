@@ -198,6 +198,8 @@ public final class AppSettings {
     public var localMLXVoiceID: String { didSet { persist() } }
     /// CosyVoice3 Flow Matching ODE integration steps (`6` = Fast, `8` = Balanced, `10` = Quality).
     public var localMLXFlowSteps: Int { didSet { persist() } }
+    /// Comma-separated max characters for Local MLX TTS batches #1, #2, #3, #4, and #5+.
+    public var localMLXBatchLimits: String { didSet { persist() } }
     /// Base URL for Cloud TTS (`/v1/audio/speech` compatible).
     public var cloudTTSBaseURL: String { didSet { persist() } }
     /// Model identifier for Cloud TTS (e.g. `tts-1`, `gpt-4o-mini-tts`, `FunAudioLLM/CosyVoice2-0.5B`).
@@ -562,6 +564,7 @@ public final class AppSettings {
         localMLXModelVariantID = snap?.localMLXModelVariantID
         localMLXVoiceID = snap?.localMLXVoiceID ?? LocalTTSModelCatalog.defaultVoiceID
         localMLXFlowSteps = Self.normalizedLocalMLXFlowSteps(snap?.localMLXFlowSteps ?? 6)
+        localMLXBatchLimits = snap?.localMLXBatchLimits ?? Self.defaultLocalMLXBatchLimitsString
         cloudTTSBaseURL = snap?.cloudTTSBaseURL ?? "https://api.openai.com/v1"
         cloudTTSModel = snap?.cloudTTSModel ?? "tts-1"
         cloudTTSVoice = snap?.cloudTTSVoice ?? "alloy"
@@ -792,6 +795,7 @@ public final class AppSettings {
         var localMLXModelVariantID: String? = nil
         var localMLXVoiceID: String? = nil
         var localMLXFlowSteps: Int? = nil
+        var localMLXBatchLimits: String? = nil
         var cloudTTSBaseURL: String? = nil
         var cloudTTSModel: String? = nil
         var cloudTTSVoice: String? = nil
@@ -867,6 +871,7 @@ public final class AppSettings {
                             localMLXModelVariantID: localMLXModelVariantID,
                             localMLXVoiceID: localMLXVoiceID,
                             localMLXFlowSteps: localMLXFlowSteps,
+                            localMLXBatchLimits: localMLXBatchLimits,
                             cloudTTSBaseURL: cloudTTSBaseURL,
                             cloudTTSModel: cloudTTSModel,
                             cloudTTSVoice: cloudTTSVoice,
@@ -938,6 +943,7 @@ public final class AppSettings {
         localMLXModelVariantID = nil
         localMLXVoiceID = LocalTTSModelCatalog.defaultVoiceID
         localMLXFlowSteps = 6
+        localMLXBatchLimits = Self.defaultLocalMLXBatchLimitsString
         voiceBargeInMode = .free
         voiceBargeInKeywords = ""
         showVoiceSubtitles = true
@@ -1024,5 +1030,26 @@ public extension AppSettings {
         case 6, 8, 10: return value
         default: return 6
         }
+    }
+
+    public nonisolated static let defaultLocalMLXBatchLimitsString = "24,28,38,55,75"
+    public nonisolated static let defaultLocalMLXBatchLimits = [24, 28, 38, 55, 75]
+
+    /// Parses comma-separated character limits for Local MLX batches #1..#5+,
+    /// clamping each value to 8...120 and padding missing slots cleanly.
+    public nonisolated static func parsedLocalMLXBatchLimits(_ raw: String) -> [Int] {
+        let normalized = raw.replacingOccurrences(of: "，", with: ",")
+        let parsed = normalized
+            .split(separator: ",")
+            .compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            .map { min(max($0, 8), 120) }
+        guard !parsed.isEmpty else {
+            return defaultLocalMLXBatchLimits
+        }
+        if parsed.count >= 5 {
+            return Array(parsed.prefix(5))
+        }
+        let last = parsed.last ?? 75
+        return parsed + Array(repeating: last, count: 5 - parsed.count)
     }
 }
