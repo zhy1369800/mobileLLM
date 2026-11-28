@@ -1796,4 +1796,74 @@ final class ResponsesAPIModelProviderTests: XCTestCase {
         )
     }
 
+    func testLargeBase64ImageResponseDoesNotExceedDeltaWireLimitAndCompletes() async throws {
+        let largeContent = "![image](data:image/png;base64," + String(repeating: "A", count: 1_500_000) + ")"
+        MockResponsesURLProtocol.requestCount = 0
+        MockResponsesURLProtocol.handler = { request in
+            MockResponsesURLProtocol.requestCount += 1
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            let json = """
+            {"id":"chatcmpl-large","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"\(largeContent)"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":100}}
+            """
+            return (response, Data(json.utf8))
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockResponsesURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer {
+            MockResponsesURLProtocol.handler = nil
+            MockResponsesURLProtocol.capturedRequest = nil
+            MockResponsesURLProtocol.requestCount = 0
+        }
+
+        let provider = try ResponsesAPIModelProvider(
+            configuration: ResponsesAPIConfiguration(
+                baseURL: "https://gateway.example/v1/chat/completions",
+                apiKey: "sk-test",
+                disableAutoRetry: true
+            ),
+            session: session
+        )
+        let fixture = try ModelFixture(
+            location: .remote,
+            providerID: ResponsesAPIModelProvider.providerID,
+            remoteDestination: "openai.responses:responses-api-key:fixture-model"
+        )
+        let prepared = try await AgentModelRequestPreparer().prepare(
+            provider: provider,
+            request: fixture.request,
+            context: fixture.context
+        )
+        let policy = TestApprovalPolicyEngine()
+        let auth = try await policy.bindLocalPolicy(
+            prepared: prepared.preparedRequest.externalOperation,
+            approvalID: ApprovalID(),
+            trustedRunAuthority: fixture.authority,
+            at: AgentTimestamp(rawValue: 1_000)
+        )
+        let authorized = AuthorizedAgentModelAttempt(
+            preparedAttempt: prepared,
+            request: try AuthorizedModelRequest(
+                request: fixture.request,
+                authorization: auth,
+                clock: FixedAuthorizationClock(),
+                policyValidator: policy,
+                attemptLedger: TestAttemptLedger()
+            )
+        )
+        let result = try await AgentModelExecutor().execute(provider: provider, authorized: authorized)
+        XCTAssertEqual(MockResponsesURLProtocol.requestCount, 1)
+        guard case .completed(let completion) = result.outcome,
+              case .finalAnswer(let answer) = completion.action
+        else {
+            return XCTFail("Expected successful completion, got \(result.outcome)")
+        }
+        XCTAssertEqual(answer.text?.count, largeContent.count)
+    }
+
 }

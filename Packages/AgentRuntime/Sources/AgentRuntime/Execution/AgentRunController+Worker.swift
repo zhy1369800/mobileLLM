@@ -886,13 +886,15 @@ extension AgentRunController {
             )
         } catch let error as AgentModelRuntimeError {
             _ = await arbiter.cancelDrainAndReleaseDecode(decodeLease)
-            if case .providerContractViolation = error {
+            if case .providerContractViolation(let contractError) = error {
+                let detail = String(describing: contractError)
                 try await commitMalformedModelAttempt(
                     runID: facts.projection.runID,
                     stepID: modelRequest.stepID,
                     reservation: reservation,
                     repairAlreadyAttempted: history.structuredRepairCount
-                        >= (facts.submission?.request.payload.budget.limits[.structuredRepairs] ?? 1)
+                        >= (facts.submission?.request.payload.budget.limits[.structuredRepairs] ?? 1),
+                    underlyingDetail: detail
                 )
                 return
             }
@@ -1265,7 +1267,8 @@ extension AgentRunController {
         runID: AgentRunID,
         stepID: AgentStepID,
         reservation: BudgetReservation,
-        repairAlreadyAttempted: Bool
+        repairAlreadyAttempted: Bool,
+        underlyingDetail: String? = nil
     ) async throws {
         let facts = try await repository.loadRunFacts(for: runID)
         guard let facts, let currentLedger = facts.budgetLedger else {
@@ -1304,10 +1307,11 @@ extension AgentRunController {
                 redaction: Self.publicRedaction
             )]
             if repairAlreadyAttempted {
+                let detailSuffix = underlyingDetail.map { ": \($0)" } ?? ""
                 let exhausted = try ExecutionFailureFactory.make(
                     reason: .internalFailure,
                     code: "execution.structured-repair-exhausted",
-                    message: "The model could not produce a valid structured action after the allowed repair attempts."
+                    message: "The model could not produce a valid structured action after the allowed repair attempts\(detailSuffix)."
                 )
                 let terminalStatus = try self.status(
                     after: builder,

@@ -488,10 +488,8 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                         )
                     }
                     if retried.text.count > parsed.text.count {
-                        try await emitter.emit(
-                            .answerDelta(String(retried.text.dropFirst(parsed.text.count))),
-                            responseBytes: 0
-                        )
+                        let diff = String(retried.text.dropFirst(parsed.text.count))
+                        try await Self.emitChunkedDelta(diff, emitter: emitter)
                     }
                     parsed = retried
                 }
@@ -547,10 +545,10 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
             // Non-streaming path emits the whole reasoning/answer after the request completes;
             // the streaming path already emitted them delta by delta.
             if !parsed.reasoning.isEmpty, emitReasoning {
-                try await emitter.emit(.reasoningDelta(parsed.reasoning), responseBytes: 0)
+                try await Self.emitChunkedDelta(parsed.reasoning, emitter: emitter, isReasoning: true)
             }
             if !parsed.text.isEmpty, emitStreamDeltas {
-                try await emitter.emit(.answerDelta(parsed.text), responseBytes: 0)
+                try await Self.emitChunkedDelta(parsed.text, emitter: emitter)
             }
         }
 
@@ -602,6 +600,49 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
             outcome: .completed(try AgentModelCompletion(action: action, usage: usage)),
             responseDigest: try await accounting.digest
         )
+    }
+
+    /// Emits text deltas in bounded UTF-8 chunks of at most `maxChunkBytes` (default 256 KiB),
+    /// ensuring large responses (e.g. base64 image data) never exceed the 1 MiB per-delta wire
+    /// contract ceiling without splitting multi-byte characters.
+    static func emitChunkedDelta(
+        _ text: String,
+        emitter: AgentModelBoundaryEmitter,
+        isReasoning: Bool = false,
+        maxChunkBytes: Int = 262_144
+    ) async throws {
+        guard !text.isEmpty, maxChunkBytes > 0 else { return }
+        if text.utf8.count <= maxChunkBytes {
+            try await emitter.emit(
+                isReasoning ? .reasoningDelta(text) : .answerDelta(text),
+                responseBytes: 0
+            )
+            return
+        }
+        var start = text.startIndex
+        while start < text.endIndex {
+            let utf8Start = start.samePosition(in: text.utf8) ?? text.utf8.startIndex
+            let targetUTF8 = text.utf8.index(
+                utf8Start,
+                offsetBy: maxChunkBytes,
+                limitedBy: text.utf8.endIndex
+            ) ?? text.utf8.endIndex
+            var end = targetUTF8.samePosition(in: text)
+            if end == nil {
+                var probe = targetUTF8
+                while probe > utf8Start, probe.samePosition(in: text) == nil {
+                    probe = text.utf8.index(before: probe)
+                }
+                end = probe.samePosition(in: text) ?? text.index(after: start)
+            }
+            let resolvedEnd = end! > start ? end! : text.index(after: start)
+            let chunk = String(text[start..<resolvedEnd])
+            try await emitter.emit(
+                isReasoning ? .reasoningDelta(chunk) : .answerDelta(chunk),
+                responseBytes: 0
+            )
+            start = resolvedEnd
+        }
     }
 
     // MARK: - Event-stream consumption
@@ -664,7 +705,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                 if case .string(let delta)? = event["delta"], !delta.isEmpty {
                     text += delta
                     if emit {
-                        try await emitter.emit(.answerDelta(delta), responseBytes: 0)
+                        try await Self.emitChunkedDelta(delta, emitter: emitter)
                     }
                 }
             case "response.function_call_arguments.delta":
@@ -811,7 +852,7 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                 if case .string(let value)? = delta["content"], !value.isEmpty {
                     text += value
                     if emit {
-                        try await emitter.emit(.answerDelta(value), responseBytes: 0)
+                        try await Self.emitChunkedDelta(value, emitter: emitter)
                     }
                 }
                 if case .array(let toolCalls)? = delta["tool_calls"] {
