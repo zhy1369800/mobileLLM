@@ -1777,6 +1777,23 @@ final class ResponsesAPIModelProviderTests: XCTestCase {
             return XCTFail("Expected failed outcome, got \(streamResult.outcome)")
         }
         XCTAssertFalse(failure.retryAdvice.automaticallyRetryable, "stream failure must not auto-retry when disabled")
+
+        // Transport timeout with disableAutoRetry must not fall through to providerRuntimeFailure (auto-retry)
+        MockResponsesURLProtocol.requestCount = 0
+        MockResponsesURLProtocol.handler = { _ in
+            MockResponsesURLProtocol.requestCount += 1
+            throw URLError(.timedOut)
+        }
+        let transportResult = try await AgentModelExecutor().execute(provider: provider, authorized: authorized)
+        XCTAssertEqual(MockResponsesURLProtocol.requestCount, 1, "disableAutoRetry must only send 1 request on timeout")
+        guard case .failed(let transportFailure) = transportResult.outcome else {
+            return XCTFail("Expected failed outcome on timeout, got \(transportResult.outcome)")
+        }
+        XCTAssertEqual(transportFailure.code, "model.online.transport")
+        XCTAssertFalse(
+            transportFailure.retryAdvice.automaticallyRetryable,
+            "transport failure must not auto-retry when disabled"
+        )
     }
 
 }

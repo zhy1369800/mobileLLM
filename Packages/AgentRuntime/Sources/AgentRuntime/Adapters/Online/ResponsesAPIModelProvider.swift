@@ -320,110 +320,124 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
                 boundedPayload = try JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys])
             }
             urlRequest.httpBody = boundedPayload
-            let (rawBytes, response) = try await session.bytes(for: urlRequest, delegate: ResponsesAPIRedirectBlocker.shared)
-            let bytes = AccountedResponseBytes(bytes: rawBytes, accounting: accounting)
-            try Task.checkCancellation()
-            let http = response as? HTTPURLResponse
-            guard http?.statusCode == 200 else {
+            do {
+                let (rawBytes, response) = try await session.bytes(for: urlRequest, delegate: ResponsesAPIRedirectBlocker.shared)
+                let bytes = AccountedResponseBytes(bytes: rawBytes, accounting: accounting)
+                try Task.checkCancellation()
+                let http = response as? HTTPURLResponse
+                guard http?.statusCode == 200 else {
+                    var data = Data()
+                    for try await byte in bytes { data.append(byte) }
+                    // Seamlessly fall back to chat/completions if a third-party gateway returns 404 or 405 for /responses
+                    if let status = http?.statusCode,
+                       (status == 404 || status == 405),
+                       allowDialectFallback,
+                       activeDialect == .responses {
+                        activeDialect = .deepSeekChatCompletions
+                        DialectCache.shared.remember(.deepSeekChatCompletions, for: configuration.baseURL)
+                        let fallbackBody = try body(for: activeDialect)
+                        return try await attempt(
+                            fallbackBody,
+                            allowEffortFallback: allowEffortFallback,
+                            allowAutoFallback: allowAutoFallback,
+                            allowDialectFallback: false,
+                            streamEmission: streamEmission
+                        )
+                    }
+                    // Some gateways reject the reasoning-effort field entirely (HTTP 400 mentioning
+                    // "reasoning"); retry once with the field omitted rather than failing the turn.
+                    if http?.statusCode == 400,
+                       let errorText = String(data: data, encoding: .utf8)
+                    {
+                        if allowEffortFallback,
+                           ["reasoning", "thinking"].contains(where: {
+                               errorText.localizedCaseInsensitiveContains($0)
+                           })
+                        {
+                            let fallbackBody = try body(omitReasoning: true)
+                            if fallbackBody != payload {
+                                return try await attempt(
+                                    fallbackBody,
+                                    allowEffortFallback: false,
+                                    allowAutoFallback: false,
+                                    allowDialectFallback: allowDialectFallback,
+                                    streamEmission: streamEmission
+                                )
+                            }
+                        }
+                        // Auto mode omits max_output_tokens; a gateway that REQUIRES the field rejects
+                        // with a token-limit message. Retry once with the runtime ceiling as the explicit
+                        // budget so the turn still works on strict services.
+                        if allowAutoFallback,
+                           ["max_output_tokens", "max_tokens", "output_tokens", "output limit"]
+                               .contains(where: { errorText.localizedCaseInsensitiveContains($0) })
+                        {
+                            let fallbackBody = try body(
+                                maxOutputTokensOverride: parameters.maximumOutputTokens
+                            )
+                            if fallbackBody != payload {
+                                return try await attempt(
+                                    fallbackBody,
+                                    allowEffortFallback: false,
+                                    allowAutoFallback: false,
+                                    allowDialectFallback: allowDialectFallback,
+                                    streamEmission: streamEmission
+                                )
+                            }
+                        }
+                    }
+                    throw AgentModelProviderFailure(
+                        try Self.httpFailure(
+                            status: http?.statusCode ?? -1,
+                            body: String(data: data, encoding: .utf8)
+                        )
+                    )
+                }
+                let contentType = (http?.value(forHTTPHeaderField: "Content-Type") ?? "")
+                    .lowercased()
+                if contentType.contains("text/event-stream") {
+                    let parsed = switch activeDialect {
+                    case .responses:
+                        try await Self.consumeEventStream(
+                            bytes,
+                            emitter: emitter,
+                            emitReasoning: emitReasoning,
+                            emit: streamEmission,
+                            disableAutoRetry: configuration.disableAutoRetry
+                        )
+                    case .deepSeekChatCompletions:
+                        try await Self.consumeChatCompletionsEventStream(
+                            bytes,
+                            emitter: emitter,
+                            emitReasoning: emitReasoning,
+                            emit: streamEmission,
+                            disableAutoRetry: configuration.disableAutoRetry
+                        )
+                    }
+                    try await accounting.record(parsed.usage)
+                    return (parsed, true, Data())
+                }
                 var data = Data()
                 for try await byte in bytes { data.append(byte) }
-                // Seamlessly fall back to chat/completions if a third-party gateway returns 404 or 405 for /responses
-                if let status = http?.statusCode,
-                   (status == 404 || status == 405),
-                   allowDialectFallback,
-                   activeDialect == .responses {
-                    activeDialect = .deepSeekChatCompletions
-                    DialectCache.shared.remember(.deepSeekChatCompletions, for: configuration.baseURL)
-                    let fallbackBody = try body(for: activeDialect)
-                    return try await attempt(
-                        fallbackBody,
-                        allowEffortFallback: allowEffortFallback,
-                        allowAutoFallback: allowAutoFallback,
-                        allowDialectFallback: false,
-                        streamEmission: streamEmission
-                    )
-                }
-                // Some gateways reject the reasoning-effort field entirely (HTTP 400 mentioning
-                // "reasoning"); retry once with the field omitted rather than failing the turn.
-                if http?.statusCode == 400,
-                   let errorText = String(data: data, encoding: .utf8)
-                {
-                    if allowEffortFallback,
-                       ["reasoning", "thinking"].contains(where: {
-                           errorText.localizedCaseInsensitiveContains($0)
-                       })
-                    {
-                        let fallbackBody = try body(omitReasoning: true)
-                        if fallbackBody != payload {
-                            return try await attempt(
-                                fallbackBody,
-                                allowEffortFallback: false,
-                                allowAutoFallback: false,
-                                allowDialectFallback: allowDialectFallback,
-                                streamEmission: streamEmission
-                            )
-                        }
-                    }
-                    // Auto mode omits max_output_tokens; a gateway that REQUIRES the field rejects
-                    // with a token-limit message. Retry once with the runtime ceiling as the explicit
-                    // budget so the turn still works on strict services.
-                    if allowAutoFallback,
-                       ["max_output_tokens", "max_tokens", "output_tokens", "output limit"]
-                           .contains(where: { errorText.localizedCaseInsensitiveContains($0) })
-                    {
-                        let fallbackBody = try body(
-                            maxOutputTokensOverride: parameters.maximumOutputTokens
-                        )
-                        if fallbackBody != payload {
-                            return try await attempt(
-                                fallbackBody,
-                                allowEffortFallback: false,
-                                allowAutoFallback: false,
-                                allowDialectFallback: allowDialectFallback,
-                                streamEmission: streamEmission
-                            )
-                        }
-                    }
-                }
-                throw AgentModelProviderFailure(
-                    try Self.httpFailure(
-                        status: http?.statusCode ?? -1,
-                        body: String(data: data, encoding: .utf8)
-                    )
-                )
-            }
-            let contentType = (http?.value(forHTTPHeaderField: "Content-Type") ?? "")
-                .lowercased()
-            if contentType.contains("text/event-stream") {
                 let parsed = switch activeDialect {
-                case .responses:
-                    try await Self.consumeEventStream(
-                        bytes,
-                        emitter: emitter,
-                        emitReasoning: emitReasoning,
-                        emit: streamEmission,
-                        disableAutoRetry: configuration.disableAutoRetry
-                    )
-                case .deepSeekChatCompletions:
-                    try await Self.consumeChatCompletionsEventStream(
-                        bytes,
-                        emitter: emitter,
-                        emitReasoning: emitReasoning,
-                        emit: streamEmission,
-                        disableAutoRetry: configuration.disableAutoRetry
-                    )
+                case .responses: try Self.parseResponse(data)
+                case .deepSeekChatCompletions: try Self.parseChatCompletion(data)
                 }
                 try await accounting.record(parsed.usage)
-                return (parsed, true, Data())
+                return (parsed, false, data)
+            } catch let error as AgentModelProviderFailure {
+                throw error
+            } catch let error as AgentContractError {
+                throw error
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as URLError where error.code == .cancelled && Task.isCancelled {
+                throw CancellationError()
+            } catch {
+                throw AgentModelProviderFailure(
+                    try Self.transportFailure(error, disableAutoRetry: configuration.disableAutoRetry)
+                )
             }
-            var data = Data()
-            for try await byte in bytes { data.append(byte) }
-            let parsed = switch activeDialect {
-            case .responses: try Self.parseResponse(data)
-            case .deepSeekChatCompletions: try Self.parseChatCompletion(data)
-            }
-            try await accounting.record(parsed.usage)
-            return (parsed, false, data)
         }
 
         let started = ContinuousClock.now
@@ -894,6 +908,41 @@ public final class ResponsesAPIModelProvider: AgentModelProvider, @unchecked Sen
     private static func streamFailure(_ message: String, disableAutoRetry: Bool = false) throws -> AgentFailure {
         try AgentFailure(
             code: "model.online.stream",
+            classification: disableAutoRetry ? .permanent : .transient,
+            safeMessage: message,
+            retryAdvice: disableAutoRetry
+                ? .never
+                : AgentRetryAdvice(
+                    automaticallyRetryable: true,
+                    maximumAdditionalAttempts: 1
+                ),
+            externalEffect: .confirmedNone,
+            requiredUserAction: .none,
+            redaction: RedactionMetadata(classification: .publicMetadata, policyVersion: 1)
+        )
+    }
+
+    private static func transportFailure(
+        _ error: Error,
+        disableAutoRetry: Bool = false
+    ) throws -> AgentFailure {
+        let message: String
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut:
+                message = "The online model request timed out."
+            case .notConnectedToInternet:
+                message = "No internet connection is available for the online model."
+            case .networkConnectionLost:
+                message = "The network connection to the online model was lost."
+            default:
+                message = "The online model network request failed (\(urlError.code.rawValue))."
+            }
+        } else {
+            message = "The online model network request failed."
+        }
+        return try AgentFailure(
+            code: "model.online.transport",
             classification: disableAutoRetry ? .permanent : .transient,
             safeMessage: message,
             retryAdvice: disableAutoRetry
