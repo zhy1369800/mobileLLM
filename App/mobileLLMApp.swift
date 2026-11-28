@@ -1225,7 +1225,7 @@ func makeAgentSnapshot(
         imageRefs: imageRefs,
         messages: historyMessages,
         systemPrompt: systemPrompt,
-        memoryFacts: container.chat.memoryBook?.facts ?? [],
+        memoryFacts: container.settings.memoryEnabled ? (container.chat.memoryBook?.facts ?? []) : [],
         activeSkill: conversation.activeSkillIDs.first.flatMap { container.chat.skillStore?.skill(id: $0) },
         activeSkills: conversation.activeSkillIDs.compactMap { container.chat.skillStore?.skill(id: $0) },
         model: identity.model,
