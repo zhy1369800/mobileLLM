@@ -42,12 +42,18 @@ struct KeyboardGuideReader: UIViewRepresentable {
             self.overlap = overlap
         }
 
-        func apply(lift: CGFloat) {
+        func apply(lift: CGFloat, animationDuration: Double = 0) {
             let target = max(0, lift)
             guard abs(overlap.wrappedValue - target) > 0.5 else { return }
             Task { @MainActor [weak self] in
                 guard let self, abs(self.overlap.wrappedValue - target) > 0.5 else { return }
-                self.overlap.wrappedValue = target
+                if animationDuration > 0.01 {
+                    withAnimation(.easeOut(duration: animationDuration)) {
+                        self.overlap.wrappedValue = target
+                    }
+                } else {
+                    self.overlap.wrappedValue = target
+                }
             }
         }
     }
@@ -58,8 +64,8 @@ struct KeyboardGuideReader: UIViewRepresentable {
 
     func makeUIView(context: Context) -> AnchorView {
         let coordinator = context.coordinator
-        return AnchorView { lift in
-            coordinator.apply(lift: lift)
+        return AnchorView { lift, duration in
+            coordinator.apply(lift: lift, animationDuration: duration)
         }
     }
 
@@ -71,11 +77,13 @@ struct KeyboardGuideReader: UIViewRepresentable {
     /// Transparent host view attached to `ChatDetailView`'s background.
     @MainActor
     final class AnchorView: UIView {
-        private let onHeight: (CGFloat) -> Void
+        private let onHeight: (CGFloat, Double) -> Void
         private var tracker: TrackerView?
         private var lastReportedLift: CGFloat = 0
+        private var notificationLift: CGFloat = 0
+        private var guideActive = false
 
-        init(onHeight: @escaping (CGFloat) -> Void) {
+        init(onHeight: @escaping (CGFloat, Double) -> Void) {
             self.onHeight = onHeight
             super.init(frame: .zero)
             isUserInteractionEnabled = false
@@ -88,14 +96,14 @@ struct KeyboardGuideReader: UIViewRepresentable {
             nc.addObserver(self, selector: #selector(sceneDidBecomeActive),
                            name: UIApplication.didBecomeActiveNotification, object: nil)
             // Keyboard notifications as layout-trigger fallback: the layout guide doesn't always call
-            // `layoutSubviews()` after sheet dismissals or programmatic `resignFirstResponder`. These
-            // observers simply poke the tracker so its next layout pass picks up the guide's new frame.
-            nc.addObserver(self, selector: #selector(keyboardFrameChanged),
+            // `layoutSubviews()` after sheet dismissals or programmatic `resignFirstResponder`.
+            nc.addObserver(self, selector: #selector(keyboardWillChangeFrame(_:)),
                            name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
-            nc.addObserver(self, selector: #selector(keyboardFrameChanged),
+            nc.addObserver(self, selector: #selector(keyboardWillHide(_:)),
                            name: UIResponder.keyboardWillHideNotification, object: nil)
             // Post-animation reconciliation: if `keyboardLayoutGuide` stalled (e.g. after a sheet or
-            // menu presentation), fall back to the notification's settled end frame and re-install the tracker.
+            // menu presentation), fall back to the notification's settled end frame without letting
+            // subsequent 0-height guide layouts clobber it.
             nc.addObserver(self, selector: #selector(keyboardDidChangeFrame(_:)),
                            name: UIResponder.keyboardDidChangeFrameNotification, object: nil)
             nc.addObserver(self, selector: #selector(keyboardDidHide),
@@ -110,6 +118,8 @@ struct KeyboardGuideReader: UIViewRepresentable {
         override func didMoveToWindow() {
             super.didMoveToWindow()
             if window == nil {
+                notificationLift = 0
+                guideActive = false
                 reportLift(0)
             }
             installTracker()
@@ -126,29 +136,62 @@ struct KeyboardGuideReader: UIViewRepresentable {
             pokeTracker()
         }
 
-        /// Force the tracker to re-measure the layout guide's current frame.
-        @objc private func keyboardFrameChanged() {
+        @objc private func keyboardWillChangeFrame(_ notification: Notification) {
+            if let lift = measuredNotificationLift(from: notification) {
+                if lift <= 0.5 {
+                    let wasFallback = !guideActive && lastReportedLift > 0.5
+                    notificationLift = 0
+                    guideActive = false
+                    if wasFallback {
+                        let duration = (notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
+                        reportLift(0, animationDuration: duration)
+                    }
+                } else if isTopPresentedContext() {
+                    if abs(notificationLift - lift) > 0.5 {
+                        guideActive = false
+                    }
+                    notificationLift = lift
+                }
+            }
+            pokeTracker()
+        }
+
+        @objc private func keyboardWillHide(_ notification: Notification) {
+            let wasFallback = !guideActive && lastReportedLift > 0.5
+            notificationLift = 0
+            guideActive = false
+            if wasFallback {
+                let duration = (notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
+                reportLift(0, animationDuration: duration)
+            }
             pokeTracker()
         }
 
         @objc private func keyboardDidChangeFrame(_ notification: Notification) {
             pokeTracker()
+            guard let lift = measuredNotificationLift(from: notification) else { return }
+            notificationLift = lift <= 0.5 ? 0 : lift
+            reconcileWithNotificationLift(lift)
+        }
+
+        @objc private func keyboardDidHide() {
+            notificationLift = 0
+            guideActive = false
+            pokeTracker()
+            reconcileWithNotificationLift(0)
+        }
+
+        private func measuredNotificationLift(from notification: Notification) -> CGFloat? {
             guard let window,
                   let endScreenFrame = (notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue
-            else { return }
+            else { return nil }
             let endInWindow = window.convert(endScreenFrame, from: nil)
-            let notifLift = KeyboardOverlapMath.netLift(
+            return KeyboardOverlapMath.netLift(
                 windowBounds: window.bounds,
                 keyboardFrameInWindow: endInWindow,
                 restingBottomInset: window.safeAreaInsets.bottom,
                 isHiding: false
             )
-            reconcileWithNotificationLift(notifLift)
-        }
-
-        @objc private func keyboardDidHide() {
-            pokeTracker()
-            reconcileWithNotificationLift(0)
         }
 
         private func reconcileWithNotificationLift(_ notifLift: CGFloat) {
@@ -159,9 +202,8 @@ struct KeyboardGuideReader: UIViewRepresentable {
                 return
             }
             guard isTopPresentedContext() else { return }
-            if abs(lastReportedLift - notifLift) > 1.0 {
+            if !guideActive || abs(lastReportedLift - notifLift) > 1.0 {
                 reportLift(notifLift)
-                installTracker()
             }
         }
 
@@ -171,14 +213,18 @@ struct KeyboardGuideReader: UIViewRepresentable {
             layoutIfNeeded()
         }
 
-        private func reportLift(_ lift: CGFloat) {
+        private func reportLift(_ lift: CGFloat, animationDuration: Double = 0) {
             lastReportedLift = max(0, lift)
-            onHeight(lastReportedLift)
+            onHeight(lastReportedLift, animationDuration)
         }
 
         private func handleGuideLift(_ lift: CGFloat) {
             if lift > 0.5 {
                 guard isTopPresentedContext() else { return }
+                guideActive = true
+            } else if notificationLift > 0.5 && !guideActive {
+                // Guide is stalled at 0 while notification confirms keyboard is up; keep fallback lift.
+                return
             }
             reportLift(lift)
         }
