@@ -82,6 +82,7 @@ struct KeyboardGuideReader: UIViewRepresentable {
         private var lastReportedLift: CGFloat = 0
         private var notificationLift: CGFloat = 0
         private var guideActive = false
+        private var fallbackTask: Task<Void, Never>?
 
         init(onHeight: @escaping (CGFloat, Double) -> Void) {
             self.onHeight = onHeight
@@ -118,6 +119,7 @@ struct KeyboardGuideReader: UIViewRepresentable {
         override func didMoveToWindow() {
             super.didMoveToWindow()
             if window == nil {
+                cancelFallbackTask()
                 notificationLift = 0
                 guideActive = false
                 reportLift(0)
@@ -139,6 +141,7 @@ struct KeyboardGuideReader: UIViewRepresentable {
         @objc private func keyboardWillChangeFrame(_ notification: Notification) {
             if let lift = measuredNotificationLift(from: notification) {
                 if lift <= 0.5 {
+                    cancelFallbackTask()
                     let wasFallback = !guideActive && lastReportedLift > 0.5
                     notificationLift = 0
                     guideActive = false
@@ -151,12 +154,15 @@ struct KeyboardGuideReader: UIViewRepresentable {
                         guideActive = false
                     }
                     notificationLift = lift
+                    let duration = (notification.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double) ?? 0.25
+                    scheduleFallbackLiftIfNeeded(keyboardAnimationDuration: duration)
                 }
             }
             pokeTracker()
         }
 
         @objc private func keyboardWillHide(_ notification: Notification) {
+            cancelFallbackTask()
             let wasFallback = !guideActive && lastReportedLift > 0.5
             notificationLift = 0
             guideActive = false
@@ -168,6 +174,7 @@ struct KeyboardGuideReader: UIViewRepresentable {
         }
 
         @objc private func keyboardDidChangeFrame(_ notification: Notification) {
+            cancelFallbackTask()
             pokeTracker()
             guard let lift = measuredNotificationLift(from: notification) else { return }
             notificationLift = lift <= 0.5 ? 0 : lift
@@ -175,10 +182,31 @@ struct KeyboardGuideReader: UIViewRepresentable {
         }
 
         @objc private func keyboardDidHide() {
+            cancelFallbackTask()
             notificationLift = 0
             guideActive = false
             pokeTracker()
             reconcileWithNotificationLift(0)
+        }
+
+        private func scheduleFallbackLiftIfNeeded(keyboardAnimationDuration: Double) {
+            cancelFallbackTask()
+            fallbackTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                guard let self, !Task.isCancelled else { return }
+                guard !self.guideActive,
+                      self.notificationLift > 0.5,
+                      self.isTopPresentedContext(),
+                      abs(self.lastReportedLift - self.notificationLift) > 1.0
+                else { return }
+                let remainingDuration = max(0.12, keyboardAnimationDuration - 0.05)
+                self.reportLift(self.notificationLift, animationDuration: remainingDuration)
+            }
+        }
+
+        private func cancelFallbackTask() {
+            fallbackTask?.cancel()
+            fallbackTask = nil
         }
 
         private func measuredNotificationLift(from notification: Notification) -> CGFloat? {
@@ -203,7 +231,7 @@ struct KeyboardGuideReader: UIViewRepresentable {
             }
             guard isTopPresentedContext() else { return }
             if !guideActive || abs(lastReportedLift - notifLift) > 1.0 {
-                reportLift(notifLift)
+                reportLift(notifLift, animationDuration: 0.12)
             }
         }
 
@@ -222,6 +250,7 @@ struct KeyboardGuideReader: UIViewRepresentable {
             if lift > 0.5 {
                 guard isTopPresentedContext() else { return }
                 guideActive = true
+                cancelFallbackTask()
             } else if notificationLift > 0.5 && !guideActive {
                 // Guide is stalled at 0 while notification confirms keyboard is up; keep fallback lift.
                 return
